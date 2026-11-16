@@ -68,4 +68,67 @@ final class InteractionUITests: XCTestCase {
         waitForExpectations(timeout: 5)
         record("real drag dismissed the keyboard", app: app)
     }
+
+    @MainActor
+    func testPlayerTopBarLeftSwipeReturnsAndReopensWithoutStealingControls() throws {
+        let app = app("player-swipe")
+        defer { app.terminate() }
+        let open = app.buttons["smoke.interaction.open-player"]
+        XCTAssertTrue(open.waitForExistence(timeout: 12))
+        open.tap()
+        let visible = app.staticTexts["smoke.interaction.player-visible"]
+        XCTAssertTrue(visible.waitForExistence(timeout: 5))
+        let bar = app.descendants(matching: .any).matching(identifier: "smoke.interaction.player-topbar").firstMatch
+        XCTAssertTrue(bar.waitForExistence(timeout: 5))
+
+        // Real horizontal interaction outside the gesture subtree must remain
+        // on the player. No synthetic callback establishes this assertion.
+        for identifier in ["smoke.interaction.player-progress", "smoke.interaction.player-volume"] {
+            let slider = app.sliders[identifier]
+            XCTAssertTrue(slider.exists)
+            let before = slider.value as? String
+            let start = slider.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            let end = slider.coordinate(withNormalizedOffset: CGVector(dx: 0.10, dy: 0.5))
+            start.press(forDuration: 0.05, thenDragTo: end)
+            XCTAssertTrue(visible.exists)
+            XCTAssertNotEqual(slider.value as? String, before, "The actual slider receives its drag")
+        }
+        let horizontal = app.scrollViews["smoke.interaction.player-horizontal"]
+        XCTAssertTrue(horizontal.exists)
+        horizontal.swipeLeft()
+        XCTAssertTrue(visible.exists)
+        let lyrics = app.scrollViews["smoke.interaction.player-lyrics"]
+        XCTAssertTrue(lyrics.exists)
+        let firstLine = app.staticTexts["smoke.interaction.scroll-lyric.0"]
+        XCTAssertTrue(firstLine.isHittable)
+        lyrics.swipeUp()
+        XCTAssertTrue(visible.exists)
+        XCTAssertFalse(firstLine.isHittable, "Vertical lyrics still scroll")
+        record("sliders horizontal content and vertical lyrics keep their own gestures", app: app)
+
+        let start = bar.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5))
+        let end = bar.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.5))
+        start.press(forDuration: 0.05, thenDragTo: end)
+        XCTAssertTrue(open.waitForExistence(timeout: 5))
+        expectation(for: NSPredicate(format: "label == %@", "Closed: 1"),
+                    evaluatedWith: app.staticTexts["smoke.interaction.player-close-count"])
+        waitForExpectations(timeout: 5)
+        XCTAssertEqual(app.staticTexts["smoke.interaction.player-binding"].label, "Player binding: false")
+        XCTAssertEqual(app.staticTexts["smoke.interaction.player-close-count"].label, "Closed: 1")
+        record("left swipe returns with the presentation binding cleared", app: app)
+        open.tap()
+        XCTAssertTrue(visible.waitForExistence(timeout: 5), "The same original opener must work again")
+
+        // The previous top-bar downward close remains available after reopening.
+        let downStart = bar.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25))
+        let downEnd = downStart.withOffset(CGVector(dx: 0, dy: 140))
+        downStart.press(forDuration: 0.05, thenDragTo: downEnd)
+        XCTAssertTrue(open.waitForExistence(timeout: 5))
+        expectation(for: NSPredicate(format: "label == %@", "Closed: 2"),
+                    evaluatedWith: app.staticTexts["smoke.interaction.player-close-count"])
+        waitForExpectations(timeout: 5)
+        XCTAssertEqual(app.staticTexts["smoke.interaction.player-binding"].label, "Player binding: false")
+        XCTAssertEqual(app.staticTexts["smoke.interaction.player-close-count"].label, "Closed: 2")
+        record("reopened player preserves its original downward close", app: app)
+    }
 }

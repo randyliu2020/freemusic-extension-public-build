@@ -89,6 +89,8 @@ jobs:
           python3 test_package_extension.py -v
           python3 test_signing_identity.py
           python3 test_verify_interaction_result.py
+          python3 -m pip install --quiet capstone==5.0.6 unicorn==2.1.4 keystone-engine==0.9.2
+          python3 test_player_swipe_patch.py -v
 
       - name: Compile iOS device extension
         if: ${{ !cancelled() }}

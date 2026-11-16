@@ -180,7 +180,7 @@ static NSMutableURLRequest *StreamRequest(NSString *query, NSString *body) {
     return request;
 }
 
-static NSDictionary *FetchWithConfiguration(NSURLRequest *request, NSURLSessionConfiguration *configuration) {
+static NSDictionary *FetchWithConfigurationAndWait(NSURLRequest *request, NSURLSessionConfiguration *configuration, NSTimeInterval wait) {
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
     __block NSDictionary *result;
     NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration];
@@ -191,10 +191,14 @@ static NSDictionary *FetchWithConfiguration(NSURLRequest *request, NSURLSessionC
         dispatch_semaphore_signal(done);
     }];
     [task resume];
-    BOOL completed = dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 5*NSEC_PER_SEC)) == 0;
+    BOOL completed = dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(wait*NSEC_PER_SEC))) == 0;
     [session invalidateAndCancel];
     Check(completed, @"NSURLSession loopback completes without external network");
     return result ?: @{};
+}
+
+static NSDictionary *FetchWithConfiguration(NSURLRequest *request, NSURLSessionConfiguration *configuration) {
+    return FetchWithConfigurationAndWait(request, configuration, 5);
 }
 
 static NSDictionary *Fetch(NSURLRequest *request) {
@@ -296,6 +300,81 @@ static void RunLXMCImportTests(void) {
 - (NSInteger)read:(uint8_t *)buffer maxLength:(NSUInteger)length { return 0; }
 - (NSError *)streamError { return nil; }
 @end
+
+static void RunParseBudgetTests(void) {
+    __block NSUInteger calls = 0;
+    __block NSError *cleanupReason;
+    __block FMXProtocolCompletion heldCompletion;
+    dispatch_semaphore_t started = dispatch_semaphore_create(0);
+    dispatch_semaphore_t cleaned = dispatch_semaphore_create(0);
+    [FMExtensionProtocol setParseHandler:^FMXParseCancellation(NSURLRequest *request, NSDictionary *parameters, FMXProtocolCompletion complete) {
+        calls++;
+        Check(request.HTTPBodyStream == nil && [parameters[@"server"] isEqual:@"qq"], @"QQ budget fixture reaches handler with retained native request");
+        if ([parameters[@"id"] isEqual:@"fixture-long"]) {
+            Check(request.timeoutInterval == 30, @"Extension does not extend the original 30-second request timeout");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 28*NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_DEFAULT,0), ^{
+                complete(@{@"code":@200,@"data":@{@"url":@"https://example.invalid/fixture.mp3",@"quality":@"128k"}}, nil);
+            });
+        } else heldCompletion = complete;
+        dispatch_semaphore_signal(started);
+        return ^(NSError *reason) { cleanupReason=reason; dispatch_semaphore_signal(cleaned); };
+    } canHandle:^BOOL(NSURLRequest *request, NSDictionary *parameters) {
+        return [parameters[@"server"] isEqual:@"qq"] && ![parameters[@"qmc"] isEqual:@"1"];
+    }];
+
+    unsigned beforeOrigin = atomic_load(&originRequests);
+    NSMutableURLRequest *longRequest = StreamRequest(@"action=parse", @"server=qq&id=fixture-long&level=qq_standard");
+    longRequest.timeoutInterval = 30;
+    NSTimeInterval begin = NSProcessInfo.processInfo.systemUptime;
+    NSDictionary *result = FetchWithConfigurationAndWait(longRequest, NSURLSessionConfiguration.defaultSessionConfiguration, 32);
+    Check([result[@"status"] integerValue] == 200 && [result[@"json"][@"code"] integerValue] == 200 && [result[@"json"][@"data"][@"url"] != nil,
+          @"Actual NSURLSession accepts a 28-second anonymous resolution beyond the old 20-second cap");
+    Check(NSProcessInfo.processInfo.systemUptime-begin >= 27.5 && calls == 1 && cleanupReason == nil,
+          @"Delayed resolution completes once with successful cleanup");
+    Check(atomic_load(&originRequests) == beforeOrigin, @"Delayed supported QQ request never reaches the native backend");
+    while (dispatch_semaphore_wait(started, DISPATCH_TIME_NOW) == 0) {}
+    while (dispatch_semaphore_wait(cleaned, DISPATCH_TIME_NOW) == 0) {}
+
+    // A larger parser cap cannot override an explicitly short native request.
+    NSMutableURLRequest *shortRequest = StreamRequest(@"action=parse", @"server=qq&id=fixture-short&level=qq_standard");
+    shortRequest.timeoutInterval = 0.2;
+    FMXTestClient *shortClient = FMXTestClient.new;
+    FMExtensionProtocol *shortProtocol = [[FMExtensionProtocol alloc] initWithRequest:shortRequest cachedResponse:nil client:shortClient];
+    [shortProtocol startLoading];
+    Check(dispatch_semaphore_wait(shortClient.done,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC))==0 && shortClient.error.code==NSURLErrorTimedOut,
+          @"Explicit short QQ request deadline still expires promptly");
+    Check(cleanupReason.code==NSURLErrorTimedOut && shortClient.completions==1,@"Short parse deadline reaches cleanup exactly once as timeout");
+    if(heldCompletion)heldCompletion(@{@"code":@200,@"data":@{@"url":@"https://example.invalid/late.mp3"}},nil);
+    Check(dispatch_semaphore_wait(shortClient.done,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC/20))!=0 && shortClient.completions==1,
+          @"Timed-out parse ignores late URL completion");
+    heldCompletion=nil;
+    while (dispatch_semaphore_wait(started, DISPATCH_TIME_NOW) == 0) {}
+    while (dispatch_semaphore_wait(cleaned, DISPATCH_TIME_NOW) == 0) {}
+
+    NSMutableURLRequest *cancelRequest = StreamRequest(@"action=parse", @"server=qq&id=fixture-cancel&level=qq_standard");
+    cancelRequest.timeoutInterval=30;
+    FMXTestClient *cancelClient=FMXTestClient.new;
+    FMExtensionProtocol *cancelProtocol=[[FMExtensionProtocol alloc] initWithRequest:cancelRequest cachedResponse:nil client:cancelClient];
+    [cancelProtocol startLoading];
+    Check(dispatch_semaphore_wait(started,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC))==0,@"QQ parse starts before cancellation");
+    [cancelProtocol stopLoading];
+    Check(dispatch_semaphore_wait(cleaned,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC))==0 && cleanupReason.code==NSURLErrorCancelled,
+          @"Client cancellation remains immediate and distinct from timeout");
+    if(heldCompletion)heldCompletion(@{@"code":@200,@"data":@{@"url":@"https://example.invalid/late.mp3"}},nil);
+    Check(dispatch_semaphore_wait(cancelClient.done,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC/20))!=0 && cancelClient.completions==0,
+          @"Cancelled QQ request cannot publish a late playback URL");
+    heldCompletion=nil;
+
+    NSString *encryptedBody=@"server=qq&id=fixture-qmc&level=lossless&qmc=1";
+    NSUInteger beforeCalls=calls;
+    NSDictionary *forwarded=Fetch(StreamRequest(@"action=parse&echo_status=207",encryptedBody));
+    NSDictionary *echo=[forwarded[@"json"] isKindOfClass:NSDictionary.class]?forwarded[@"json"]:@{};
+    Check([forwarded[@"status"] integerValue]==207 && [echo[@"body"] isEqual:encryptedBody] &&
+          [echo[@"headers"][@"cookie"] isEqual:@"fixture_cookie=local_only"] &&
+          [echo[@"headers"][@"authorization"] isEqual:@"Bearer fixture-local-only"] && calls==beforeCalls,
+          @"Predicate-rejected QMC request keeps its exact original body/auth and bypasses JS without quality rewriting");
+    [FMExtensionProtocol setParseHandler:nil canHandle:nil];
+}
 
 static void RunKugouTests(NSDictionary *fixtures, BOOL hasLoopback) {
     __block BOOL supported = YES;
@@ -502,6 +581,7 @@ int main(int argc, const char *argv[]) {
         }
 
         RunKugouTests(fixtures, listener >= 0);
+        if (listener >= 0) RunParseBudgetTests();
         if (listener >= 0) RunLXMCImportTests();
 
         // Direct lifecycle checks keep custom waiting streams outside Foundation's own upload reader.

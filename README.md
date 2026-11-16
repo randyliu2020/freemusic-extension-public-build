@@ -1,4 +1,4 @@
-# FreeMusic 4.2.7 extension — v3 incremental update
+# FreeMusic 4.2.7 extension — v4 incremental update
 
 Source-only build for a user-authorized modification of FreeMusic-Folia 4.2.7.
 This repository does not contain the original application, signing identities,
@@ -31,6 +31,21 @@ No membership, authentication, DRM or account checks are modified.
 This is an experimental binary extension, not recovered original source code.
 Compilation/fixture success does not prove that a re-signed IPA launches or that
 network interception works on an iPhone. Device validation is required.
+
+## V4 additions
+
+- Listening insights remains in Settings → 音源与扩展 → 听歌画像. The original
+  profile Settings gear is preserved; the extra profile toolbar button is removed.
+- The original player top handle/title gestures also accept a left swipe, using
+  the original SwiftUI dismissal/binding. Original downward dismissal is retained.
+  Lyrics and playback/volume controls do not gain a full-screen competing gesture.
+- Music URL resolution allows the source's normal main/backup request sequence;
+  the host's shorter request timeout still takes precedence. Settings reports
+  whether JS actually returned a URL, without recording song IDs or credentials.
+  This does not establish that a server returned full audio rather than a preview.
+
+Package v4 with `--v3-changes --player-left-swipe`. Original IPA tests run locally;
+the cloud receives only extension and anonymous test source.
 
 ## V3 additions
 

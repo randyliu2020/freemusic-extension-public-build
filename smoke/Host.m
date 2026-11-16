@@ -14,6 +14,8 @@
 @interface FMXManager : NSObject
 @property(atomic,strong) LXSourceRuntime *runtime;
 @property(atomic,copy) NSString *status;
+@property(atomic,copy) NSString *playbackStatus;
+@property(nonatomic,copy) NSString *playbackRequest;
 @property(nonatomic,copy) NSString *selectedFile;
 + (instancetype)shared;
 - (NSURL *)directory;
@@ -467,9 +469,11 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
     NSTimeInterval elapsed=NSProcessInfo.processInfo.systemUptime-start;
     if(cancel) {
         Check(Until(^BOOL{return manager.runtime==runtime && runtime.manifest!=nil && [manager.selectedFile isEqual:@"SmokeFixture.js"] && [[NSUserDefaults.standardUserDefaults objectForKey:@"FMX.selectedSource"] isEqual:@"SmokeFixture.js"];},3),@"Ordinary cancellation keeps source enabled and selected");
+        __block NSUInteger stable=0;
+        Check(Until(^BOOL{stable=[manager.playbackStatus isEqual:@"网易云：本次 JS 解析已取消"]?stable+1:0;return stable>=4;},3),@"Client cancellation remains visible after the runtime cancellation completion");
     } else {
-        Check(Until(^BOOL{return manager.runtime==nil && runtime.manifest==nil && manager.selectedFile==nil && [NSUserDefaults.standardUserDefaults objectForKey:@"FMX.selectedSource"]==nil;},3),@"Short request timeout discards runtime and clears current and saved selection");
-        Check(elapsed<3,@"Short request timeout must not wait for the inner 15-second runtime deadline");
+        Check(Until(^BOOL{return manager.runtime==nil && runtime.manifest==nil && manager.selectedFile==nil && manager.playbackStatus==nil && manager.playbackRequest==nil && [NSUserDefaults.standardUserDefaults objectForKey:@"FMX.selectedSource"]==nil;},3),@"Short request timeout discards runtime and clears selection and playback diagnostics");
+        Check(elapsed<3,@"Short request timeout must not wait for the inner 35-second runtime deadline");
         __block BOOL explained=NO;Main(^{explained=[manager.status containsString:@"超时"] && [manager.status containsString:@"停用"];});Check(explained,@"Manager explains why timeout disabled the source");
     }
     return @{@"request_timeout_seconds":@(budget),@"elapsed_seconds":@(elapsed),@"native_error_domain":failure.domain,@"native_error_code":@(failure.code),@"callback_count":@(callbacks),@"source_kept_enabled":@(cancel),@"real_network_used":@NO};
@@ -488,6 +492,15 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
     Class protocol=NSClassFromString(@"FMExtensionProtocol");
     NSArray *classes=configuration.protocolClasses;
     Check([classes containsObject:protocol] && [classes containsObject:SmokeDenyNetwork.class] && [classes indexOfObject:protocol]<[classes indexOfObject:SmokeDenyNetwork.class],@"Production interceptor precedes deny-all fixture");
+    __block FMXManager *manager;__block NSString *previousStatus,*previousRequest;
+    Main(^{manager=[(id)NSClassFromString(@"FMXManager") shared];previousStatus=manager.playbackStatus;previousRequest=manager.playbackRequest;});
+    Check([(id)protocol canInitWithRequest:request],@"Standard fixture route can actually be handled");
+    __block BOOL probeChanged=NO;
+    Main(^{probeChanged=!(manager.playbackStatus==previousStatus || [manager.playbackStatus isEqual:previousStatus]) || !(manager.playbackRequest==previousRequest || [manager.playbackRequest isEqual:previousRequest]);});
+    Check(!probeChanged,@"Capability probing must not claim that a JS playback request started");
+    __block NSMutableArray<NSString *> *observedStatuses=NSMutableArray.array;__block id observer;
+    Main(^{observer=[NSNotificationCenter.defaultCenter addObserverForName:@"FMX.changed" object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification){if(manager.playbackStatus)[observedStatuses addObject:manager.playbackStatus];}];});
+    @try {
     NSURLSession *session=[NSURLSession sessionWithConfiguration:configuration];
     dispatch_semaphore_t done=dispatch_semaphore_create(0);
     __block NSDictionary *payload=nil; __block NSError *failure=nil;
@@ -502,7 +515,18 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
     NSString *expected=[NSString stringWithFormat:@"https://fixture.invalid/%@/%@/128k",source,identifier];
     NSString *actual=kugou ? payload[@"url"] : payload[@"data"][@"url"];
     Check([actual isEqual:expected],@"LX source/id/quality mapping");
-    return @{@"server":server,@"mapped_source":source,@"url":expected,@"external_network_used":@NO};
+    NSString *label=@{@"wy":@"网易云",@"qq":@"QQ",@"kg":@"酷狗"}[server];
+    NSString *expectedStatus=[label stringByAppendingString:@"：JS 已返回播放地址，时长由音源提供"];
+    __block NSUInteger stable=0;
+    Check(Until(^BOOL{stable=[manager.playbackStatus isEqual:expectedStatus]?stable+1:0;return stable>=4;},3),@"Successful JS parsing remains reported as returned URL after protocol cleanup");
+    __block NSArray<NSString *> *statuses;__block NSString *status;
+    Main(^{statuses=observedStatuses.copy;status=manager.playbackStatus;});
+    Check([statuses containsObject:[label stringByAppendingString:@"：正在通过 JS 解析"]],@"Actual handler invocation produces the parsing state");
+    Check([statuses containsObject:expectedStatus],@"Actual returned URL produces a platform-specific result state");
+    for(NSString *entry in statuses) for(NSString *privateValue in @[identifier,expected,@"fixture.invalid",@"http://",@"https://",@"FIXTURE_NOT_FOR_SCRIPT"])
+        Check(![entry containsString:privateValue],@"Playback diagnostics must not disclose fixture identifiers, URLs, or credentials");
+    return @{@"server":server,@"mapped_source":source,@"url":expected,@"playback_status":status,@"observed_playback_states":statuses,@"capability_probe_does_not_record_playback":@YES,@"playback_diagnostics_redacted":@YES,@"external_network_used":@NO};
+    } @finally {Main(^{if(observer)[NSNotificationCenter.defaultCenter removeObserver:observer];});}
 }
 - (NSDictionary *)fourSourceSearch {
     NSArray *(*configurationKeys)(void)=(NSArray*(*)(void))dlsym(self.extensionHandle,"FMXQishuiConfigurationKeys");
@@ -946,7 +970,9 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
             NSError *error=nil;Check([source writeToURL:[directory URLByAppendingPathComponent:@"SmokeFixture.js"] atomically:YES encoding:NSUTF8StringEncoding error:&error],error.localizedDescription);
             Main(^{[manager activate:@{@"file":@"SmokeFixture.js",@"name":@"Self-authored smoke fixture"}];});
             Check(Until(^BOOL{return manager.runtime.manifest[@"sources"][@"wy"] && manager.runtime.manifest[@"sources"][@"tx"];},15),manager.status);
-            return @{@"source_script":@"self-authored",@"no_imported_source_executed":@YES};
+            __block BOOL noPlayback=NO;Main(^{noPlayback=manager.playbackStatus==nil && manager.playbackRequest==nil;});
+            Check(noPlayback,@"Enabling a source does not claim an actual JS playback request occurred");
+            return @{@"source_script":@"self-authored",@"no_imported_source_executed":@YES,@"no_playback_record_before_first_request":@YES};
         }];
         [self test:@"native_protocol_to_LX_wy" body:^NSDictionary *{return [self parseServer:@"wy"];}];
         [self test:@"native_protocol_to_LX_qq_to_tx" body:^NSDictionary *{return [self parseServer:@"qq"];}];
@@ -978,8 +1004,8 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
             return @{@"displayed_route":@"QQ",@"status":status};
         }];
         [self test:@"disable_clears_runtime_and_saved_selection" body:^NSDictionary *{
-            __block BOOL clean=NO;Main(^{FMXManager *manager=[(id)NSClassFromString(@"FMXManager") shared];[manager disable];clean=manager.runtime==nil && [NSUserDefaults.standardUserDefaults objectForKey:@"FMX.selectedSource"]==nil;});
-            Check(clean,@"Manager disable must clear runtime and remembered source");return nil;
+            __block BOOL clean=NO;Main(^{FMXManager *manager=[(id)NSClassFromString(@"FMXManager") shared];[manager disable];clean=manager.runtime==nil && manager.playbackStatus==nil && manager.playbackRequest==nil && [NSUserDefaults.standardUserDefaults objectForKey:@"FMX.selectedSource"]==nil;});
+            Check(clean,@"Manager disable must clear runtime, remembered source, and playback diagnostics");return nil;
         }];
         [self test:@"square_and_portrait_previews" body:^NSDictionary *{
             CheckUpright(cover.CGImage);
@@ -1008,12 +1034,12 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
 - (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)options {
     self.window=[[UIWindow alloc] initWithWindowScene:(UIWindowScene*)scene];
     NSArray *arguments=NSProcessInfo.processInfo.arguments;
-    BOOL lyricFixture=[arguments containsObject:@"--ui-fixture=lyrics"],searchFixture=[arguments containsObject:@"--ui-fixture=swiftui-search"];
-    if(lyricFixture||searchFixture) {
+    BOOL lyricFixture=[arguments containsObject:@"--ui-fixture=lyrics"],searchFixture=[arguments containsObject:@"--ui-fixture=swiftui-search"],playerSwipeFixture=[arguments containsObject:@"--ui-fixture=player-swipe"];
+    if(lyricFixture||searchFixture||playerSwipeFixture) {
         NSString *frameworks=NSBundle.mainBundle.privateFrameworksPath;
         void *extension=dlopen([[frameworks stringByAppendingPathComponent:@"FMExtension.dylib"] fileSystemRepresentation],RTLD_NOW|RTLD_GLOBAL);
         void *fixture=dlopen([[frameworks stringByAppendingPathComponent:@"SmokeSettingsFixture.dylib"] fileSystemRepresentation],RTLD_NOW|RTLD_GLOBAL);
-        void *(*factory)(void)=fixture?(void*(*)(void))dlsym(fixture,lyricFixture?"FMInteractionMakeLyricFixture":"FMInteractionMakeSwiftUISearchFixture"):NULL;
+        void *(*factory)(void)=fixture?(void*(*)(void))dlsym(fixture,lyricFixture?"FMInteractionMakeLyricFixture":playerSwipeFixture?"FMInteractionMakePlayerSwipeFixture":"FMInteractionMakeSwiftUISearchFixture"):NULL;
         NSAssert(extension&&factory,@"UI-test fixture libraries load");
         self.window.rootViewController=CFBridgingRelease(factory());[self.window makeKeyAndVisible];
         void (*install)(void)=(void(*)(void))dlsym(extension,"FMInteractionInstall");if(install)install();

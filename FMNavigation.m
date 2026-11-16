@@ -28,20 +28,7 @@ static NSUInteger FMNVisionLastExactTitles,FMNVisionLastNormalizedTitles;
 static float FMNVisionLastTitleConfidence;
 static NSString *FMNListDelegateClass=@"";
 static BOOL FMNShouldSelectImplemented,FMNDidSelectImplemented,FMNPrimaryImplemented,FMNSelectionAllowed,FMNSelectionDelivered,FMNPrimaryDelivered;
-static char FMNApplyingKey, FMNProfileItemKey, FMNProfileTargetKey, FMNProfileGroupKey;
-static void (^FMNProfileAction)(UIViewController *);
-static NSHashTable<UIViewController *> *FMNProfileOwners;
-
-@interface FMNProfileTarget : NSObject
-@property(nonatomic,weak) UIViewController *controller;
-- (void)open:(id)sender;
-@end
-@implementation FMNProfileTarget
-- (void)open:(id)sender {
-    UIViewController *controller=self.controller;
-    if(controller && controller.view.window && !controller.presentedViewController && FMNProfileAction)FMNProfileAction(controller);
-}
-@end
+static char FMNApplyingKey;
 
 static NSString *FMNText(id value) {
     return [value isKindOfClass:NSString.class] ? [value stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] : @"";
@@ -355,53 +342,6 @@ static void FMNFinishStartup(NSString *state) {
     FMNFinished=YES;FMNStartupState=state;
     if(FMNActiveVisionRequest){FMNVisionCancelled=YES;[FMNActiveVisionRequest cancel];}
 }
-static void FMNProfileEntry(UITabBarController *controller) {
-    if(!FMNProfileAction)return;
-    NSDictionary *roles=FMNRecognizeTabs(controller); if(!roles)return;
-    if(@available(iOS 18.0,*))if(controller.selectedTab!=roles[@"profile"])return;
-    UINavigationController *navigation=FMNVisibleNavigation(controller.selectedViewController,0);
-    UIViewController *profile=navigation.topViewController;
-    if(!profile || !profile.isViewLoaded || !profile.view.window || profile.presentedViewController ||
-       !FMNRole(profile.navigationItem.title?:profile.title,@"profile"))return;
-    UIBarButtonItem *item=objc_getAssociatedObject(profile,&FMNProfileItemKey);
-    if(!item) {
-        FMNProfileTarget *target=FMNProfileTarget.new;target.controller=profile;
-        item=[[UIBarButtonItem alloc] initWithTitle:@"画像" style:UIBarButtonItemStylePlain target:target action:@selector(open:)];
-        item.accessibilityLabel=@"听歌画像";item.accessibilityIdentifier=@"FMX.profileInsights";
-        objc_setAssociatedObject(item,&FMNProfileTargetKey,target,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(profile,&FMNProfileItemKey,item,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        UIBarButtonItemGroup *group=[[UIBarButtonItemGroup alloc] initWithBarButtonItems:@[item] representativeItem:nil];
-        objc_setAssociatedObject(profile,&FMNProfileGroupKey,group,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        if(!FMNProfileOwners)FMNProfileOwners=NSHashTable.weakObjectsHashTable;
-        [FMNProfileOwners addObject:profile];
-    }
-    if(@available(iOS 16.0,*)) {
-        NSArray<UIBarButtonItemGroup *> *groups=profile.navigationItem.trailingItemGroups;
-        if(groups.count || profile.navigationItem.rightBarButtonItems.count==0) {
-            UIBarButtonItemGroup *group=objc_getAssociatedObject(profile,&FMNProfileGroupKey);
-            if(![groups containsObject:group])profile.navigationItem.trailingItemGroups=[(groups?:@[]) arrayByAddingObject:group];
-            return; // Never overwrite SwiftUI-owned groups with the legacy rightBarButtonItems property.
-        }
-    }
-    NSMutableArray *items=[profile.navigationItem.rightBarButtonItems mutableCopy]?:NSMutableArray.array;
-    if(![items containsObject:item]) { [items addObject:item];profile.navigationItem.rightBarButtonItems=items; }
-}
-void FMNavigationSetProfileAction(void (^action)(UIViewController *)) {
-    if(!NSThread.isMainThread) { dispatch_async(dispatch_get_main_queue(),^{FMNavigationSetProfileAction(action);});return; }
-    FMNProfileAction=[action copy];
-    if(!action)for(UIViewController *owner in FMNProfileOwners) {
-        UIBarButtonItem *item=objc_getAssociatedObject(owner,&FMNProfileItemKey);
-        if(@available(iOS 16.0,*)) {
-            UIBarButtonItemGroup *group=objc_getAssociatedObject(owner,&FMNProfileGroupKey);
-            NSMutableArray *groups=[owner.navigationItem.trailingItemGroups mutableCopy];
-            if([groups containsObject:group]) { [groups removeObjectIdenticalTo:group];owner.navigationItem.trailingItemGroups=groups;continue; }
-            if(groups.count)continue;
-        }
-        NSMutableArray *items=[owner.navigationItem.rightBarButtonItems mutableCopy];
-        if([items containsObject:item]) { [items removeObjectIdenticalTo:item];owner.navigationItem.rightBarButtonItems=items; }
-    }
-    FMNavigationRefresh();
-}
 static void FMNTryStartup(UITabBarController *controller) {
     if(FMNFinished || !controller.view.window || controller.presentedViewController)return;
     NSDictionary *roles=FMNRecognizeTabs(controller); if(!roles)return;
@@ -443,7 +383,7 @@ static void FMNVisit(UIViewController *controller,NSUInteger depth) {
     if(controller.presentedViewController) { FMNVisit(controller.presentedViewController,depth+1);return; }
     if([controller isKindOfClass:UITabBarController.class]) {
         UITabBarController *tabs=(UITabBarController *)controller;
-        if(FMNavigationConfigureTabController(tabs)) { FMNRecognizedControllers++; FMNTryStartup(tabs); FMNProfileEntry(tabs); }
+        if(FMNavigationConfigureTabController(tabs)) { FMNRecognizedControllers++; FMNTryStartup(tabs); }
     }
     for(UIViewController *child in controller.childViewControllers)FMNVisit(child,depth+1);
 }

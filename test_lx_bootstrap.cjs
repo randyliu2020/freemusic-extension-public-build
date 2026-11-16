@@ -33,6 +33,73 @@ function harness() {
   return {context,run,events,requests,cancelled,resolved,timers};
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
+// Independently authored authentication/failover fixture. No downloaded source,
+// real endpoint, credential, or host network is evaluated by this test.
+async function authenticatedQQFixture() {
+  function source() {
+    const h = harness();
+    h.run(`
+      const call = (path, headers={}) => new Promise((resolve,reject) => {
+        const attempt = host => lx.request('https://' + host + '.invalid/' + path,
+          {method:'GET',timeout:path==='session'?6000:8000,headers},
+          (error,response) => {
+            if ((error || response.statusCode >= 500) && host==='first') return attempt('second');
+            if (error) return reject(error);
+            const body = typeof response.body==='string' ? JSON.parse(response.body) : response.body;
+            resolve(body);
+          });
+        attempt('first');
+      });
+      const session = call('session').then(body => {
+        if (!body.session) throw Error('fixture session unavailable');
+        return body.session;
+      });
+      lx.on('request',async ({source,action,info}) => {
+        if(source!=='tx'||action!=='musicUrl'||!info.musicInfo.songmid) throw Error('fixture request shape');
+        const key = await session;
+        const body = await call('track?mid='+encodeURIComponent(info.musicInfo.songmid)+'&quality='+info.type,
+          {'X-Fixture-Session':key});
+        if(body.code!==200||!body.url) throw Error(body.message||'fixture no media');
+        return body.url;
+      });
+      lx.send('inited',{sources:{tx:{type:'music',actions:['musicUrl','lyric','pic'],qualitys:['128k','320k','flac','hires']}}});
+    `);
+    return h;
+  }
+  const payload = JSON.stringify({source:'tx',action:'musicUrl',info:{type:'128k',musicInfo:{songmid:'anonymous_mid'}}});
+  function done(h,index,body,statusCode=200,error='') {
+    const request=h.requests[index]; assert.ok(request,'expected pending fixture request');
+    h.context.__LXHTTPDone(request.id,error,JSON.stringify({statusCode,headers:{},body}));
+  }
+  const h=source();
+  h.context.__LXResolve('a',payload);h.context.__LXResolve('b',payload);await tick();
+  assert.equal(h.requests.length,1,'initializing and simultaneous requests share one pending session');
+  assert.equal(h.requests[0].options.timeout,6000);
+  done(h,0,{session:'anonymous-fixture-session'});await tick();
+  assert.equal(h.requests.length,3);
+  assert.equal(h.requests[1].options.timeout,8000);
+  assert.equal(h.requests[1].options.headers['X-Fixture-Session'],'anonymous-fixture-session');
+  assert.equal(h.requests[1].url,'https://first.invalid/track?mid=anonymous_mid&quality=128k');
+  done(h,1,{code:200,url:'https://media.invalid/full-length.mp3'});
+  done(h,2,JSON.stringify({code:403,message:'fixture verification required'}));await tick();
+  assert.deepEqual(h.resolved,[{id:'a',url:'https://media.invalid/full-length.mp3',error:''},
+    {id:'b',url:'',error:'fixture verification required'}]);
+  assert.equal(h.requests.length,3,'business rejection is not treated as a transport retry or media success');
+  h.context.__LXResolve('c',payload);await tick();
+  h.context.__LXCancelResolve('c');
+  done(h,3,{code:200,url:'https://media.invalid/late.mp3'});await tick();
+  assert.equal(h.resolved.length,2,'cancelled resolution cannot publish a late playable URL');
+  const fallback=source();fallback.context.__LXResolve('fallback',payload);await tick();
+  done(fallback,0,null,0,'fixture network failure');await tick();
+  assert.equal(fallback.requests[1].url,'https://second.invalid/session');
+  done(fallback,1,{session:'anonymous-fixture-session'});await tick();
+  done(fallback,2,{message:'fixture unavailable'},503);await tick();
+  assert.match(fallback.requests[3].url,/^https:\/\/second\.invalid\/track\?/);
+  done(fallback,3,{code:200,url:'https://media.invalid/backup.mp3'});await tick();
+  assert.equal(fallback.resolved[0].url,'https://media.invalid/backup.mp3');
+  assert.equal(fallback.requests.reduce((sum,request)=>sum+request.options.timeout,0),28000,
+    'two sequential session attempts plus two parse attempts can require a 28-second outer budget');
+}
 (async () => {
   const h = harness();
   assert.equal(h.run('typeof __LXNative'), 'undefined');
@@ -95,5 +162,6 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
   h.run("finish('https://fixture.invalid/cancelled')");await tick(); assert.equal(h.resolved.length,4);
   h.run('__LXDispose()');assert.throws(()=>h.run("lx.request('https://fixture.invalid',{},()=>{})"),/invalidated/);
   assert.throws(()=>h.run("setTimeout(()=>{},10)"),/invalidated/);
+  await authenticatedQQFixture();
   console.log('PASS: LX bootstrap fixture contract (no real source/network)');
 })().catch(error=>{console.error(error);process.exitCode=1});

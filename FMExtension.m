@@ -37,6 +37,8 @@ static NSArray<NSString *> *FMXRoutableSourceNames(NSDictionary *manifest) {
 @interface FMXManager : NSObject
 @property (atomic, strong) LXSourceRuntime *runtime;
 @property (atomic, copy) NSString *status;
+@property (atomic, copy) NSString *playbackStatus;
+@property (nonatomic, copy) NSString *playbackRequest;
 @property (nonatomic, copy) NSArray<NSDictionary *> *files;
 @property (nonatomic, copy) NSString *selectedFile;
 @property (nonatomic) NSUInteger generation;
@@ -69,6 +71,7 @@ static NSArray<NSString *> *FMXRoutableSourceNames(NSDictionary *manifest) {
     self.generation++;
     LXSourceRuntime *old = self.runtime; self.runtime = nil; [old invalidate];
     self.selectedFile = nil;
+    self.playbackRequest = nil; self.playbackStatus = nil;
     [[NSUserDefaults standardUserDefaults] removeObjectForKey:FMXSelected];
     self.status = @"未启用 JS 音源"; [self changed];
 }
@@ -171,7 +174,12 @@ static NSArray<NSString *> *FMXRoutableSourceNames(NSDictionary *manifest) {
         cell.detailTextLabel.text = [state[@"videoError"] length] ? @"动画生成未完成，继续显示静态封面" : nil;
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
     } else if (path.section == 4) { cell.textLabel.text = @"听歌画像"; cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator; }
-    else { cell.textLabel.text = [FMXManager shared].status; cell.selectionStyle = UITableViewCellSelectionStyleNone; }
+    else {
+        FMXManager *manager = [FMXManager shared];
+        cell.textLabel.text = manager.status;
+        cell.detailTextLabel.text = manager.playbackStatus ?: (manager.runtime ? @"本次启用后尚无 JS 解析记录。QQ 的臻品、母带、空间音质仍由原 App 处理，可切换标准音质检查。" : nil);
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    }
     return cell;
 }
 - (void)toggleSearch:(UISwitch *)toggle { FMSearchPreferencesSetAggregateEnabled(toggle.on); }
@@ -236,6 +244,20 @@ static NSArray<NSString *> *FMXRoutableSourceNames(NSDictionary *manifest) {
 @end
 
 static NSString *FMXLXSource(NSString *server) { if ([server isEqual:@"qq"]) return @"tx"; if ([server isEqual:@"wy"]) return @"wy"; if ([server isEqual:@"kg"]) return @"kg"; return nil; }
+// Record only actual handler invocations. Capability probes are not playback.
+// Do not retain song IDs, URLs, credentials, or arbitrary server error strings.
+static void FMXPlaybackStatus(LXSourceRuntime *runtime, NSString *identifier, NSString *source, NSString *state, BOOL starting) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        FMXManager *manager = [FMXManager shared];
+        if (manager.runtime != runtime) return;
+        if (starting) manager.playbackRequest = identifier;
+        if (![manager.playbackRequest isEqual:identifier]) return;
+        NSString *label = @{@"tx":@"QQ", @"wy":@"网易云", @"kg":@"酷狗"}[source];
+        if (!label) return;
+        manager.playbackStatus = [NSString stringWithFormat:@"%@：%@", label, state];
+        [manager changed];
+    });
+}
 static NSString *FMXQuality(NSString *level, NSArray *available) {
     NSDictionary *mapping = @{@"standard":@"128k", @"qq_standard":@"128k", @"hq":@"320k", @"lossless":@"flac"};
     NSString *quality = mapping[level] ?: level;
@@ -263,15 +285,22 @@ __attribute__((constructor)) static void FMXInitialize(void) {
             if ([source isEqual:@"tx"]) info[@"songmid"] = parameters[@"id"] ?: @"";
             if ([source isEqual:@"kg"]) { info[@"hash"] = parameters[@"id"] ?: @""; info[@"songmid"] = parameters[@"id"] ?: @""; }
             if (!runtime || !source || !quality) { completion(@{@"code":@503, @"msg":@"JS 音源当前不可用"}, nil); return nil; }
-            NSString *identifier = [runtime resolveMusicURLForSource:source musicInfo:info quality:quality timeout:15 completion:^(NSURL *url, NSError *error) {
+            NSString *diagnosticID = NSUUID.UUID.UUIDString;
+            FMXPlaybackStatus(runtime, diagnosticID, source, @"正在通过 JS 解析", YES);
+            NSString *identifier = [runtime resolveMusicURLForSource:source musicInfo:info quality:quality timeout:35 completion:^(NSURL *url, NSError *error) {
                 if (error) {
+                    if (!(error.code == NSUserCancelledError && [error.domain isEqual:LXSourceRuntimeErrorDomain]))
+                        FMXPlaybackStatus(runtime, diagnosticID, source, @"JS 解析失败，未返回播放地址", NO);
                     FMXManager *manager = [FMXManager shared];
                     if (manager.runtime == runtime && !runtime.manifest) {
                         [manager disable]; manager.status = @"音源已停止，请重新启用或更换音源"; [manager changed];
                     }
                     completion(directKugou ? @{@"url":@""} : @{@"code":@502, @"msg":[@"JS 音源：" stringByAppendingString:error.localizedDescription]}, nil);
                 }
-                else completion(directKugou ? @{@"url":url.absoluteString, @"bitRate":@128} : @{@"code":@200, @"data":@{@"url":url.absoluteString, @"quality":quality}}, nil);
+                else {
+                    FMXPlaybackStatus(runtime, diagnosticID, source, @"JS 已返回播放地址，时长由音源提供", NO);
+                    completion(directKugou ? @{@"url":url.absoluteString, @"bitRate":@128} : @{@"code":@200, @"data":@{@"url":url.absoluteString, @"quality":quality}}, nil);
+                }
             }];
             return ^(NSError *reason) {
                 if (reason.code == NSURLErrorTimedOut) {
@@ -286,6 +315,8 @@ __attribute__((constructor)) static void FMXInitialize(void) {
                     });
                     [runtime invalidate];
                 } else {
+                    if (reason.code == NSURLErrorCancelled)
+                        FMXPlaybackStatus(runtime, diagnosticID, source, @"本次 JS 解析已取消", NO);
                     [runtime cancelRequestWithIdentifier:identifier];
                 }
             };
@@ -301,12 +332,6 @@ __attribute__((constructor)) static void FMXInitialize(void) {
             FMLockScreenInstall();
             FMInteractionInstall();
             FMLXMCUIInstall();
-            FMNavigationSetProfileAction(^(UIViewController *profileController) {
-                UIViewController *insights = FMInsightsController();
-                if (profileController.navigationController.visibleViewController == profileController)
-                    [profileController.navigationController pushViewController:insights animated:YES];
-                else [profileController presentViewController:[[UINavigationController alloc] initWithRootViewController:insights] animated:YES completion:nil];
-            });
             FMNavigationInstall();
             FMSettingsEntryInstall(^(UIViewController *settingsController) {
                 if (settingsController.presentedViewController) return;

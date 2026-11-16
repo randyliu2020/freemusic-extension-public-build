@@ -13,6 +13,8 @@ typedef void (^FMXParseCancellation)(NSError * _Nullable reason);
 /// aacert parse uses APIResponse; the exact m.kugou.com native route uses top-level url/bitRate.
 /// Kugou parameters are synthesized as {server:kg,id:uppercase hash,level:standard}; no native quality is available.
 /// The predicate must accept kg only when the active script explicitly supports kg musicUrl at 128k.
+/// Playback handling is capped at 45 seconds and still honors any shorter native
+/// request deadline. Search/import keep their 20-second cap. Client cancellation is immediate.
 typedef FMXParseCancellation _Nullable (^FMXParseHandler)(NSURLRequest *request,
                                                      NSDictionary<NSString *, NSString *> *parameters,
                                                      FMXProtocolCompletion completion);

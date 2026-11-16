@@ -44,7 +44,17 @@ static int StartFixtureServer(uint16_t *port) {
                 NSString *body=headerEnd != NSNotFound ? [requestText substringFromIndex:headerEnd] : @"";
                 BOOL cookie=[requestText.lowercaseString containsString:@"\r\ncookie:"];
                 BOOL internalHeader=[requestText.lowercaseString containsString:@"\r\nfmx.internalrequest:"];
-                NSData *json=[NSJSONSerialization dataWithJSONObject:@{@"echo":body,@"cookie":@(cookie),@"internalHeader":@(internalHeader)} options:0 error:nil];
+                NSDictionary *response=@{@"echo":body,@"cookie":@(cookie),@"internalHeader":@(internalHeader)};
+                if ([requestText hasPrefix:@"GET /session "])
+                    response=@{@"code":@0,@"data":@{@"session":@"anonymous-fixture-session"}};
+                else if ([requestText hasPrefix:@"GET /parse?"]) {
+                    BOOL authenticated=[requestText.lowercaseString containsString:@"\r\nx-fixture-session: anonymous-fixture-session\r\n"];
+                    BOOL validMID=[requestText hasPrefix:@"GET /parse?mid=anonymous_mid&quality=128k "];
+                    response=authenticated && validMID
+                        ? @{@"code":@200,@"url":@"https://fixture.invalid/full.mp3?duration=240"}
+                        : @{@"code":@403,@"message":@"fixture verification required"};
+                }
+                NSData *json=[NSJSONSerialization dataWithJSONObject:response options:0 error:nil];
                 BOOL head = [requestText hasPrefix:@"HEAD "];
                 NSString *header=[NSString stringWithFormat:@"HTTP/1.1 200 OK\r\nContent-Type: %@\r\nSet-Cookie: fixture=must-not-persist\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",head ? @"audio/mpeg" : @"application/json",(unsigned long)(head ? 10*1024*1024 : json.length)];
                 NSMutableData *reply=[[header dataUsingEncoding:NSUTF8StringEncoding] mutableCopy]; if (!head) [reply appendData:json];
@@ -73,6 +83,34 @@ static void Resolve(LXSourceRuntime *runtime, NSString *song, BOOL success, NSSt
         complete=YES;
     }];
     Wait(^BOOL{return complete;},4);
+}
+static void AuthenticatedQQ(LXSourceRuntime *runtime, uint16_t port) {
+    // Self-authored flow on loopback: pending initialization request, callback
+    // JSON, script-provided header, QQ songmid, and HTTP-200 business errors.
+    NSString *script=[NSString stringWithFormat:
+        @"const base='http://127.0.0.1:%hu';"
+        "function call(path,headers={}){return new Promise((resolve,reject)=>lx.request(base+path,{headers,timeout:6000},(error,response)=>error?reject(error):resolve(response.body)))}"
+        "const session=call('/session').then(body=>body.data.session);"
+        "lx.on('request',async({source,action,info})=>{"
+        "if(source!=='tx'||action!=='musicUrl')throw Error('fixture event');"
+        "const key=await session;"
+        "const body=await call('/parse?mid='+encodeURIComponent(info.musicInfo.songmid)+'&quality='+info.type,{'X-Fixture-Session':key});"
+        "if(body.code!==200)throw Error(body.message);return body.url;});"
+        "lx.send('inited',{sources:{tx:{type:'music',actions:['musicUrl','lyric','pic'],qualitys:['128k','320k','flac','hires']}}});",port];
+    Load(runtime,script,YES);
+    __block NSUInteger finished=0;
+    for (NSString *mid in @[@"anonymous_mid",@"rejected_mid"]) {
+        [runtime resolveMusicURLForSource:@"tx" musicInfo:@{@"songmid":mid} quality:@"128k" timeout:3 completion:^(NSURL *URL,NSError *error) {
+            Require(NSThread.isMainThread,@"Authenticated fixture completion thread");
+            if ([mid isEqualToString:@"anonymous_mid"])
+                Require(!error && [URL.absoluteString isEqualToString:@"https://fixture.invalid/full.mp3?duration=240"],@"QQ returned URL is preserved without preview substitution");
+            else Require(!URL && [error.localizedDescription isEqualToString:@"fixture verification required"],@"HTTP 200 business refusal is preserved as source error");
+            finished++;
+        }];
+    }
+    Wait(^BOOL{return finished==2;},5);
+    Require(runtime.manifest[@"sources"][@"tx"]!=nil,@"Business refusal does not disable initialized source");
+    [runtime invalidate];
 }
 int main(int argc,const char *argv[]) {
     @autoreleasepool {
@@ -120,6 +158,7 @@ int main(int argc,const char *argv[]) {
         Load(delayed,@"lx.on('request',()=>Promise.resolve('https://fixture.invalid'));setTimeout(()=>lx.send('inited',{sources:{wy:{type:'music',actions:['musicUrl'],qualitys:['128k']}}}),20);",YES);
         [delayed invalidate];
         LXSourceRuntime *missing=[[LXSourceRuntime alloc] initWithBootstrapScript:bootstrap]; Load(missing,@"const fixture=1;",NO);
+        AuthenticatedQQ([[LXSourceRuntime alloc] initWithBootstrapScript:bootstrap],port);
         shutdown(server,SHUT_RDWR); close(server);
         printf("PASS: native JavaScriptCore, crypto, HTTP loopback, cookie isolation, callbacks, cancellation, timeout fixtures\n");
     }

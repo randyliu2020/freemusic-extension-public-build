@@ -258,9 +258,17 @@ static NSArray *FMXProtocolClasses(id self, SEL selector) {
     dispatch_async(self.stateQueue, ^{
         if (self.finished) return;
         NSDictionary *parameters = FMXQueryParameters(self.request);
+        NSDictionary *kugou = FMXKugouParameters(self.request);
         self.effectiveRequest = self.request;
         self.deadline = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, self.stateQueue);
-        NSTimeInterval budget = MIN(self.request.timeoutInterval > 0 ? self.request.timeoutInterval : 20, 20);
+        // LX sources may obtain a token and try a backup before resolving a URL.
+        // Give only playback parsing that room; do not extend native deadlines,
+        // search/import work, or a caller's cancellation window.
+        BOOL parsing = kugou != nil || (FMXIsTarget(self.request) &&
+            [parameters[@"action"] isEqualToString:@"parse"] &&
+            [self.request.HTTPMethod.uppercaseString isEqualToString:@"POST"]);
+        NSTimeInterval limit = parsing ? 45 : 20;
+        NSTimeInterval budget = MIN(self.request.timeoutInterval > 0 ? self.request.timeoutInterval : limit, limit);
         // Finish before NSURLSession's own timer can turn a deadline into an indistinguishable stopLoading.
         NSTimeInterval timeout = budget - MIN(0.25, budget * 0.2);
         uint64_t leeway = (uint64_t)(MIN(0.01, timeout * 0.02) * NSEC_PER_SEC);
@@ -278,7 +286,6 @@ static NSArray *FMXProtocolClasses(id self, SEL selector) {
             else [strongSelf finishPayload:nil error:FMXError(NSURLErrorTimedOut, @"音源解析超时")];
         });
         dispatch_resume(self.deadline);
-        NSDictionary *kugou = FMXKugouParameters(self.request);
         if (kugou) [self beginParse:kugou];
         else if ([parameters[@"action"] isEqualToString:@"search"]) [self beginSearch:parameters];
         else [self prepareParseBody];

@@ -236,6 +236,26 @@ class ActualIPATests(unittest.TestCase):
                 package.package_ipa(self.original, self.dylib, self.bootstrap, target)
         self.assertEqual(artwork.file_digest(self.original), artwork.IPA_SHA256)
 
+    def test_cumulative_v4_player_swipe_preserves_native_close_and_layout(self):
+        import interaction_patch
+        import player_swipe_patch
+        import navigation_patch
+        output = self.directory / "v4.unsigned.needs-resigning.ipa"
+        report = package.package_ipa(self.original, self.dylib, self.bootstrap, output, v3_changes=True, player_left_swipe=True)
+        with zipfile.ZipFile(self.original) as before, zipfile.ZipFile(output) as after:
+            original = before.read(package.MAIN)
+            expected, _ = package.rewrite_macho(original, inject=True, expected_type=2)
+            expected, _ = navigation_patch.patch_binary(expected, original)
+            expected = interaction_patch.apply_verified_plan(expected, interaction_patch.patch_plan(original) + player_swipe_patch.patch_plan(original))
+            actual = after.read(package.MAIN)
+            self.assertEqual(actual, expected)
+            self.assertEqual(len(actual), len(original))
+            self.assertEqual(package.parse_macho(actual).segments, package.parse_macho(original).segments)
+            close = player_swipe_patch.NATIVE_DISMISS
+            self.assertEqual(actual[close:close + len(bytes.fromhex(player_swipe_patch.NATIVE_DISMISS_HEX))], bytes.fromhex(player_swipe_patch.NATIVE_DISMISS_HEX))
+            self.assertTrue(report["player_left_swipe_enabled"])
+            self.assertEqual(len(report["v3_report"]["player_swipe_changes"]), 2)
+
     def test_repacking_modified_ipa_is_rejected(self):
         with self.assertRaisesRegex(package.PackageError, "SHA256 mismatch"):
             package.package_ipa(self.output, self.dylib, self.bootstrap, self.directory / "twice.unsigned.needs-resigning.ipa")

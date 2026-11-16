@@ -31,7 +31,11 @@ private struct FMNavLibrary: View {
 }
 
 private struct FMNavProfile: View {
-    private func originalGear() { fmNavCount("smoke.fmnav.original-gear-count") }
+    @State private var showSettings = false
+    private func originalGear() {
+        fmNavCount("smoke.fmnav.original-gear-count")
+        showSettings = true
+    }
     var body: some View {
         NavigationStack {
             VStack(spacing: 18) {
@@ -41,6 +45,16 @@ private struct FMNavProfile: View {
                 Spacer()
             }
             .navigationTitle("我的")
+            .navigationDestination(isPresented: $showSettings) {
+                List {
+                    Text("自定义音源")
+                    Text("音质")
+                    Text("音乐缓存")
+                    Text("关于 FreeMusic")
+                }
+                .navigationTitle("设置")
+                .onAppear { fmNavCount("smoke.fmnav.settings-appearance-count") }
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(action: originalGear) { Image(systemName: "gearshape") }
@@ -50,6 +64,7 @@ private struct FMNavProfile: View {
             }
             .onAppear { fmNavCount("smoke.fmnav.profile-appearance-count") }
             .onReceive(NotificationCenter.default.publisher(for: Notification.Name("smoke.fmnav.original-gear-command"))) { _ in originalGear() }
+            .onReceive(NotificationCenter.default.publisher(for: Notification.Name("smoke.fmnav.close-settings-command"))) { _ in showSettings = false }
         }
     }
 }
@@ -116,6 +131,11 @@ public func fmNavSelectLibrary() {
 @MainActor
 public func fmNavRunOriginalGear() {
     NotificationCenter.default.post(name: Notification.Name("smoke.fmnav.original-gear-command"), object: nil)
+}
+@_cdecl("FMNavCloseOriginalSettings")
+@MainActor
+public func fmNavCloseOriginalSettings() {
+    NotificationCenter.default.post(name: Notification.Name("smoke.fmnav.close-settings-command"), object: nil)
 }
 
 // Failure-only probe for this authored fixture. Production diagnostics never

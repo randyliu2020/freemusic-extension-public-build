@@ -85,6 +85,96 @@ private struct InteractionSearchFixture: View {
     }
 }
 
+// This reproduces the inspected native gesture topology: an onEnded attached
+// only to the top bar, and PresentationMode.dismiss writing the parent cover's
+// binding. It does not pretend to execute the original compiled application.
+private struct InteractionPlayerSwipeSurface: View {
+    @Environment(\.presentationMode) private var presentationMode
+    @State private var progress = 0.5
+    @State private var volume = 0.5
+
+    private func closeIfRequested(_ value: DragGesture.Value) {
+        let dx = value.translation.width, dy = value.translation.height
+        let left = dx < -80 && -dx > 1.5 * abs(dy)
+        let originalDown = dy > 80 && abs(dx) < dy
+        if left || originalDown { presentationMode.wrappedValue.dismiss() }
+    }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Image(systemName: "music.note")
+                Text("Self-authored player title")
+                Spacer()
+                Image(systemName: "chevron.down")
+            }
+            .padding(.horizontal, 24)
+            .frame(maxWidth: .infinity, minHeight: 76)
+            .background(Color.secondary.opacity(0.15))
+            .contentShape(Rectangle())
+            .onTapGesture { presentationMode.wrappedValue.dismiss() }
+            .gesture(DragGesture(minimumDistance: 20).onEnded(closeIfRequested), including: .all)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("smoke.interaction.player-topbar")
+
+            Text("Playback surface").accessibilityIdentifier("smoke.interaction.player-visible")
+            ScrollView {
+                VStack(spacing: 16) {
+                    ForEach(0..<30, id: \.self) { index in
+                        Text("Self-authored scrolling lyric \(index)")
+                            .frame(maxWidth: .infinity, minHeight: 36)
+                            .accessibilityIdentifier("smoke.interaction.scroll-lyric.\(index)")
+                    }
+                }
+            }
+            .frame(height: 220)
+            .accessibilityIdentifier("smoke.interaction.player-lyrics")
+            Slider(value: $progress)
+                .accessibilityIdentifier("smoke.interaction.player-progress")
+            Slider(value: $volume)
+                .accessibilityIdentifier("smoke.interaction.player-volume")
+            ScrollView(.horizontal) {
+                HStack(spacing: 20) {
+                    ForEach(0..<14, id: \.self) { index in
+                        Text("Horizontal \(index)").padding()
+                    }
+                }
+            }
+            .frame(height: 64)
+            .accessibilityIdentifier("smoke.interaction.player-horizontal")
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+    }
+}
+
+private struct InteractionPlayerSwipeFixture: View {
+    @State private var showPlayer = false
+    @State private var closeCount = 0
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 24) {
+                Text("Previous screen").accessibilityIdentifier("smoke.interaction.previous-screen")
+                Text("Player binding: \(showPlayer ? "true" : "false")")
+                    .accessibilityIdentifier("smoke.interaction.player-binding")
+                Text("Closed: \(closeCount)").accessibilityIdentifier("smoke.interaction.player-close-count")
+                Button("Open player") { showPlayer = true }
+                    .accessibilityIdentifier("smoke.interaction.open-player")
+            }
+            .navigationTitle("Library fixture")
+            .fullScreenCover(isPresented: $showPlayer, onDismiss: { closeCount += 1 }) {
+                InteractionPlayerSwipeSurface()
+            }
+        }
+    }
+}
+
+@_cdecl("FMInteractionMakePlayerSwipeFixture")
+@MainActor
+public func interactionMakePlayerSwipeFixture() -> UnsafeMutableRawPointer {
+    Unmanaged.passRetained(UIHostingController(rootView: InteractionPlayerSwipeFixture()) as UIViewController).toOpaque()
+}
+
 @MainActor
 private final class InteractionKeyboardController: UIViewController {
     let results = UIScrollView()
