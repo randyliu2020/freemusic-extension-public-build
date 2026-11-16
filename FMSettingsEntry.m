@@ -51,6 +51,8 @@ static NSString *const FMEntryIdentifier = @"FMX.SettingsEntry";
 @property(nonatomic) NSUInteger visionLastImageWidth, visionLastImageHeight, visionLastImageContrast;
 @property(nonatomic) NSUInteger visionLastLineCount, visionLastConfidentLineCount, visionLastMask, visionLastAccumulatedMask;
 @property(nonatomic) NSInteger visionLastErrorCode;
+@property(nonatomic) NSTimeInterval visionLastElapsedSeconds;
+@property(nonatomic) BOOL visionLastCancelled;
 @property(nonatomic) BOOL visionLastDrawSucceeded;
 @property(nonatomic) NSTimeInterval nextVisionTime;
 @property(nonatomic) BOOL visionRetryQueued;
@@ -262,7 +264,9 @@ static NSUInteger FMFrameContrast(CGImageRef image) {
         @"visionLastImageContrast":@(self.visionLastImageContrast), @"visionLastDrawSucceeded":@(self.visionLastDrawSucceeded),
         @"visionLastLineCount":@(self.visionLastLineCount), @"visionLastConfidentLineCount":@(self.visionLastConfidentLineCount),
         @"visionLastMask":@(self.visionLastMask), @"visionLastAccumulatedMask":@(self.visionLastAccumulatedMask),
-        @"visionLastErrorCode":@(self.visionLastErrorCode)};
+        @"visionLastErrorCode":@(self.visionLastErrorCode),
+        @"visionLastElapsedSeconds":@(self.visionLastElapsedSeconds),
+        @"visionLastCancelled":@(self.visionLastCancelled)};
     @synchronized (FMSettingsCoordinator.class) { FMSettingsSnapshot = snapshot; }
 }
 - (void)beginVisionForOwner:(UIViewController *)owner probe:(FMSettingsProbe *)probe {
@@ -329,7 +333,11 @@ static NSUInteger FMFrameContrast(CGImageRef image) {
     self.visionRequest = request; self.visionOwner = owner; self.visionProbe = probe; self.visionCancelled = NO;
     [self publishDiagnostics];
     NSArray<NSSet<NSString *> *> *groups = self.markerGroups;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 6 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+    // The first multilingual request can include on-device model initialization.
+    // Keep it asynchronous and bounded; navigation away still cancels it in scan.
+    NSTimeInterval requestStarted=NSProcessInfo.processInfo.systemUptime;
+    NSTimeInterval requestBudget=self.visionAttempts==1 ? 20.0 : 6.0;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(requestBudget * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (self.visionRequest == request) { self.visionCancelled = YES; [request cancel]; }
     });
     dispatch_async(self.visionQueue, ^{
@@ -346,6 +354,8 @@ static NSUInteger FMFrameContrast(CGImageRef image) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (self.visionRequest != request) return;
                 BOOL cancelled = self.visionCancelled;
+                self.visionLastElapsedSeconds=NSProcessInfo.processInfo.systemUptime-requestStarted;
+                self.visionLastCancelled=cancelled;
                 self.visionRequest = nil; self.visionOwner = nil; self.visionProbe = nil; self.visionCancelled = NO;
                 self.visionLastLineCount = lines; self.visionLastConfidentLineCount = confidentLines; self.visionLastMask = mask;
                 self.visionLastErrorCode = error.code;

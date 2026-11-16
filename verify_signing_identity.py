@@ -78,16 +78,31 @@ def profile_metadata(raw: bytes) -> dict:
 
 def assess_identity(bundle_id: str, signature: dict, profile: dict | None) -> dict:
     problems, warnings, unknown = [], [], []
+    def string(value):
+        return value if isinstance(value, str) and value.strip() else None
+
+    def strings(value):
+        return value if isinstance(value, list) and value and all(string(item) for item in value) else []
+
     signed = signature.get("entitlements")
-    application_id = signed.get("application-identifier") if isinstance(signed, dict) else None
-    signed_team = signed.get("com.apple.developer.team-identifier") if isinstance(signed, dict) else None
+    application_id = string(signed.get("application-identifier")) if isinstance(signed, dict) else None
+    signed_team = string(signed.get("com.apple.developer.team-identifier")) if isinstance(signed, dict) else None
+    identifiers = strings(signature.get("code_directory_identifiers"))
+    directory_teams = strings(signature.get("code_directory_teams"))
     if not signature.get("present"):
         problems.append("Main executable has no code signature; package must be signed before installation.")
-    elif not application_id:
-        unknown.append("No XML application-identifier was found; DER-only entitlements require Apple's codesign tooling.")
+    else:
+        if not application_id:
+            unknown.append("No valid XML application-identifier was found; DER-only entitlements require Apple's codesign tooling.")
+        if not signed_team:
+            unknown.append("Signed entitlement team identifier is missing or invalid.")
+        if not identifiers:
+            unknown.append("CodeDirectory identifiers are missing or invalid.")
+        if not directory_teams:
+            unknown.append("CodeDirectory team identifiers are missing or invalid.")
     if application_id and not application_id.endswith("." + bundle_id):
         problems.append("Signed application-identifier does not end with the exact Info.plist bundle identifier.")
-    for identifier in set(signature.get("code_directory_identifiers", [])):
+    for identifier in set(identifiers):
         if identifier != bundle_id:
             warnings.append("CodeDirectory identifier differs from Info.plist bundle identifier: " + identifier)
     profile_id = None
@@ -95,9 +110,12 @@ def assess_identity(bundle_id: str, signature: dict, profile: dict | None) -> di
     if profile is None:
         unknown.append("No embedded provisioning profile; profile scope was not checked.")
     else:
-        entitlements = profile.get("Entitlements", {})
-        profile_id = entitlements.get("application-identifier")
-        prefixes = profile.get("ApplicationIdentifierPrefix", [])
+        entitlements = profile.get("Entitlements")
+        entitlements = entitlements if isinstance(entitlements, dict) else {}
+        profile_id = string(entitlements.get("application-identifier"))
+        prefixes = strings(profile.get("ApplicationIdentifierPrefix"))
+        if not prefixes:
+            unknown.append("Provisioning profile ApplicationIdentifierPrefix is missing or invalid.")
         if application_id and prefixes and application_id not in [str(prefix) + "." + bundle_id for prefix in prefixes]:
             problems.append("Signed application-identifier is not a profile-authorized prefix plus this bundle identifier.")
         if application_id and profile_id:
@@ -105,12 +123,16 @@ def assess_identity(bundle_id: str, signature: dict, profile: dict | None) -> di
             if not in_scope:
                 problems.append("Signed application-identifier is outside the provisioning profile scope.")
         elif not profile_id:
-            unknown.append("Provisioning profile application-identifier is missing.")
-        teams = profile.get("TeamIdentifier", [])
-        profile_team = entitlements.get("com.apple.developer.team-identifier")
+            unknown.append("Provisioning profile application-identifier is missing or invalid.")
+        teams = strings(profile.get("TeamIdentifier"))
+        profile_team = string(entitlements.get("com.apple.developer.team-identifier"))
+        if not teams:
+            unknown.append("Provisioning profile TeamIdentifier is missing or invalid.")
+        if not profile_team:
+            unknown.append("Provisioning profile entitlement team identifier is missing or invalid.")
         if signed_team and ((teams and signed_team not in teams) or (profile_team and signed_team != profile_team)):
             problems.append("Signed team identifier differs from the profile team.")
-        for team in set(signature.get("code_directory_teams", [])):
+        for team in set(directory_teams):
             if signed_team and team != signed_team:
                 problems.append("CodeDirectory team differs from signed entitlement team.")
         expiry = profile.get("ExpirationDate")
@@ -119,11 +141,14 @@ def assess_identity(bundle_id: str, signature: dict, profile: dict | None) -> di
             if expiry < datetime.now(timezone.utc):
                 problems.append("Embedded provisioning profile is expired.")
             expiry = expiry.isoformat()
+        else:
+            unknown.append("Provisioning profile ExpirationDate is missing or invalid.")
+            expiry = None
     status = "IDENTITY_MISMATCH_OR_UNSIGNED" if problems else ("IDENTITY_CHECK_INCOMPLETE" if unknown else "IDENTITIES_CONSISTENT_SIGNATURE_NOT_VERIFIED")
     return {"status": status, "bundle_identifier": bundle_id,
         "signed_application_identifier": application_id, "signed_team_identifier": signed_team,
         "profile_application_identifier": profile_id, "profile_expiration_utc": expiry,
-        "code_directory_identifiers": signature.get("code_directory_identifiers", []),
+        "code_directory_identifiers": identifiers,
         "problems": problems, "warnings": warnings, "unknown": unknown,
         "cryptographic_signature_verified": False, "device_launch_verified": False,
         "next_validation": "On macOS run Apple's codesign verification on the fully signed app, then install and test on the iPhone. Matching identities are necessary packaging evidence, not proof that the Lock Screen opens the app."}

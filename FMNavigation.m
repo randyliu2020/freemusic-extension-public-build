@@ -11,12 +11,19 @@ static BOOL FMNDiscoverHidden;
 static NSTimeInterval FMNStarted, FMNVerifyDeadline;
 static __weak UINavigationController *FMNStartupNavigation;
 static __weak UIViewController *FMNBeforeActivation;
+static __weak UIViewController *FMNObservedLibraryOwner;
 static NSString *FMNStartupState = @"pending";
 static NSUInteger FMNRecognizedControllers;
 static BOOL FMNVisionInFlight;
 static NSUInteger FMNVisionRequests, FMNAXCandidates;
 static NSTimeInterval FMNLastVision;
 static NSString *FMNActivationPath=@"none";
+static VNRecognizeTextRequest *FMNActiveVisionRequest;
+static BOOL FMNVisionCancelled,FMNVisionLastSucceeded,FMNVisionLastDrawn;
+static NSTimeInterval FMNVisionLastDuration,FMNVisionStarted;
+static NSInteger FMNVisionLastErrorCode;
+static NSString *FMNVisionLastErrorDomain=@"",*FMNLastReject=@"none";
+static NSUInteger FMNVisionLastLines,FMNVisionLastMatches,FMNVisionLastMappedCells,FMNVisibleCellCount;
 static char FMNApplyingKey, FMNProfileItemKey, FMNProfileTargetKey, FMNProfileGroupKey;
 static void (^FMNProfileAction)(UIViewController *);
 static NSHashTable<UIViewController *> *FMNProfileOwners;
@@ -189,28 +196,31 @@ static BOOL FMNLibraryStillSelected(UINavigationController *navigation,UIViewCon
     }
     return NO;
 }
+static BOOL FMNReject(NSString *reason) { FMNLastReject=reason;return NO; }
 static BOOL FMNPerformCellAction(FMNCellTarget *target,UINavigationController *navigation,UIViewController *owner,NSString *path) {
-    if(FMNFinished||FMNAttempted||!FMNLibraryStillSelected(navigation,owner)||!FMNVisibleView(target.cell))return NO;
+    if(FMNFinished||FMNAttempted||!FMNLibraryStillSelected(navigation,owner)||!FMNVisibleView(target.cell))return FMNReject(@"owner_or_cell_not_current");
     UIView *cell=target.cell;UIScrollView *list=target.list;
     UIWindow *window=cell.window;CGPoint point=[cell convertPoint:CGPointMake(CGRectGetMidX(cell.bounds),CGRectGetMidY(cell.bounds)) toView:window];
-    UIView *hit=[window hitTest:point withEvent:nil];if(hit!=cell&&![hit isDescendantOfView:cell])return NO;
+    UIView *hit=[window hitTest:point withEvent:nil];if(hit!=cell&&![hit isDescendantOfView:cell])return FMNReject(@"cell_hit_obscured");
     CGRect frame=[cell convertRect:cell.bounds toView:owner.view];
-    if(fabs(frame.origin.x-target.frame.origin.x)>2||fabs(frame.origin.y-target.frame.origin.y)>2||fabs(frame.size.width-target.frame.size.width)>2||fabs(frame.size.height-target.frame.size.height)>2)return NO;
+    if(fabs(frame.origin.x-target.frame.origin.x)>2||fabs(frame.origin.y-target.frame.origin.y)>2||fabs(frame.size.width-target.frame.size.width)>2||fabs(frame.size.height-target.frame.size.height)>2)return FMNReject(@"cell_geometry_changed");
     if([list isKindOfClass:UICollectionView.class]) {
         UICollectionView *collection=(id)list;id<UICollectionViewDelegate> delegate=collection.delegate;
-        if(collection.isEditing || [collection cellForItemAtIndexPath:target.indexPath]!=cell || ![delegate respondsToSelector:@selector(collectionView:performPrimaryActionForItemAtIndexPath:)])return NO;
-        if([delegate respondsToSelector:@selector(collectionView:canPerformPrimaryActionForItemAtIndexPath:)]&&![delegate collectionView:collection canPerformPrimaryActionForItemAtIndexPath:target.indexPath])return NO;
+        if(collection.isEditing || [collection cellForItemAtIndexPath:target.indexPath]!=cell)return FMNReject(@"collection_cell_changed");
+        if(![delegate respondsToSelector:@selector(collectionView:performPrimaryActionForItemAtIndexPath:)])return FMNReject(@"collection_primary_action_missing");
+        if([delegate respondsToSelector:@selector(collectionView:canPerformPrimaryActionForItemAtIndexPath:)]&&![delegate collectionView:collection canPerformPrimaryActionForItemAtIndexPath:target.indexPath])return FMNReject(@"collection_primary_action_denied");
         FMNAttempted=YES;FMNActivationPath=path;FMNStartupState=@"activating_primary_action";FMNStartupNavigation=navigation;FMNBeforeActivation=owner;FMNVerifyDeadline=NSProcessInfo.processInfo.systemUptime+3;
-        [delegate collectionView:collection performPrimaryActionForItemAtIndexPath:target.indexPath];return YES;
+        FMNLastReject=@"none";[delegate collectionView:collection performPrimaryActionForItemAtIndexPath:target.indexPath];return YES;
     }
     if([list isKindOfClass:UITableView.class]) {
         UITableView *table=(id)list;id<UITableViewDelegate> delegate=table.delegate;
-        if(table.isEditing || [table cellForRowAtIndexPath:target.indexPath]!=cell || ![delegate respondsToSelector:@selector(tableView:performPrimaryActionForRowAtIndexPath:)])return NO;
-        if([delegate respondsToSelector:@selector(tableView:canPerformPrimaryActionForRowAtIndexPath:)]&&![delegate tableView:table canPerformPrimaryActionForRowAtIndexPath:target.indexPath])return NO;
+        if(table.isEditing || [table cellForRowAtIndexPath:target.indexPath]!=cell)return FMNReject(@"table_cell_changed");
+        if(![delegate respondsToSelector:@selector(tableView:performPrimaryActionForRowAtIndexPath:)])return FMNReject(@"table_primary_action_missing");
+        if([delegate respondsToSelector:@selector(tableView:canPerformPrimaryActionForRowAtIndexPath:)]&&![delegate tableView:table canPerformPrimaryActionForRowAtIndexPath:target.indexPath])return FMNReject(@"table_primary_action_denied");
         FMNAttempted=YES;FMNActivationPath=path;FMNStartupState=@"activating_primary_action";FMNStartupNavigation=navigation;FMNBeforeActivation=owner;FMNVerifyDeadline=NSProcessInfo.processInfo.systemUptime+3;
-        [delegate tableView:table performPrimaryActionForRowAtIndexPath:target.indexPath];return YES;
+        FMNLastReject=@"none";[delegate tableView:table performPrimaryActionForRowAtIndexPath:target.indexPath];return YES;
     }
-    return NO;
+    return FMNReject(@"list_type_unsupported");
 }
 static NSData *FMNRGBAPixels(CGImageRef image) {
     if(!image)return nil;size_t width=CGImageGetWidth(image),height=CGImageGetHeight(image);
@@ -226,9 +236,16 @@ static BOOL FMNTitlePixelsUnchanged(UIImage *snapshot,UIView *root,CGRect textRe
     CGRect pixels=CGRectOffset(crop,-originalBounds.origin.x,-originalBounds.origin.y);
     CGImageRef oldImage=CGImageCreateWithImageInRect(snapshot.CGImage,pixels);if(!oldImage)return NO;
     NSData *before=FMNRGBAPixels(oldImage);CGImageRelease(oldImage);
+    // Use identical full-view rendering geometry before cropping both images.
+    // A small renderer with a nonzero bounds origin need not reproduce the
+    // exact coordinate system of the original full-view snapshot.
     UIGraphicsImageRendererFormat *format=UIGraphicsImageRendererFormat.defaultFormat;format.scale=1;format.opaque=YES;
-    UIImage *after=[[[UIGraphicsImageRenderer alloc] initWithBounds:crop format:format] imageWithActions:^(UIGraphicsImageRendererContext *context){[root drawViewHierarchyInRect:root.bounds afterScreenUpdates:NO];}];
-    return before.length&&[before isEqual:FMNRGBAPixels(after.CGImage)];
+    __block BOOL drawn=NO;
+    UIImage *current=[[[UIGraphicsImageRenderer alloc] initWithBounds:originalBounds format:format] imageWithActions:^(UIGraphicsImageRendererContext *context){drawn=[root drawViewHierarchyInRect:originalBounds afterScreenUpdates:NO];}];
+    if(!drawn||!current.CGImage)return NO;
+    CGImageRef newImage=CGImageCreateWithImageInRect(current.CGImage,pixels);if(!newImage)return NO;
+    NSData *after=FMNRGBAPixels(newImage);CGImageRelease(newImage);
+    return before.length&&[before isEqual:after];
 }
 static void FMNRecognizeVisibleTitle(NSArray<FMNCellTarget *> *targets,UINavigationController *navigation,UIViewController *owner) {
     NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;
@@ -236,14 +253,23 @@ static void FMNRecognizeVisibleTitle(NSArray<FMNCellTarget *> *targets,UINavigat
     UIView *root=owner.view;CGRect bounds=root.bounds;
     if(bounds.size.width<100||bounds.size.height<100||bounds.size.width>2400||bounds.size.height>2400||ceil(bounds.size.width)*ceil(bounds.size.height)>2000000)return;
     UIGraphicsImageRendererFormat *format=UIGraphicsImageRendererFormat.defaultFormat;format.scale=1;format.opaque=YES;
-    UIImage *snapshot=[[[UIGraphicsImageRenderer alloc] initWithBounds:bounds format:format] imageWithActions:^(UIGraphicsImageRendererContext *context){[root drawViewHierarchyInRect:bounds afterScreenUpdates:NO];}];
-    if(!snapshot.CGImage||CGImageGetWidth(snapshot.CGImage)*CGImageGetHeight(snapshot.CGImage)>2000000)return;
+    __block BOOL drawn=NO;
+    UIImage *snapshot=[[[UIGraphicsImageRenderer alloc] initWithBounds:bounds format:format] imageWithActions:^(UIGraphicsImageRendererContext *context){drawn=[root drawViewHierarchyInRect:bounds afterScreenUpdates:NO];}];
+    FMNVisionLastDrawn=drawn;
+    if(!drawn||!snapshot.CGImage||CGImageGetWidth(snapshot.CGImage)*CGImageGetHeight(snapshot.CGImage)>2000000){FMNLastReject=@"snapshot_unavailable";return;}
     NSTimeInterval captured=NSProcessInfo.processInfo.systemUptime;
-    FMNVisionInFlight=YES;FMNVisionRequests++;FMNLastVision=now;
+    FMNVisionStarted=captured;
+    FMNVisionInFlight=YES;FMNVisionRequests++;FMNLastVision=now;FMNVisionCancelled=NO;FMNLastReject=@"recognition_pending";
+    // The first on-device model load can be slow. Bound the work, then verify
+    // the current owner/cell/title pixels again instead of trusting old UI.
+    NSTimeInterval budget=FMNVisionRequests==1?20:6;
+    VNRecognizeTextRequest *request=VNRecognizeTextRequest.new;request.recognitionLevel=VNRequestTextRecognitionLevelAccurate;
+    request.recognitionLanguages=@[@"zh-Hans",@"en-US"];request.usesLanguageCorrection=NO;FMNActiveVisionRequest=request;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(budget*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+        if(FMNActiveVisionRequest==request&&FMNVisionInFlight){FMNVisionCancelled=YES;FMNLastReject=@"recognition_deadline";[request cancel];}
+    });
     __weak UINavigationController *weakNavigation=navigation;__weak UIViewController *weakOwner=owner;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{
-        VNRecognizeTextRequest *request=VNRecognizeTextRequest.new;request.recognitionLevel=VNRequestTextRecognitionLevelAccurate;
-        request.recognitionLanguages=@[@"zh-Hans",@"en-US"];request.usesLanguageCorrection=NO;
         NSError *error=nil;VNImageRequestHandler *handler=[[VNImageRequestHandler alloc] initWithCGImage:snapshot.CGImage options:@{}];
         BOOL ok=[handler performRequests:@[request] error:&error];
         NSMutableArray *matches=NSMutableArray.array;
@@ -255,16 +281,28 @@ static void FMNRecognizeVisibleTitle(NSArray<FMNCellTarget *> *targets,UINavigat
             [matches addObject:[NSValue valueWithCGRect:rect]];
         }
         dispatch_async(dispatch_get_main_queue(),^{
-            FMNVisionInFlight=NO;
+            if(FMNActiveVisionRequest!=request)return;
+            FMNVisionInFlight=NO;FMNActiveVisionRequest=nil;
+            FMNVisionLastDuration=NSProcessInfo.processInfo.systemUptime-captured;FMNVisionLastErrorCode=error.code;FMNVisionLastErrorDomain=error.domain?:@"";
+            FMNVisionLastSucceeded=ok;FMNVisionLastLines=request.results.count;FMNVisionLastMatches=matches.count;FMNVisionLastMappedCells=0;
             UINavigationController *currentNavigation=weakNavigation;UIViewController *currentOwner=weakOwner;
-            if(NSProcessInfo.processInfo.systemUptime-captured>2||matches.count!=1||FMNFinished||FMNAttempted||!FMNLibraryStillSelected(currentNavigation,currentOwner))return;
+            if(FMNVisionCancelled||FMNVisionLastDuration>budget){FMNLastReject=@"recognition_deadline";return;}
+            if(!ok||error){FMNLastReject=@"recognition_error";return;}
+            if(matches.count!=1){FMNLastReject=@"recognition_no_unique_title";return;}
+            if(FMNFinished||FMNAttempted||!FMNLibraryStillSelected(currentNavigation,currentOwner)){FMNLastReject=@"recognition_owner_changed";return;}
             CGRect textRect=[matches[0] CGRectValue];NSMutableArray *candidates=NSMutableArray.array;
             for(FMNCellTarget *target in targets)if(CGRectContainsRect(CGRectInset(target.frame,-1,-1),textRect))[candidates addObject:target];
-            if(candidates.count==1&&FMNTitlePixelsUnchanged(snapshot,currentOwner.view,textRect,bounds))FMNPerformCellAction(candidates[0],currentNavigation,currentOwner,@"primary_action_vision");
+            FMNVisionLastMappedCells=candidates.count;
+            if(candidates.count!=1){FMNLastReject=@"recognition_cell_ambiguous";return;}
+            if(!FMNTitlePixelsUnchanged(snapshot,currentOwner.view,textRect,bounds)){FMNLastReject=@"title_pixels_changed";return;}
+            FMNPerformCellAction(candidates[0],currentNavigation,currentOwner,@"primary_action_vision");
         });
     });
 }
-static void FMNFinishStartup(NSString *state) { FMNFinished=YES; FMNStartupState=state; }
+static void FMNFinishStartup(NSString *state) {
+    FMNFinished=YES;FMNStartupState=state;
+    if(FMNActiveVisionRequest){FMNVisionCancelled=YES;[FMNActiveVisionRequest cancel];}
+}
 static void FMNProfileEntry(UITabBarController *controller) {
     if(!FMNProfileAction)return;
     NSDictionary *roles=FMNRecognizeTabs(controller); if(!roles)return;
@@ -324,7 +362,7 @@ static void FMNTryStartup(UITabBarController *controller) {
         else if(now>=FMNVerifyDeadline)FMNFinishStartup(@"activation_unconfirmed");
         return;
     }
-    if(now-FMNStarted>=15) { FMNFinishStartup(@"likes_link_unavailable"); return; }
+    if(now-FMNStarted>=30) { FMNFinishStartup(@"likes_link_unavailable"); return; }
     if(@available(iOS 18.0,*)) {
         if(controller.selectedTab!=roles[@"library"]) {
             if(now-FMNStarted>=0.75)FMNFinishStartup(@"user_left_library");
@@ -333,9 +371,12 @@ static void FMNTryStartup(UITabBarController *controller) {
     }
     UINavigationController *navigation=FMNVisibleNavigation(controller.selectedViewController,0);
     UIViewController *top=navigation.topViewController;
+    if(FMNObservedLibraryOwner&&top&&top!=FMNObservedLibraryOwner){FMNFinishStartup(@"user_left_library");return;}
     if(!top || !top.isViewLoaded || top.presentedViewController || !FMNRole(top.navigationItem.title?:top.title,@"library"))return;
+    FMNObservedLibraryOwner=top;
     NSArray *matches=FMNLikesLinks(top.view);FMNAXCandidates=matches.count;
     NSArray *targets=FMNVisibleCells(top.view);NSMutableArray *labelled=NSMutableArray.array;
+    FMNVisibleCellCount=targets.count;
     for(FMNCellTarget *target in targets)if(FMNCellHasTitle(target.cell))[labelled addObject:target];
     if(labelled.count==1&&FMNPerformCellAction(labelled[0],navigation,top,@"primary_action_label"))return;
     if(matches.count!=1) { if(!matches.count&&!labelled.count)FMNRecognizeVisibleTitle(targets,navigation,top);return; }
@@ -390,5 +431,10 @@ NSDictionary<NSString *,id> *FMNavigationDiagnostics(void) {
     if(!NSThread.isMainThread) { __block NSDictionary *result;dispatch_sync(dispatch_get_main_queue(),^{result=FMNavigationDiagnostics();});return result; }
     return @{@"installed":@(FMNInstalled),@"discoverHidden":@(FMNDiscoverHidden),@"recognizedChecks":@(FMNRecognizedControllers),
              @"startupState":FMNStartupState,@"activationAttempted":@(FMNAttempted),@"activationPath":FMNActivationPath,
-             @"axCandidateCount":@(FMNAXCandidates),@"visionRequests":@(FMNVisionRequests)};
+             @"axCandidateCount":@(FMNAXCandidates),@"visionRequests":@(FMNVisionRequests),@"visibleCellCount":@(FMNVisibleCellCount),
+             @"visionInFlight":@(FMNVisionInFlight),@"visionCancelled":@(FMNVisionCancelled),@"visionLastSucceeded":@(FMNVisionLastSucceeded),
+             @"visionCurrentElapsed":@(FMNVisionInFlight?NSProcessInfo.processInfo.systemUptime-FMNVisionStarted:0),
+             @"visionLastDrawSucceeded":@(FMNVisionLastDrawn),@"visionLastDuration":@(FMNVisionLastDuration),@"visionLastErrorCode":@(FMNVisionLastErrorCode),
+             @"visionLastErrorDomain":FMNVisionLastErrorDomain,@"visionLastLineCount":@(FMNVisionLastLines),@"visionLastMatchCount":@(FMNVisionLastMatches),
+             @"visionLastMappedCells":@(FMNVisionLastMappedCells),@"lastRejection":FMNLastReject};
 }

@@ -29,7 +29,7 @@ BOOL (^preservesObjects)(NSArray *,NSArray *)=^BOOL(NSArray *original,NSArray *c
         Main(^{oldRoot=self.window.rootViewController;host=CFBridgingRelease(factory());self.window.rootViewController=host;[self.window makeKeyAndVisible];});
         Check(Until(^BOOL{tabs=(id)navVisible(host,^BOOL(UIViewController *c){return [c isKindOfClass:UITabBarController.class];});return tabs!=nil&&tabs.tabs.count==5;},6),@"Original-shaped five-tab SwiftUI model appears");
         Check(Until(^BOOL{UITab *discovery=tabs.tabs[1];return discovery.isHidden&&discovery.preferredPlacement==UITabPlacementSidebarOnly&&![tabs.compactTabIdentifiers containsObject:discovery.identifier];},5),@"Discovery hidden in compact, regular and sidebar placements");
-        BOOL opened=Until(^BOOL{state=diagnostics();return [state[@"startupState"] isEqual:@"opened"];},17);
+        BOOL opened=Until(^BOOL{state=diagnostics();return [state[@"startupState"] isEqual:@"opened"];},32);
         Main(^{state=diagnostics();});
         [[NSJSONSerialization dataWithJSONObject:state options:NSJSONWritingPrettyPrinted error:nil] writeToURL:[self.output URLByAppendingPathComponent:@"navigation-startup.json"] atomically:YES];
         [self captureSurfaceDiagnostics:@"navigation-favorites-state"];

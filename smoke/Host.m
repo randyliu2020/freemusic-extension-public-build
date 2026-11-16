@@ -872,7 +872,7 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
                     if(candidate && !originalToolbar && OriginalToolbarItems(candidate).count>0){originalToolbar=OriginalToolbarItems(candidate);originalGroups=OriginalToolbarGroups(candidate);toolbarBefore=NavigationItemDiagnostic(candidate.navigationItem);capturedBeforeEntry=FindSettingsEntry(candidate)==nil;}
                     owner=FindVisibleController(hosting,^BOOL(UIViewController *value){return FindSettingsEntry(value)!=nil;},0);
                     return owner!=nil && owner.transitionCoordinator==nil && [NSUserDefaults.standardUserDefaults integerForKey:@"smoke.swiftui.settings-appearance-count"]>0;
-                },10);
+                },30);
                 [self captureSurfaceDiagnostics:@"swiftui-initial-settings-list"];
                 Check(identified,@"Production settings entry recognizes the real SwiftUI NavigationStack/insetGrouped List/navigationTitle without an external accessibility client");
                 Main(^{ownerClass=NSStringFromClass(owner.class);if(!originalToolbar){originalToolbar=OriginalToolbarItems(owner);originalGroups=OriginalToolbarGroups(owner);toolbarBefore=NavigationItemDiagnostic(owner.navigationItem);}toolbarAfterEntry=NavigationItemDiagnostic(owner.navigationItem);settingsDiagnosticsAfter=SettingsEntryDiagnostics(self.extensionHandle);

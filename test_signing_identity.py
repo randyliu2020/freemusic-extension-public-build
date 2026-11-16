@@ -39,9 +39,57 @@ class IdentityTests(unittest.TestCase):
         self.assertTrue(assess_identity("com.example.player", self.signature(), profile)["problems"])
 
     def test_unsigned_and_missing_xml_are_distinct(self):
-        self.assertTrue(assess_identity("com.example.player", {"present":False}, None)["problems"])
+        unsigned = assess_identity("com.example.player", {"present":False}, None)
+        self.assertTrue(unsigned["problems"])
+        self.assertEqual(unsigned["status"], "IDENTITY_MISMATCH_OR_UNSIGNED")
         result = assess_identity("com.example.player", {"present":True}, self.profile())
         self.assertEqual(result["status"], "IDENTITY_CHECK_INCOMPLETE")
+
+    def test_missing_identity_fields_never_report_consistent(self):
+        # Remove one field at a time from otherwise coherent inputs. A matching
+        # application-identifier must not hide an unchecked team/prefix/date.
+        cases = [("signature", "entitlements", "com.apple.developer.team-identifier"),
+                 ("signature", None, "code_directory_identifiers"),
+                 ("signature", None, "code_directory_teams"),
+                 ("profile", "Entitlements", "com.apple.developer.team-identifier"),
+                 ("profile", None, "ApplicationIdentifierPrefix"),
+                 ("profile", None, "TeamIdentifier"),
+                 ("profile", None, "ExpirationDate")]
+        for owner, section, field in cases:
+            with self.subTest(owner=owner, section=section, field=field):
+                signature, profile = self.signature(), self.profile()
+                target = signature if owner == "signature" else profile
+                if section:
+                    target = target[section]
+                del target[field]
+                result = assess_identity("com.example.player", signature, profile)
+                self.assertEqual(result["status"], "IDENTITY_CHECK_INCOMPLETE")
+                self.assertTrue(result["unknown"])
+                self.assertFalse(result["problems"])
+
+    def test_malformed_identity_fields_are_incomplete_not_coerced(self):
+        for field, value in [("ApplicationIdentifierPrefix", "TEAM"),
+                             ("ApplicationIdentifierPrefix", [""]),
+                             ("TeamIdentifier", []), ("TeamIdentifier", [123]),
+                             ("ExpirationDate", "2099-01-01"),
+                             ("Entitlements", [])]:
+            with self.subTest(field=field, value=value):
+                profile = self.profile(); profile[field] = value
+                result = assess_identity("com.example.player", self.signature(), profile)
+                self.assertEqual(result["status"], "IDENTITY_CHECK_INCOMPLETE")
+                self.assertTrue(result["unknown"])
+        signature = self.signature()
+        signature["entitlements"]["com.apple.developer.team-identifier"] = 123
+        result = assess_identity("com.example.player", signature, self.profile())
+        self.assertEqual(result["status"], "IDENTITY_CHECK_INCOMPLETE")
+
+    def test_known_mismatch_is_not_downgraded_by_missing_metadata(self):
+        profile = self.profile("TEAM.other.app")
+        del profile["ExpirationDate"]
+        result = assess_identity("com.example.player", self.signature(), profile)
+        self.assertEqual(result["status"], "IDENTITY_MISMATCH_OR_UNSIGNED")
+        self.assertTrue(result["problems"])
+        self.assertTrue(result["unknown"])
 
     def test_expired_profile_is_reported(self):
         profile = self.profile(); profile["ExpirationDate"] = datetime(2000, 1, 1, tzinfo=timezone.utc)
