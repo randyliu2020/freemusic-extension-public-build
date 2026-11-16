@@ -24,6 +24,8 @@ static NSTimeInterval FMNVisionLastDuration,FMNVisionStarted;
 static NSInteger FMNVisionLastErrorCode;
 static NSString *FMNVisionLastErrorDomain=@"",*FMNLastReject=@"none";
 static NSUInteger FMNVisionLastLines,FMNVisionLastMatches,FMNVisionLastMappedCells,FMNVisibleCellCount;
+static NSUInteger FMNVisionLastExactTitles,FMNVisionLastNormalizedTitles;
+static float FMNVisionLastTitleConfidence;
 static char FMNApplyingKey, FMNProfileItemKey, FMNProfileTargetKey, FMNProfileGroupKey;
 static void (^FMNProfileAction)(UIViewController *);
 static NSHashTable<UIViewController *> *FMNProfileOwners;
@@ -51,6 +53,15 @@ static BOOL FMNRole(NSString *title,NSString *role) {
 static BOOL FMNLikesTitle(NSString *title) {
     // The user's native playlist is named 我喜欢; never choose a generic playlist section or arbitrary first row.
     return [@[@"我喜欢",@"我喜欢的音乐"] containsObject:FMNText(title)];
+}
+static NSString *FMNNormalizedOCRTitle(NSString *title) {
+    // Vision can include the List's separate trailing disclosure glyph in a
+    // text line, or insert spacing between CJK characters. Keep exact title
+    // equality after removing only that presentation whitespace/disclosure.
+    NSString *value=[[FMNText(title) componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] componentsJoinedByString:@""];
+    NSCharacterSet *disclosure=[NSCharacterSet characterSetWithCharactersInString:@">›❯〉》»"];
+    while(value.length&&[disclosure characterIsMember:[value characterAtIndex:value.length-1]])value=[value substringToIndex:value.length-1];
+    return value;
 }
 static NSDictionary *FMNRecognizeTabs(UITabBarController *controller) {
     if (@available(iOS 18.0,*)) {
@@ -233,13 +244,15 @@ static NSData *FMNRGBAPixels(CGImageRef image) {
 static BOOL FMNTitlePixelsUnchanged(UIImage *snapshot,UIView *root,CGRect textRect,CGRect originalBounds) {
     if(!CGRectEqualToRect(root.bounds,originalBounds))return NO;
     CGRect crop=CGRectIntegral(CGRectIntersection(CGRectInset(textRect,-2,-2),originalBounds));
-    CGRect pixels=CGRectOffset(crop,-originalBounds.origin.x,-originalBounds.origin.y);
+    CGFloat scale=snapshot.scale;
+    CGRect points=CGRectOffset(crop,-originalBounds.origin.x,-originalBounds.origin.y);
+    CGRect pixels=CGRectMake(points.origin.x*scale,points.origin.y*scale,points.size.width*scale,points.size.height*scale);
     CGImageRef oldImage=CGImageCreateWithImageInRect(snapshot.CGImage,pixels);if(!oldImage)return NO;
     NSData *before=FMNRGBAPixels(oldImage);CGImageRelease(oldImage);
     // Use identical full-view rendering geometry before cropping both images.
     // A small renderer with a nonzero bounds origin need not reproduce the
     // exact coordinate system of the original full-view snapshot.
-    UIGraphicsImageRendererFormat *format=UIGraphicsImageRendererFormat.defaultFormat;format.scale=1;format.opaque=YES;
+    UIGraphicsImageRendererFormat *format=UIGraphicsImageRendererFormat.defaultFormat;format.scale=scale;format.opaque=YES;
     __block BOOL drawn=NO;
     UIImage *current=[[[UIGraphicsImageRenderer alloc] initWithBounds:originalBounds format:format] imageWithActions:^(UIGraphicsImageRendererContext *context){drawn=[root drawViewHierarchyInRect:originalBounds afterScreenUpdates:NO];}];
     if(!drawn||!current.CGImage)return NO;
@@ -252,7 +265,7 @@ static void FMNRecognizeVisibleTitle(NSArray<FMNCellTarget *> *targets,UINavigat
     if(FMNVisionInFlight||FMNVisionRequests>=5||now-FMNLastVision<1||!targets.count||!FMNLibraryStillSelected(navigation,owner))return;
     UIView *root=owner.view;CGRect bounds=root.bounds;
     if(bounds.size.width<100||bounds.size.height<100||bounds.size.width>2400||bounds.size.height>2400||ceil(bounds.size.width)*ceil(bounds.size.height)>2000000)return;
-    UIGraphicsImageRendererFormat *format=UIGraphicsImageRendererFormat.defaultFormat;format.scale=1;format.opaque=YES;
+    UIGraphicsImageRendererFormat *format=UIGraphicsImageRendererFormat.defaultFormat;format.scale=MIN(2,sqrt(1990000.0/(ceil(bounds.size.width)*ceil(bounds.size.height))));format.opaque=YES;
     __block BOOL drawn=NO;
     UIImage *snapshot=[[[UIGraphicsImageRenderer alloc] initWithBounds:bounds format:format] imageWithActions:^(UIGraphicsImageRendererContext *context){drawn=[root drawViewHierarchyInRect:bounds afterScreenUpdates:NO];}];
     FMNVisionLastDrawn=drawn;
@@ -272,10 +285,13 @@ static void FMNRecognizeVisibleTitle(NSArray<FMNCellTarget *> *targets,UINavigat
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{
         NSError *error=nil;VNImageRequestHandler *handler=[[VNImageRequestHandler alloc] initWithCGImage:snapshot.CGImage options:@{}];
         BOOL ok=[handler performRequests:@[request] error:&error];
-        NSMutableArray *matches=NSMutableArray.array;
+        NSMutableArray *matches=NSMutableArray.array;NSUInteger exactTitles=0,normalizedTitles=0;float titleConfidence=0;
         if(ok&&!error)for(VNRecognizedTextObservation *observation in request.results) {
             VNRecognizedText *text=[observation topCandidates:1].firstObject;
-            if(text.confidence<0.9||!FMNLikesTitle(text.string))continue;
+            BOOL exact=FMNLikesTitle(text.string),normalized=FMNLikesTitle(FMNNormalizedOCRTitle(text.string));
+            if(exact)exactTitles++;if(normalized)normalizedTitles++;
+            if(normalized)titleConfidence=MAX(titleConfidence,text.confidence);
+            if(text.confidence<0.9||!normalized)continue;
             CGRect box=observation.boundingBox;
             CGRect rect=CGRectMake(bounds.origin.x+box.origin.x*bounds.size.width,bounds.origin.y+(1-CGRectGetMaxY(box))*bounds.size.height,box.size.width*bounds.size.width,box.size.height*bounds.size.height);
             [matches addObject:[NSValue valueWithCGRect:rect]];
@@ -285,6 +301,7 @@ static void FMNRecognizeVisibleTitle(NSArray<FMNCellTarget *> *targets,UINavigat
             FMNVisionInFlight=NO;FMNActiveVisionRequest=nil;
             FMNVisionLastDuration=NSProcessInfo.processInfo.systemUptime-captured;FMNVisionLastErrorCode=error.code;FMNVisionLastErrorDomain=error.domain?:@"";
             FMNVisionLastSucceeded=ok;FMNVisionLastLines=request.results.count;FMNVisionLastMatches=matches.count;FMNVisionLastMappedCells=0;
+            FMNVisionLastExactTitles=exactTitles;FMNVisionLastNormalizedTitles=normalizedTitles;FMNVisionLastTitleConfidence=titleConfidence;
             UINavigationController *currentNavigation=weakNavigation;UIViewController *currentOwner=weakOwner;
             if(FMNVisionCancelled||FMNVisionLastDuration>budget){FMNLastReject=@"recognition_deadline";return;}
             if(!ok||error){FMNLastReject=@"recognition_error";return;}
@@ -436,5 +453,6 @@ NSDictionary<NSString *,id> *FMNavigationDiagnostics(void) {
              @"visionCurrentElapsed":@(FMNVisionInFlight?NSProcessInfo.processInfo.systemUptime-FMNVisionStarted:0),
              @"visionLastDrawSucceeded":@(FMNVisionLastDrawn),@"visionLastDuration":@(FMNVisionLastDuration),@"visionLastErrorCode":@(FMNVisionLastErrorCode),
              @"visionLastErrorDomain":FMNVisionLastErrorDomain,@"visionLastLineCount":@(FMNVisionLastLines),@"visionLastMatchCount":@(FMNVisionLastMatches),
+             @"visionLastExactTitleCount":@(FMNVisionLastExactTitles),@"visionLastNormalizedTitleCount":@(FMNVisionLastNormalizedTitles),@"visionLastTitleConfidence":@(FMNVisionLastTitleConfidence),
              @"visionLastMappedCells":@(FMNVisionLastMappedCells),@"lastRejection":FMNLastReject};
 }

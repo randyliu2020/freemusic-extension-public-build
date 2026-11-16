@@ -86,6 +86,8 @@ for (NSString *interactionKind in @[@"UIKit", @"SwiftUI"]) {
                     if (search) [row addEntriesFromDictionary:@{@"search_active":@(search.active),
                         @"search_editing":@(search.searchBar.searchTextField.isFirstResponder),
                         @"search_in_host_window":@(search.searchBar.window == self.window),
+                        @"search_field_in_host_window":@(search.searchBar.searchTextField.window == self.window),
+                        @"search_field_visible":@(VisibleInWindow(search.searchBar.searchTextField)),
                         @"search_presenting":@(search.isBeingPresented)}];
                     if ([owner isKindOfClass:UINavigationController.class]) {
                         UINavigationController *nav = (id)owner;

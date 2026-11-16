@@ -34,6 +34,15 @@ BOOL (^preservesObjects)(NSArray *,NSArray *)=^BOOL(NSArray *original,NSArray *c
         [[NSJSONSerialization dataWithJSONObject:state options:NSJSONWritingPrettyPrinted error:nil] writeToURL:[self.output URLByAppendingPathComponent:@"navigation-startup.json"] atomically:YES];
         [self captureSurfaceDiagnostics:@"navigation-favorites-state"];
         [self screenshot:@"navigation-favorites.png"];
+        if(!opened) {
+            void (*probe)(void)=(void(*)(void))dlsym(self.swiftUIFixtureHandle,"FMNavStartFixtureOCRProbe");
+            void *(*copyProbe)(void)=(void*(*)(void))dlsym(self.swiftUIFixtureHandle,"FMNavCopyFixtureOCRProbe");
+            if(probe&&copyProbe) {
+                __block NSDictionary *report;Main(^{probe();});
+                Until(^BOOL{void *value=copyProbe();if(value)report=CFBridgingRelease(value);return report!=nil;},8);
+                if(report)[[NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingPrettyPrinted error:nil] writeToURL:[self.output URLByAppendingPathComponent:@"navigation-fixture-ocr.json"] atomically:YES];
+            }
+        }
         Check(opened&&[NSUserDefaults.standardUserDefaults integerForKey:@"smoke.fmnav.likes-appearance-count"]==1,@"Original Favorites NavigationLink opens exactly once and destination appears");
         Check([state[@"axCandidateCount"] unsignedIntegerValue]==0&&[state[@"activationPath"] hasPrefix:@"primary_action_"],@"AX-empty visible Favorites row navigates through its original public cell primary action");
         return @{@"native_tab_model_count":@5,@"discovery_hidden":@YES,@"favorites_opened":@YES,@"ax_empty_public_primary_action":@YES,@"original_app_used":@NO,@"diagnostics":state};

@@ -105,7 +105,12 @@ static void FMICollectResultLists(UIView *root, NSMutableSet<UIScrollView *> *re
             FMIVisibleControllers(window.rootViewController, controllers, 0);
             for (UIViewController *owner in controllers) {
                 UISearchController *search = owner.navigationItem.searchController;
-                if (!search || !search.searchBar.searchTextField.isFirstResponder || search.searchBar.window != window) continue;
+                UISearchTextField *field = search.searchBar.searchTextField;
+                // UIKit's floating search presentation can move the public
+                // searchTextField into a visible container while its UISearchBar
+                // has no window. Validate the exact owned editing field instead
+                // of assuming it remains a descendant of the bar.
+                if (!search.isActive || !field.isFirstResponder || field.window != window || !FMIVisible(field)) continue;
                 editing = YES;
                 FMICollectResultLists(owner.viewIfLoaded, wanted);
                 if (search.isActive) FMICollectResultLists(search.searchResultsController.viewIfLoaded, wanted);

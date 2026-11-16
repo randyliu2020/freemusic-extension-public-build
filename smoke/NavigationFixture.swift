@@ -1,6 +1,7 @@
 // Independent original-shaped SwiftUI surface. No original IPA code or private data.
 import SwiftUI
 import UIKit
+import Vision
 
 private func fmNavCount(_ key: String) {
     let defaults = UserDefaults.standard
@@ -115,4 +116,51 @@ public func fmNavSelectLibrary() {
 @MainActor
 public func fmNavRunOriginalGear() {
     NotificationCenter.default.post(name: Notification.Name("smoke.fmnav.original-gear-command"), object: nil)
+}
+
+// Failure-only probe for this authored fixture. Production diagnostics never
+// retain OCR strings; here the image contains only the literal fixture UI.
+@MainActor private var fmNavOCRReport: NSDictionary?
+@_cdecl("FMNavStartFixtureOCRProbe")
+@MainActor
+public func fmNavStartFixtureOCRProbe() {
+    fmNavOCRReport = nil
+    guard let window = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).flatMap({ $0.windows }).first(where: { $0.isKeyWindow }), let host = window.rootViewController else { return }
+    var queue = [host]
+    var owner: UIViewController?
+    while !queue.isEmpty && queue.count < 128 {
+        let controller = queue.removeFirst()
+        if controller.navigationItem.title == "资料库", controller.isViewLoaded, controller.view.window != nil { owner = controller; break }
+        queue.append(contentsOf: controller.children)
+    }
+    guard let root = owner?.view else { return }
+    var frames: [(Double, CGImage)] = []
+    for scale in [1.0, 2.0] {
+        let format = UIGraphicsImageRendererFormat(); format.scale = scale; format.opaque = true
+        let image = UIGraphicsImageRenderer(bounds: root.bounds, format: format).image { _ in _ = root.drawHierarchy(in: root.bounds, afterScreenUpdates: false) }
+        if let image = image.cgImage { frames.append((scale, image)) }
+    }
+    let capturedFrames = frames
+    DispatchQueue.global(qos: .userInitiated).async {
+        var reports: [[String: Any]] = []
+        for (scale, image) in capturedFrames {
+            let request = VNRecognizeTextRequest(); request.recognitionLevel = .accurate
+            request.recognitionLanguages = ["zh-Hans", "en-US"]; request.usesLanguageCorrection = false
+            do {
+                try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+                let lines: [[String: Any]] = (request.results ?? []).map { observation in
+                    ["box": NSStringFromCGRect(observation.boundingBox), "candidates": observation.topCandidates(3).map { ["text": $0.string, "confidence": $0.confidence] as [String: Any] }]
+                }
+                reports.append(["scale": scale, "lines": lines])
+            } catch { let failure = error as NSError; reports.append(["scale": scale, "error_domain": failure.domain, "error_code": failure.code]) }
+        }
+        let report = ["self_authored_fixture_only": true, "snapshots": reports] as NSDictionary
+        DispatchQueue.main.async { fmNavOCRReport = report }
+    }
+}
+@_cdecl("FMNavCopyFixtureOCRProbe")
+@MainActor
+public func fmNavCopyFixtureOCRProbe() -> UnsafeMutableRawPointer? {
+    guard let report = fmNavOCRReport else { return nil }
+    return Unmanaged.passRetained(report).toOpaque()
 }
