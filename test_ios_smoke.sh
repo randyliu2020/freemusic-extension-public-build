@@ -261,7 +261,9 @@ else
   fi
 fi
 [[ "$boot_ready" == true ]] || { echo "Self-created simulator failed both bounded boot attempts; no application/UI tests were skipped or passed" >&2; exit 1; }
-bounded_sim_command raw 15 "$output_dir/boot-ready-devices.json" xcrun simctl list devices --json
+# Bootstatus above is the readiness gate. Inventory is diagnostic only: a slow
+# list operation must not turn an already successful boot into a test failure.
+bounded_sim_command raw 15 "$output_dir/boot-ready-devices.json" xcrun simctl list devices --json || true
 bounded_sim_command raw 15 "$output_dir/status-bar.log" xcrun simctl status_bar "$device_id" override --time '9:41' --batteryState charged --batteryLevel 100 || true
 stage="install_self_authored_host"
 xcrun simctl install "$device_id" "$app_dir"
