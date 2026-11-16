@@ -1,0 +1,544 @@
+{
+  "request_cases": [
+    {
+      "name": "search enabled",
+      "aggregate": true,
+      "url": "https://aacert.com/ms/api.php?action=search&keyword=Amani&page=0&platform=3",
+      "method": "GET",
+      "intercept": true
+    },
+    {
+      "name": "search disabled",
+      "aggregate": false,
+      "url": "https://aacert.com/ms/api.php?action=search&keyword=Amani&page=0&platform=3",
+      "method": "GET",
+      "intercept": false
+    },
+    {
+      "name": "qishui untouched",
+      "aggregate": true,
+      "url": "https://aacert.com/ms/api.php?action=search&keyword=Amani&page=0&platform=4",
+      "method": "GET",
+      "intercept": false
+    },
+    {
+      "name": "wrong host untouched",
+      "aggregate": true,
+      "url": "https://aacert.com.example.org/ms/api.php?action=search&keyword=Amani&page=0&platform=3",
+      "method": "GET",
+      "intercept": false
+    },
+    {
+      "name": "plain HTTP untouched",
+      "aggregate": true,
+      "url": "http://aacert.com/ms/api.php?action=search&keyword=Amani&page=0&platform=3",
+      "method": "GET",
+      "intercept": false
+    },
+    {
+      "name": "different path untouched",
+      "aggregate": true,
+      "url": "https://aacert.com/other/api.php?action=search&keyword=Amani&page=0&platform=3",
+      "method": "GET",
+      "intercept": false
+    },
+    {
+      "name": "login untouched",
+      "aggregate": true,
+      "url": "https://aacert.com/ms/api.php?action=login",
+      "method": "POST",
+      "body": "id=346083&server=wy",
+      "intercept": false
+    },
+    {
+      "name": "update untouched",
+      "aggregate": true,
+      "url": "https://aacert.com/ms/api.php?action=update",
+      "method": "GET",
+      "intercept": false
+    },
+    {
+      "name": "payment untouched",
+      "aggregate": true,
+      "url": "https://aacert.com/ms/api.php?action=pay",
+      "method": "POST",
+      "body": "id=346083&server=wy",
+      "intercept": false
+    },
+    {
+      "name": "suggestions untouched",
+      "aggregate": true,
+      "url": "https://aacert.com/ms/api.php?action=search_suggest&keyword=Amani&platform=3",
+      "method": "GET",
+      "intercept": false
+    },
+    {
+      "name": "duplicate action rejected",
+      "aggregate": true,
+      "url": "https://aacert.com/ms/api.php?action=search&action=login&keyword=Amani&page=0&platform=3",
+      "method": "GET",
+      "intercept": false
+    },
+    {
+      "name": "supported parse",
+      "aggregate": false,
+      "url": "https://aacert.com/ms/api.php?action=parse&_t=1",
+      "method": "POST",
+      "body": "server=wy&id=346083&level=standard&title=Amani&singer=Beyond",
+      "intercept": true,
+      "expected_parameters": {
+        "server": "wy",
+        "id": "346083",
+        "action": "parse",
+        "level": "standard"
+      }
+    },
+    {
+      "name": "unsupported parse buffered before native forwarding",
+      "aggregate": true,
+      "url": "https://aacert.com/ms/api.php?action=parse",
+      "method": "POST",
+      "body": "server=kg&id=B64ED4024F8329D7F5180E2C649453C9&level=standard",
+      "intercept": true
+    },
+    {
+      "name": "parse GET untouched",
+      "aggregate": true,
+      "url": "https://aacert.com/ms/api.php?action=parse&server=wy&id=346083",
+      "method": "GET",
+      "intercept": false
+    },
+    {
+      "name": "encoded values",
+      "aggregate": false,
+      "url": "https://aacert.com/ms/api.php?action=parse",
+      "method": "POST",
+      "body": "server=wy&id=346083&title=A%2BB+%26+C&singer=%E6%B5%8B%E8%AF%95",
+      "intercept": true,
+      "expected_parameters": {
+        "title": "A+B & C",
+        "singer": "测试"
+      }
+    },
+    {
+      "name": "duplicate body key claimed then explicitly rejected",
+      "aggregate": true,
+      "url": "https://aacert.com/ms/api.php?action=parse&server=wy",
+      "method": "POST",
+      "body": "server=qq&id=346083",
+      "intercept": true
+    },
+    {
+      "name": "malformed body claimed then explicitly rejected",
+      "aggregate": true,
+      "url": "https://aacert.com/ms/api.php?action=parse",
+      "method": "POST",
+      "body": "server=wy&id=%ZZ",
+      "intercept": true
+    },
+    {
+      "name": "stream claimed without consuming during selection",
+      "aggregate": true,
+      "url": "https://aacert.com/ms/api.php?action=parse",
+      "method": "POST",
+      "stream": true,
+      "body": "server=wy&id=346083",
+      "intercept": true
+    },
+    {
+      "name": "NoAction untouched",
+      "aggregate": true,
+      "url": "https://aacert.com/ms/api.php?_t=1",
+      "method": "POST",
+      "body": "server=wy&id=346083",
+      "intercept": false
+    },
+    {
+      "name": "native qishui decoder stays native",
+      "url": "https://open.douyin.com/api/luna/v1/platform/search/",
+      "method": "POST",
+      "aggregate": true,
+      "intercept": false
+    },
+    {
+      "name": "qishui authentication stays native",
+      "url": "https://open.qishui.com/api/luna/v1/platform/client/token/get/",
+      "method": "GET",
+      "aggregate": true,
+      "intercept": false
+    },
+    {
+      "name": "qishui playback details stay native",
+      "url": "https://beta-luna.douyin.com/luna/h5/seo_track?track_id=fixture&device_platform=web",
+      "method": "GET",
+      "aggregate": true,
+      "intercept": false
+    },
+    {
+      "name": "unmapped platform4 backend request stays native",
+      "url": "https://aacert.com/ms/api.php?action=search&platform=4&keyword=fixture&page=0",
+      "method": "GET",
+      "aggregate": true,
+      "intercept": false
+    }
+  ],
+  "kg_request_cases": [
+    {
+      "name": "kg exact native route",
+      "url": "https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=EFEC0563692CAF94C184248B1D83227F",
+      "intercept": true
+    },
+    {
+      "name": "kg lowercase hash accepted",
+      "url": "https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=efec0563692caf94c184248b1d83227f",
+      "intercept": true
+    },
+    {
+      "name": "kg explicit HTTPS port accepted",
+      "url": "https://m.kugou.com:443/app/i/getSongInfo.php?cmd=playInfo&hash=EFEC0563692CAF94C184248B1D83227F",
+      "intercept": true
+    },
+    {
+      "name": "kg POST untouched",
+      "url": "https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=EFEC0563692CAF94C184248B1D83227F",
+      "method": "POST",
+      "intercept": false
+    },
+    {
+      "name": "kg login path untouched",
+      "url": "https://m.kugou.com/app/i/login.php?cmd=playInfo&hash=EFEC0563692CAF94C184248B1D83227F",
+      "intercept": false
+    },
+    {
+      "name": "kg other command untouched",
+      "url": "https://m.kugou.com/app/i/getSongInfo.php?cmd=login&hash=EFEC0563692CAF94C184248B1D83227F",
+      "intercept": false
+    },
+    {
+      "name": "kg missing hash untouched",
+      "url": "https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo",
+      "intercept": false
+    },
+    {
+      "name": "kg short hash untouched",
+      "url": "https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=EFEC0563692CAF94C184248B1D83227",
+      "intercept": false
+    },
+    {
+      "name": "kg nonhex hash untouched",
+      "url": "https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=GFEC0563692CAF94C184248B1D83227F",
+      "intercept": false
+    },
+    {
+      "name": "kg duplicate hash untouched",
+      "url": "https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=EFEC0563692CAF94C184248B1D83227F&hash=EFEC0563692CAF94C184248B1D83227F",
+      "intercept": false
+    },
+    {
+      "name": "kg unexpected quality untouched",
+      "url": "https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=EFEC0563692CAF94C184248B1D83227F&quality=flac",
+      "intercept": false
+    },
+    {
+      "name": "kg unexpected action untouched",
+      "url": "https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=EFEC0563692CAF94C184248B1D83227F&action=login",
+      "intercept": false
+    },
+    {
+      "name": "kg plain HTTP untouched",
+      "url": "http://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=EFEC0563692CAF94C184248B1D83227F",
+      "intercept": false
+    },
+    {
+      "name": "kg other host untouched",
+      "url": "https://kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=EFEC0563692CAF94C184248B1D83227F",
+      "intercept": false
+    },
+    {
+      "name": "kg suffix host untouched",
+      "url": "https://m.kugou.com.example.org/app/i/getSongInfo.php?cmd=playInfo&hash=EFEC0563692CAF94C184248B1D83227F",
+      "intercept": false
+    },
+    {
+      "name": "kg credentials in URL untouched",
+      "url": "https://fixture@m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=EFEC0563692CAF94C184248B1D83227F",
+      "intercept": false
+    },
+    {
+      "name": "kg nondefault port untouched",
+      "url": "https://m.kugou.com:444/app/i/getSongInfo.php?cmd=playInfo&hash=EFEC0563692CAF94C184248B1D83227F",
+      "intercept": false
+    },
+    {
+      "name": "kg URL fragment untouched",
+      "url": "https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=EFEC0563692CAF94C184248B1D83227F#other",
+      "intercept": false
+    },
+    {
+      "name": "kg GET body untouched",
+      "url": "https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=EFEC0563692CAF94C184248B1D83227F",
+      "body": "action=login",
+      "intercept": false
+    },
+    {
+      "name": "kg GET stream untouched",
+      "url": "https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=EFEC0563692CAF94C184248B1D83227F",
+      "stream": true,
+      "intercept": false
+    }
+  ],
+  "merge_cases": [
+    {
+      "name": "round robin stable pair dedup",
+      "page": 0,
+      "responses": [
+        {
+          "code": 200,
+          "total": 2,
+          "data": [
+            {
+              "id": "1",
+              "server": "wy",
+              "title": "A"
+            },
+            {
+              "id": "2",
+              "server": "wy",
+              "title": "B"
+            },
+            {
+              "id": "1",
+              "server": "wy",
+              "title": "duplicate"
+            }
+          ]
+        },
+        {
+          "code": 200,
+          "total": 1,
+          "data": [
+            {
+              "id": "1",
+              "server": "kg",
+              "title": "Same id other source"
+            }
+          ]
+        },
+        {
+          "code": 200,
+          "total": 1,
+          "data": [
+            {
+              "id": "Q",
+              "server": "qq",
+              "title": "C"
+            }
+          ]
+        }
+      ],
+      "expected_pairs": [
+        [
+          "wy",
+          "1"
+        ],
+        [
+          "kg",
+          "1"
+        ],
+        [
+          "qq",
+          "Q"
+        ],
+        [
+          "wy",
+          "2"
+        ]
+      ]
+    },
+    {
+      "name": "partial source failure",
+      "page": 2,
+      "responses": [
+        null,
+        {
+          "code": 502,
+          "data": null
+        },
+        {
+          "code": 200,
+          "data": [
+            {
+              "id": "Q",
+              "server": "qq",
+              "title": "C"
+            }
+          ]
+        }
+      ],
+      "expected_pairs": [
+        [
+          "qq",
+          "Q"
+        ]
+      ]
+    },
+    {
+      "name": "invalid required fields skipped",
+      "page": 0,
+      "responses": [
+        {
+          "code": 200,
+          "data": [
+            {
+              "id": 1,
+              "server": "wy",
+              "title": "numeric id"
+            },
+            {
+              "id": "2",
+              "server": "wy"
+            },
+            {
+              "id": "3",
+              "server": "wy",
+              "title": "ok"
+            }
+          ]
+        }
+      ],
+      "expected_pairs": [
+        [
+          "wy",
+          "3"
+        ]
+      ]
+    },
+    {
+      "name": "empty success is valid",
+      "page": 0,
+      "responses": [
+        {
+          "code": 200,
+          "data": []
+        },
+        null,
+        null
+      ],
+      "expected_pairs": []
+    },
+    {
+      "name": "four sources preserve native IDs and source round robin",
+      "page": 0,
+      "responses": [
+        {
+          "code": 200,
+          "data": [
+            {
+              "id": "same",
+              "server": "wy",
+              "title": "wy"
+            }
+          ]
+        },
+        {
+          "code": 200,
+          "data": [
+            {
+              "id": "same",
+              "server": "kg",
+              "title": "kg"
+            }
+          ]
+        },
+        {
+          "code": 200,
+          "data": [
+            {
+              "id": "same",
+              "server": "qq",
+              "title": "qq"
+            }
+          ]
+        },
+        {
+          "code": 200,
+          "data": [
+            {
+              "id": "same",
+              "server": "qs",
+              "title": "qs"
+            }
+          ]
+        }
+      ],
+      "expected_pairs": [
+        [
+          "wy",
+          "same"
+        ],
+        [
+          "kg",
+          "same"
+        ],
+        [
+          "qq",
+          "same"
+        ],
+        [
+          "qs",
+          "same"
+        ]
+      ]
+    },
+    {
+      "name": "qishui survives other three failures",
+      "page": 1,
+      "responses": [
+        null,
+        null,
+        null,
+        {
+          "code": 200,
+          "data": [
+            {
+              "id": "qishui-native-id",
+              "server": "qs",
+              "title": "Qishui"
+            }
+          ]
+        }
+      ],
+      "expected_pairs": [
+        [
+          "qs",
+          "qishui-native-id"
+        ]
+      ]
+    },
+    {
+      "name": "qishui failure preserves other successful tracks",
+      "page": 0,
+      "responses": [
+        {
+          "code": 200,
+          "data": [
+            {
+              "id": "wy-id",
+              "server": "wy",
+              "title": "Netease"
+            }
+          ]
+        },
+        null,
+        null,
+        null
+      ],
+      "expected_pairs": [
+        [
+          "wy",
+          "wy-id"
+        ]
+      ]
+    }
+  ]
+}

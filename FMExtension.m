@@ -1,0 +1,325 @@
+#import <UIKit/UIKit.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#import "LXSourceRuntime.h"
+#import "FMExtensionProtocol.h"
+#import "FMLockScreen.h"
+#import "FMSettingsEntry.h"
+#import "FMSearchPreferences.h"
+#import "FMQishuiSearch.h"
+#import "FMInsights.h"
+#import "FMInteraction.h"
+#import "FMLXMCUI.h"
+#import "FMNavigation.h"
+
+static NSString *const FMXChanged = @"FMX.changed";
+static NSString *const FMXSelected = @"FMX.selectedSource";
+
+// Keep activation, UI and route selection aligned with metadata this host can supply.
+static NSArray<NSString *> *FMXRoutableQualities(NSDictionary *manifest, NSString *source) {
+    if (![@[@"wy", @"tx", @"kg"] containsObject:source]) return @[];
+    NSArray *advertised = manifest[@"sources"][source][@"qualitys"];
+    if (![advertised isKindOfClass:NSArray.class]) return @[];
+    if ([source isEqual:@"kg"]) return [advertised containsObject:@"128k"] ? @[@"128k"] : @[];
+    NSMutableArray *supported = NSMutableArray.array;
+    for (NSString *quality in @[@"128k", @"320k", @"flac", @"flac24bit"])
+        if ([advertised containsObject:quality]) [supported addObject:quality];
+    return supported;
+}
+
+static NSArray<NSString *> *FMXRoutableSourceNames(NSDictionary *manifest) {
+    NSMutableArray *names = NSMutableArray.array;
+    NSDictionary *labels = @{@"wy":@"网易云", @"tx":@"QQ", @"kg":@"酷狗（标准音质）"};
+    for (NSString *source in @[@"wy", @"tx", @"kg"])
+        if (FMXRoutableQualities(manifest, source).count) [names addObject:labels[source]];
+    return names;
+}
+
+@interface FMXManager : NSObject
+@property (atomic, strong) LXSourceRuntime *runtime;
+@property (atomic, copy) NSString *status;
+@property (nonatomic, copy) NSArray<NSDictionary *> *files;
+@property (nonatomic, copy) NSString *selectedFile;
+@property (nonatomic) NSUInteger generation;
++ (instancetype)shared;
+- (NSURL *)directory;
+- (void)refreshFiles;
+- (void)activate:(NSDictionary *)file;
+- (void)disable;
+@end
+
+@implementation FMXManager
++ (instancetype)shared { static FMXManager *manager; static dispatch_once_t once; dispatch_once(&once, ^{ manager = [FMXManager new]; manager.status = @"未启用 JS 音源"; }); return manager; }
+- (NSURL *)directory {
+    NSURL *base = [[NSFileManager defaultManager] URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
+    NSURL *dir = [base URLByAppendingPathComponent:@"FMExtensionSources" isDirectory:YES];
+    [[NSFileManager defaultManager] createDirectoryAtURL:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    return dir;
+}
+- (void)refreshFiles {
+    NSArray *list = [[NSFileManager defaultManager] contentsOfDirectoryAtURL:self.directory includingPropertiesForKeys:nil options:NSDirectoryEnumerationSkipsHiddenFiles error:nil];
+    NSMutableArray *files = [NSMutableArray array];
+    for (NSURL *url in list) if ([url.pathExtension.lowercaseString isEqual:@"js"]) {
+        NSString *name = [[NSUserDefaults standardUserDefaults] stringForKey:[@"FMX.name." stringByAppendingString:url.lastPathComponent]] ?: url.lastPathComponent;
+        [files addObject:@{@"file":url.lastPathComponent, @"name":name}];
+    }
+    self.files = [files sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) { return [a[@"name"] localizedStandardCompare:b[@"name"]]; }];
+}
+- (void)changed { [[NSNotificationCenter defaultCenter] postNotificationName:FMXChanged object:nil]; }
+- (void)disable {
+    self.generation++;
+    LXSourceRuntime *old = self.runtime; self.runtime = nil; [old invalidate];
+    self.selectedFile = nil;
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:FMXSelected];
+    self.status = @"未启用 JS 音源"; [self changed];
+}
+- (void)activate:(NSDictionary *)file {
+    [self disable];
+    NSString *filename = file[@"file"];
+    if (![filename isKindOfClass:NSString.class] || ![filename.lastPathComponent isEqual:filename]) return;
+    NSURL *url = [self.directory URLByAppendingPathComponent:filename];
+    NSNumber *size; [url getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
+    if (size.unsignedLongLongValue > 2*1024*1024) { self.status = @"文件超过 2 MB"; [self changed]; return; }
+    NSString *script = [NSString stringWithContentsOfURL:url encoding:NSUTF8StringEncoding error:nil];
+    NSString *bootstrap = [NSString stringWithContentsOfFile:[[NSBundle mainBundle] pathForResource:@"LXBootstrap" ofType:@"js"] encoding:NSUTF8StringEncoding error:nil];
+    if (!script || !bootstrap) { self.status = @"无法读取音源文件"; [self changed]; return; }
+    NSUInteger generation = self.generation;
+    LXSourceRuntime *runtime = [[LXSourceRuntime alloc] initWithBootstrapScript:bootstrap];
+    self.runtime = runtime;
+    self.selectedFile = filename;
+    __weak FMXManager *weakManager = self;
+    __weak LXSourceRuntime *weakRuntime = runtime;
+    runtime.updateAlertHandler = ^(NSDictionary *alert) {
+        FMXManager *manager = weakManager;
+        if (!manager || manager.runtime != weakRuntime) return;
+        manager.status = [@"音源更新提示：" stringByAppendingString:alert[@"log"] ?: @""];
+        [manager changed];
+    };
+    self.status = @"正在初始化音源…"; [self changed];
+    // Clear the saved selection until initialization succeeds, so a failed import
+    // cannot repeatedly auto-run on subsequent launches.
+    [runtime loadSource:script name:file[@"name"] timeout:12 completion:^(NSDictionary *manifest, NSError *error) {
+        if (self.generation != generation || self.runtime != runtime) return;
+        NSArray *sources = FMXRoutableSourceNames(manifest);
+        if (error || !sources.count) {
+            self.runtime = nil; self.selectedFile = nil; [runtime invalidate];
+            self.status = error ? [@"初始化失败：" stringByAppendingString:error.localizedDescription]
+                : @"此音源没有本版可用平台：仅支持网易云、QQ 和酷狗基础音源，酷狗须含标准音质。";
+        }
+        else {
+            [[NSUserDefaults standardUserDefaults] setObject:filename forKey:FMXSelected];
+            self.status = [NSString stringWithFormat:@"已启用 %@ · %@", file[@"name"], [sources componentsJoinedByString:@" / "]];
+        }
+        [self changed];
+    }];
+}
+@end
+
+@interface FMXPanel : UITableViewController <UIDocumentPickerDelegate>
+@end
+@implementation FMXPanel
+- (void)viewDidLoad {
+    [super viewDidLoad]; self.title = @"音源与扩展";
+    self.view.tintColor = UIColor.systemPinkColor;
+    self.navigationController.navigationBar.tintColor = UIColor.systemPinkColor;
+    if (self.navigationController.viewControllers.firstObject == self)
+        self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:self action:@selector(close)];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(reload) name:FMXChanged object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(reload) name:FMXQishuiSearchStatusDidChangeNotification object:nil];
+    [self reload];
+}
+- (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self]; }
+- (void)close { [self dismissViewControllerAnimated:YES completion:nil]; }
+- (void)reload { [[FMXManager shared] refreshFiles]; [self.tableView reloadData]; }
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 5; }
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return section == 0 ? 3 : section == 1 ? [FMXManager shared].files.count + 1 : section == 2 ? 2 : 1; }
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section { return @[@"搜索", @"JS 音源", @"锁屏", @"音源状态", @"听歌记录"][section]; }
+- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+    if (section == 0) return @"开启后，首页搜索汇总网易云、QQ、酷狗和汽水。单独搜索某个平台时，请关闭聚合搜索。汽水歌曲使用原 App 的播放方式。";
+    if (section == 1) return @"支持网易云、QQ 和酷狗的基础洛雪音源。酷狗 JS 使用标准音质；部分脚本需要额外歌曲信息或尚未支持的功能。仅启用你信任的脚本。";
+    if (section == 2) return @"用当前封面在手机上生成轻微缩放的循环动画。系统需要时才生成；低电量或减少动态效果开启时显示静态封面。需要 iOS 26 或更高版本。";
+    if (section == 4) return @"按实际听歌记录查看月度、年度偏好，只保存在本机。";
+    return @"音源服务的可用歌曲和音质由对应脚本及服务决定。";
+}
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)path {
+    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+    cell.textLabel.numberOfLines = 0; cell.detailTextLabel.numberOfLines = 0;
+    if (path.section == 0 && path.row == 0) {
+        cell.textLabel.text = @"聚合搜索"; UISwitch *toggle = [UISwitch new]; toggle.on = [[NSUserDefaults standardUserDefaults] boolForKey:@"FMX.aggregateSearch"];
+        toggle.onTintColor = UIColor.systemPinkColor;
+        [toggle addTarget:self action:@selector(toggleSearch:) forControlEvents:UIControlEventValueChanged]; cell.accessoryView = toggle; cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    } else if (path.section == 0 && path.row == 1) { cell.textLabel.text = @"从文件导入 JS 音源"; cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator; }
+    else if (path.section == 0) {
+        cell.textLabel.text = @"汽水搜索";
+        cell.detailTextLabel.text = FMXQishuiSearchStatus()[@"message"];
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    }
+    else if (path.section == 1) {
+        if (path.row == 0) { cell.textLabel.text = @"停用 JS，使用原播放方式"; if (![FMXManager shared].runtime) cell.accessoryType = UITableViewCellAccessoryCheckmark; }
+        else {
+            NSDictionary *file = [FMXManager shared].files[path.row - 1]; cell.textLabel.text = file[@"name"];
+            if ([file[@"file"] isEqual:[[NSUserDefaults standardUserDefaults] stringForKey:FMXSelected]]) cell.accessoryType = UITableViewCellAccessoryCheckmark;
+        }
+    } else if (path.section == 2 && path.row == 0) {
+        cell.textLabel.text = @"动态锁屏封面"; UISwitch *toggle = [UISwitch new];
+        toggle.onTintColor = UIColor.systemPinkColor;
+        toggle.on = [[NSUserDefaults standardUserDefaults] boolForKey:@"FMX.dynamicArtwork"];
+        [toggle addTarget:self action:@selector(toggleArtwork:) forControlEvents:UIControlEventValueChanged];
+        cell.accessoryView = toggle; cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    } else if (path.section == 2) {
+        NSDictionary *state = FMLockScreenStatus();
+        cell.textLabel.text = ![state[@"enabled"] boolValue] ? @"已关闭" : ![state[@"supported"] boolValue] ? @"系统当前未提供动态封面能力" : ![state[@"generationAllowed"] boolValue] ? @"当前使用静态封面" : [state[@"prepared"] boolValue] ? @"封面已就绪" : @"播放歌曲后准备动态封面";
+        cell.detailTextLabel.text = [state[@"videoError"] length] ? @"动画生成未完成，继续显示静态封面" : nil;
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    } else if (path.section == 4) { cell.textLabel.text = @"听歌画像"; cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator; }
+    else { cell.textLabel.text = [FMXManager shared].status; cell.selectionStyle = UITableViewCellSelectionStyleNone; }
+    return cell;
+}
+- (void)toggleSearch:(UISwitch *)toggle { FMSearchPreferencesSetAggregateEnabled(toggle.on); }
+- (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)path { return path.section == 1 && path.row > 0; }
+- (void)tableView:(UITableView *)tableView commitEditingStyle:(UITableViewCellEditingStyle)style forRowAtIndexPath:(NSIndexPath *)path {
+    if (style != UITableViewCellEditingStyleDelete || path.section != 1 || path.row < 1) return;
+    FMXManager *manager = [FMXManager shared];
+    NSDictionary *file = manager.files[path.row - 1]; NSString *name = file[@"file"];
+    if ([manager.selectedFile isEqual:name]) [manager disable];
+    NSError *error;
+    if ([[NSFileManager defaultManager] removeItemAtURL:[manager.directory URLByAppendingPathComponent:name] error:&error]) {
+        [[NSUserDefaults standardUserDefaults] removeObjectForKey:[@"FMX.name." stringByAppendingString:name]];
+        [self reload];
+    } else [self showError:error.localizedDescription];
+}
+- (void)toggleArtwork:(UISwitch *)toggle {
+    [[NSUserDefaults standardUserDefaults] setBool:toggle.on forKey:@"FMX.dynamicArtwork"];
+    FMLockScreenRefresh();
+    dispatch_async(dispatch_get_main_queue(), ^{ [self.tableView reloadData]; });
+}
+- (void)showError:(NSString *)message {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"导入失败" message:message preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)path {
+    [tableView deselectRowAtIndexPath:path animated:YES];
+    if (path.section == 4) { [self.navigationController pushViewController:FMInsightsController() animated:YES]; return; }
+    if (path.section == 0 && path.row == 1) {
+        UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeJavaScript, UTTypePlainText] asCopy:YES]; picker.delegate = self; picker.allowsMultipleSelection = YES;
+        [self presentViewController:picker animated:YES completion:nil];
+    } else if (path.section == 1 && path.row == 0) [[FMXManager shared] disable];
+    else if (path.section == 1 && path.row > 0) {
+        NSDictionary *file = [FMXManager shared].files[path.row - 1];
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"启用此音源？" message:@"脚本会在 App 内运行并可发起网络请求。请确认来源可信。" preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"启用" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) { [[FMXManager shared] activate:file]; }]];
+        [self presentViewController:alert animated:YES completion:nil];
+    }
+}
+- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    NSString *failure;
+    for (NSURL *url in urls) {
+        BOOL access = [url startAccessingSecurityScopedResource];
+        NSNumber *size; [url getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
+        if (![url.pathExtension.lowercaseString isEqual:@"js"] || !size || size.unsignedLongLongValue > 2*1024*1024) failure = @"仅支持不超过 2 MB 的 .js 文件。";
+        else {
+            NSData *data = [NSData dataWithContentsOfURL:url options:NSDataReadingMappedIfSafe error:nil];
+            if (!data || data.length > 2*1024*1024 || ![[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]) failure = @"文件不是有效的 UTF-8 脚本。";
+            else {
+                NSString *name = [[NSUUID UUID].UUIDString stringByAppendingPathExtension:@"js"];
+                NSError *error;
+                if (![data writeToURL:[[FMXManager shared].directory URLByAppendingPathComponent:name] options:NSDataWritingAtomic error:&error]) failure = error.localizedDescription;
+                else [[NSUserDefaults standardUserDefaults] setObject:url.lastPathComponent forKey:[@"FMX.name." stringByAppendingString:name]];
+            }
+        }
+        if (access) [url stopAccessingSecurityScopedResource];
+    }
+    [self reload];
+    if (failure) dispatch_async(dispatch_get_main_queue(), ^{ [self showError:failure]; });
+}
+@end
+
+static NSString *FMXLXSource(NSString *server) { if ([server isEqual:@"qq"]) return @"tx"; if ([server isEqual:@"wy"]) return @"wy"; if ([server isEqual:@"kg"]) return @"kg"; return nil; }
+static NSString *FMXQuality(NSString *level, NSArray *available) {
+    NSDictionary *mapping = @{@"standard":@"128k", @"qq_standard":@"128k", @"hq":@"320k", @"lossless":@"flac"};
+    NSString *quality = mapping[level] ?: level;
+    if ([available containsObject:quality]) return quality;
+    // Fall back explicitly to an advertised basic quality; never label it lossless.
+    for (NSString *fallback in @[@"128k", @"320k", @"flac", @"flac24bit"]) if ([available containsObject:fallback]) return fallback;
+    return available.firstObject;
+}
+
+__attribute__((constructor)) static void FMXInitialize(void) {
+    @autoreleasepool {
+        if (![[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] isEqual:@"4.2.7"] || ![NSBundle.mainBundle.executablePath.lastPathComponent isEqual:@"FreeMusic"]) return;
+        // Capture must install before the host registers its original AVPlayer
+        // time observer. UI setup remains deferred to the main run loop below.
+        FMInsightsInstall();
+        [FMExtensionProtocol setParseHandler:^FMXParseCancellation(NSURLRequest *request, NSDictionary<NSString *,NSString *> *parameters, FMXProtocolCompletion completion) {
+            LXSourceRuntime *runtime = [FMXManager shared].runtime;
+            NSString *source = FMXLXSource(parameters[@"server"]);
+            BOOL directKugou = [request.URL.host.lowercaseString isEqual:@"m.kugou.com"];
+            if (!runtime || !source) { completion(@{@"code":@503, @"msg":@"JS 音源当前不可用"}, nil); return nil; }
+            NSArray *qualities = FMXRoutableQualities(runtime.manifest, source);
+            NSString *quality = directKugou ? @"128k" : FMXQuality(parameters[@"level"] ?: @"128k", qualities);
+            NSMutableDictionary *info = [@{@"name":parameters[@"title"] ?: @"", @"singer":parameters[@"singer"] ?: @"", @"source":source ?: @"", @"types":@[], @"_types":@{}} mutableCopy];
+            if ([source isEqual:@"wy"]) info[@"songmid"] = parameters[@"id"] ?: @"";
+            if ([source isEqual:@"tx"]) info[@"songmid"] = parameters[@"id"] ?: @"";
+            if ([source isEqual:@"kg"]) { info[@"hash"] = parameters[@"id"] ?: @""; info[@"songmid"] = parameters[@"id"] ?: @""; }
+            if (!runtime || !source || !quality) { completion(@{@"code":@503, @"msg":@"JS 音源当前不可用"}, nil); return nil; }
+            NSString *identifier = [runtime resolveMusicURLForSource:source musicInfo:info quality:quality timeout:15 completion:^(NSURL *url, NSError *error) {
+                if (error) {
+                    FMXManager *manager = [FMXManager shared];
+                    if (manager.runtime == runtime && !runtime.manifest) {
+                        [manager disable]; manager.status = @"音源已停止，请重新启用或更换音源"; [manager changed];
+                    }
+                    completion(directKugou ? @{@"url":@""} : @{@"code":@502, @"msg":[@"JS 音源：" stringByAppendingString:error.localizedDescription]}, nil);
+                }
+                else completion(directKugou ? @{@"url":url.absoluteString, @"bitRate":@128} : @{@"code":@200, @"data":@{@"url":url.absoluteString, @"quality":quality}}, nil);
+            }];
+            return ^(NSError *reason) {
+                if (reason.code == NSURLErrorTimedOut) {
+                    // A short outer request deadline can beat the runtime's own timer.
+                    // Discard it before cancellation removes the pending resolution.
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        FMXManager *manager = [FMXManager shared];
+                        if (manager.runtime != runtime) return;
+                        [manager disable];
+                        manager.status = @"音源解析超时，已停用；请重新启用或更换音源";
+                        [manager changed];
+                    });
+                    [runtime invalidate];
+                } else {
+                    [runtime cancelRequestWithIdentifier:identifier];
+                }
+            };
+        } canHandle:^BOOL(NSURLRequest *request, NSDictionary<NSString *,NSString *> *parameters) {
+            NSString *source = FMXLXSource(parameters[@"server"]);
+            NSDictionary *manifest = [FMXManager shared].runtime.manifest;
+            return source && ![parameters[@"qmc"] isEqual:@"1"] && [parameters[@"id"] length]
+                && FMXRoutableQualities(manifest, source).count > 0;
+        }];
+        [FMExtensionProtocol install];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            FMSearchPreferencesInstall();
+            FMLockScreenInstall();
+            FMInteractionInstall();
+            FMLXMCUIInstall();
+            FMNavigationSetProfileAction(^(UIViewController *profileController) {
+                UIViewController *insights = FMInsightsController();
+                if (profileController.navigationController.visibleViewController == profileController)
+                    [profileController.navigationController pushViewController:insights animated:YES];
+                else [profileController presentViewController:[[UINavigationController alloc] initWithRootViewController:insights] animated:YES completion:nil];
+            });
+            FMNavigationInstall();
+            FMSettingsEntryInstall(^(UIViewController *settingsController) {
+                if (settingsController.presentedViewController) return;
+                FMXPanel *panel = [[FMXPanel alloc] initWithStyle:UITableViewStyleInsetGrouped];
+                UINavigationController *navigation = settingsController.navigationController;
+                if (navigation && navigation.visibleViewController == settingsController)
+                    [navigation pushViewController:panel animated:YES];
+                else
+                    [settingsController presentViewController:[[UINavigationController alloc] initWithRootViewController:panel] animated:YES completion:nil];
+            });
+            FMXManager *manager = [FMXManager shared]; [manager refreshFiles];
+            NSString *selected = [[NSUserDefaults standardUserDefaults] stringForKey:FMXSelected];
+            for (NSDictionary *file in manager.files) if ([file[@"file"] isEqual:selected]) { [manager activate:file]; break; }
+        });
+    }
+}

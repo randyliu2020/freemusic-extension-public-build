@@ -1,0 +1,125 @@
+name: Build FreeMusic extension only
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 25
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+    steps:
+      - name: Check out extension source
+        uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Verify no IPA was committed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$(git ls-files '*.ipa' '*.IPA')" ]]; then
+            echo 'FAILED: this repository must contain extension source only, without user IPA files.' >&2
+            exit 1
+          fi
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Test JavaScript bootstrap contracts
+        shell: bash
+        run: node test_lx_bootstrap.cjs
+
+      - name: Test JavaScript runtime on macOS
+        shell: bash
+        run: bash test_lx_runtime_macos.sh
+
+      - name: Test request interception on macOS
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun clang -fobjc-arc -fblocks -framework Foundation \
+            FMExtensionProtocol.m FMQishuiSearch.m FMLXMC.m FMExtensionProtocolTests.m -lz -o protocol-tests
+          ./protocol-tests intercept-contract-fixtures.json
+
+      - name: Test Qishui search and cursor pagination
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun clang -fobjc-arc -fblocks -framework Foundation \
+            FMQishuiSearch.m FMQishuiSearchTests.m -o qishui-search-tests
+          ./qishui-search-tests
+
+      - name: Test global Home search preferences
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun clang -fobjc-arc -fblocks -framework Foundation \
+            FMSearchPreferences.m FMSearchPreferencesTests.m -o search-preference-tests
+          ./search-preference-tests
+
+      - name: Test monthly and annual listening statistics
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun clang -fobjc-arc -fblocks -framework Foundation \
+            FMListeningHistory.m FMListeningHistoryTests.m -o insights-tests
+          ./insights-tests
+
+      - name: Test LXMC playlists and single-use local import bridge
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun clang -fobjc-arc -fblocks -framework Foundation \
+            FMLXMC.m FMLXMCTests.m -lz -o lxmc-tests
+          ./lxmc-tests
+
+      - name: Test Mach-O packaging structure without a user IPA
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          python3 test_package_extension.py -v
+          python3 test_signing_identity.py
+          python3 test_verify_interaction_result.py
+
+      - name: Compile iOS device extension
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: bash build_extension.sh . dist
+
+      - name: Test extension UI and artwork on iPhone Simulator
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: bash test_ios_smoke.sh . smoke-artifact
+
+      - name: Upload simulator validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: FMExtension-simulator-validation
+          path: smoke-artifact/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload extension artifacts only
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: FMExtension-arm64
+          path: |
+            dist/FMExtension.dylib
+            dist/LXBootstrap.js
+            dist/build-manifest.json
+          if-no-files-found: error
+          retention-days: 7
+
+# Copy this file to .github/workflows/build-extension.yml in the build repository.
+# Keep production/test sources and the build/packaging Python tools at repo root.
+# The downloaded dylib is injected into the original IPA locally, never here.
