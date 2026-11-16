@@ -9,7 +9,27 @@ permissions:
   contents: read
 
 jobs:
+  instruction-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out extension source
+        uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
+      - name: Select Python for independent ARM64 emulation
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Assemble, disassemble and execute ARM64 predicate fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet setuptools==80.9.0 capstone==5.0.6 unicorn==2.1.4 keystone-engine==0.9.2
+          python test_player_swipe_patch.py -v
+
   build:
+    needs: instruction-tests
     runs-on: xcode-27
     timeout-minutes: 25
     env:
@@ -89,9 +109,6 @@ jobs:
           python3 test_package_extension.py -v
           python3 test_signing_identity.py
           python3 test_verify_interaction_result.py
-          python3 -m venv "$RUNNER_TEMP/swipe-test-venv"
-          "$RUNNER_TEMP/swipe-test-venv/bin/python" -m pip install --quiet capstone==5.0.6 unicorn==2.1.4 keystone-engine==0.9.2
-          "$RUNNER_TEMP/swipe-test-venv/bin/python" test_player_swipe_patch.py -v
 
       - name: Compile iOS device extension
         if: ${{ !cancelled() }}

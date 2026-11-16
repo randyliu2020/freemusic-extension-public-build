@@ -11,6 +11,90 @@ stage="environment"
 device_id=""
 work_dir=""
 
+# Every simulator boot/diagnostic/cleanup command has its own deadline. PTY mode keeps
+# bootstatus's progress visible even if the process later needs termination;
+# redirected stdout was still empty after both previous 180-second timeouts.
+# Only the subprocess group created here is terminated, never CoreSimulatorService.
+bounded_sim_command() {
+  python3 - "$@" <<'PY'
+import errno,json,os,pathlib,selectors,signal,subprocess,sys,time
+mode,limit,filename=sys.argv[1:4]; command=sys.argv[4:]
+limit=float(limit); path=pathlib.Path(filename); started=time.monotonic()
+result={'command':command,'timeout_seconds':limit,'timed_out':False,'mode':mode}
+process=None; master=None; slave=None; selector=None
+def stop_own_process():
+    if process is None or process.poll() is not None: return
+    try: os.killpg(process.pid,signal.SIGTERM)
+    except ProcessLookupError: return
+    try: process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        try: os.killpg(process.pid,signal.SIGKILL)
+        except ProcessLookupError: pass
+        process.wait(timeout=3)
+try:
+    with path.open('wb',buffering=0) as log:
+        if mode=='pty':
+            import pty
+            master,slave=pty.openpty(); os.set_blocking(master,False)
+            process=subprocess.Popen(command,stdout=slave,stderr=slave,start_new_session=True)
+            os.close(slave); slave=None
+            selector=selectors.DefaultSelector(); selector.register(master,selectors.EVENT_READ)
+            heartbeat=started+30
+            while True:
+                now=time.monotonic()
+                if now-started>=limit and process.poll() is None:
+                    result['timed_out']=True; stop_own_process()
+                if now>=heartbeat and process.poll() is None:
+                    print(f'Waiting for simulator: {int(now-started)}s / {int(limit)}s',flush=True); heartbeat=now+30
+                events=selector.select(timeout=0.5)
+                received=False
+                for key,_ in events:
+                    try: data=os.read(master,65536)
+                    except OSError as error:
+                        if error.errno not in (errno.EIO,errno.EAGAIN): raise
+                        data=b''
+                    if data:
+                        log.write(data); print(data.decode('utf-8','replace'),end='',flush=True); received=True
+                if process.poll() is not None and not received: break
+        elif mode=='raw':
+            # Keep inventory JSON clean; metadata goes into a separate file.
+            process=subprocess.Popen(command,stdout=log,stderr=subprocess.PIPE,start_new_session=True)
+            try: _,error=process.communicate(timeout=limit)
+            except subprocess.TimeoutExpired:
+                result['timed_out']=True; stop_own_process(); _,error=process.communicate(timeout=3)
+            if error: path.with_name(path.name+'.stderr').write_bytes(error)
+        else: raise ValueError('Unsupported command output mode')
+        result['returncode']=process.wait(timeout=3)
+except Exception as error:
+    result['error']=f'{type(error).__name__}: {error}'
+    stop_own_process(); result['returncode']=1
+finally:
+    if selector is not None: selector.close()
+    for descriptor in (master,slave):
+        if descriptor is not None:
+            try: os.close(descriptor)
+            except OSError: pass
+    result['elapsed_seconds']=round(time.monotonic()-started,3)
+    path.with_name(path.name+'.meta.json').write_text(json.dumps(result,indent=2)+'\n')
+if result['timed_out'] or result.get('returncode')!=0:
+    print(f"Simulator command failed: {command!r}; see {path.name}.meta.json",file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+simulator_diagnostics() {
+  local label="$1"
+  bounded_sim_command raw 15 "$output_dir/$label-devices.json" xcrun simctl list devices --json || true
+  bounded_sim_command raw 10 "$output_dir/$label-service.log" launchctl print "gui/$(id -u)/com.apple.CoreSimulator.CoreSimulatorService" || true
+  bounded_sim_command raw 10 "$output_dir/$label-processes.log" ps -axo pid,ppid,stat,etime,comm || true
+  bounded_sim_command raw 10 "$output_dir/$label-disk.log" df -h "$output_dir" || true
+  if [[ -n "$device_id" && "$label" != preboot ]]; then
+    bounded_sim_command raw 15 "$output_dir/$label-system.log" /usr/bin/log show --last 2m --style compact --predicate "eventMessage CONTAINS '$device_id'" || true
+    bounded_sim_command raw 15 "$output_dir/$label-springboard.log" xcrun simctl spawn "$device_id" log show --last 1m --style compact --predicate 'process == "SpringBoard" OR process == "backboardd"' || true
+    bounded_sim_command raw 15 "$output_dir/$label-screenshot.log" xcrun simctl io "$device_id" screenshot --display=1 "$output_dir/$label.png" || true
+  fi
+}
+
 finalize() {
   result=$?
   trap - EXIT
@@ -27,10 +111,10 @@ try:
 except (OSError,subprocess.TimeoutExpired): pass
 PY
     fi
-    xcrun simctl io "$device_id" screenshot --display=1 "$output_dir/simulator-final.png" >/dev/null 2>&1 || true
-    xcrun simctl terminate "$device_id" org.codex.fmx.smoke >/dev/null 2>&1 || true
-    xcrun simctl shutdown "$device_id" >/dev/null 2>&1 || true
-    xcrun simctl delete "$device_id" >/dev/null 2>&1 || true
+    bounded_sim_command raw 15 "$output_dir/cleanup-screenshot.log" xcrun simctl io "$device_id" screenshot --display=1 "$output_dir/simulator-final.png" || true
+    bounded_sim_command raw 10 "$output_dir/cleanup-terminate.log" xcrun simctl terminate "$device_id" org.codex.fmx.smoke || true
+    bounded_sim_command raw 30 "$output_dir/cleanup-shutdown.log" xcrun simctl shutdown "$device_id" || true
+    bounded_sim_command raw 15 "$output_dir/cleanup-delete.log" xcrun simctl delete "$device_id" || true
   fi
   if [[ "$result" -ne 0 ]]; then
     python3 - "$stage" "$result" <<'PY'
@@ -124,7 +208,7 @@ codesign --force --sign - "$app_dir/Frameworks/SmokeSettingsFixture.dylib" >>"$o
 codesign --force --sign - "$app_dir" >>"$output_dir/sign.log" 2>&1
 
 stage="select_available_ios_simulator"
-xcrun simctl list --json > "$output_dir/simctl-inventory.json"
+bounded_sim_command raw 60 "$output_dir/simctl-inventory.json" xcrun simctl list --json
 python3 - "$output_dir/simctl-inventory.json" "$work_dir/selection.txt" "$output_dir/simulator.json" <<'PY'
 import json,pathlib,re,sys
 data=json.loads(pathlib.Path(sys.argv[1]).read_text())
@@ -148,17 +232,37 @@ pathlib.Path(sys.argv[3]).write_text(json.dumps({'runtime':runtime,'device_type'
 PY
 runtime_id="$(sed -n '1p' "$work_dir/selection.txt")"
 device_type="$(sed -n '2p' "$work_dir/selection.txt")"
-device_id="$(xcrun simctl create "FMX Smoke $$" "$device_type" "$runtime_id")"
-stage="boot_simulator"
-xcrun simctl boot "$device_id"
-# Bound bootstatus without relying on GNU timeout, which macOS does not ship.
-python3 - "$device_id" "$output_dir/boot.log" <<'PY'
-import pathlib,subprocess,sys
-with pathlib.Path(sys.argv[2]).open('w') as log:
-    result=subprocess.run(['xcrun','simctl','bootstatus',sys.argv[1],'-b'],stdout=log,stderr=subprocess.STDOUT,timeout=180)
-    result.check_returncode()
+device_name="FMX Smoke $$"
+bounded_sim_command raw 60 "$output_dir/device-create.log" xcrun simctl create "$device_name" "$device_type" "$runtime_id"
+created_id="$(tr -d '\r\n' < "$output_dir/device-create.log")"
+[[ "$created_id" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]] || { echo "Invalid newly created simulator identifier" >&2; exit 2; }
+device_id="$created_id"
+python3 - "$device_id" "$device_name" "$runtime_id" "$device_type" "$output_dir/created-device.json" <<'PY'
+import json,pathlib,sys
+pathlib.Path(sys.argv[5]).write_text(json.dumps(dict(udid=sys.argv[1],name=sys.argv[2],runtime=sys.argv[3],device_type=sys.argv[4],created_for_this_run=True),indent=2)+'\n')
 PY
-xcrun simctl status_bar "$device_id" override --time '9:41' --batteryState charged --batteryLevel 100 >/dev/null 2>&1 || true
+stage="boot_simulator"
+simulator_diagnostics preboot
+boot_ready=false
+if bounded_sim_command pty 60 "$output_dir/boot-request.log" xcrun simctl boot "$device_id" &&
+   bounded_sim_command pty 360 "$output_dir/boot.log" xcrun simctl bootstatus "$device_id" -b; then
+  boot_ready=true
+else
+  # One recovery only, and only the exact fresh device created above. Do not
+  # kill services, shutdown all devices, erase a device, or select another OS.
+  simulator_diagnostics boot-first-failure
+  stage="recover_own_simulator_once"
+  if bounded_sim_command raw 30 "$output_dir/recovery-shutdown.log" xcrun simctl shutdown "$device_id" &&
+     bounded_sim_command pty 60 "$output_dir/recovery-boot-request.log" xcrun simctl boot "$device_id" &&
+     bounded_sim_command pty 180 "$output_dir/boot-recovery.log" xcrun simctl bootstatus "$device_id" -b; then
+    boot_ready=true
+  else
+    simulator_diagnostics boot-final-failure
+  fi
+fi
+[[ "$boot_ready" == true ]] || { echo "Self-created simulator failed both bounded boot attempts; no application/UI tests were skipped or passed" >&2; exit 1; }
+bounded_sim_command raw 15 "$output_dir/boot-ready-devices.json" xcrun simctl list devices --json
+bounded_sim_command raw 15 "$output_dir/status-bar.log" xcrun simctl status_bar "$device_id" override --time '9:41' --batteryState charged --batteryLevel 100 || true
 stage="install_self_authored_host"
 xcrun simctl install "$device_id" "$app_dir"
 container="$(xcrun simctl get_app_container "$device_id" org.codex.fmx.smoke data)"
