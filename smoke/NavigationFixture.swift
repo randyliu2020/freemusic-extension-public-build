@@ -149,7 +149,7 @@ public func fmNavStartFixtureOCRProbe() {
             do {
                 try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
                 let lines: [[String: Any]] = (request.results ?? []).map { observation in
-                    ["box": NSStringFromCGRect(observation.boundingBox), "candidates": observation.topCandidates(3).map { ["text": $0.string, "confidence": $0.confidence] as [String: Any] }]
+                    ["box": NSCoder.string(for: observation.boundingBox), "candidates": observation.topCandidates(3).map { ["text": $0.string, "confidence": $0.confidence] as [String: Any] }]
                 }
                 reports.append(["scale": scale, "lines": lines])
             } catch { let failure = error as NSError; reports.append(["scale": scale, "error_domain": failure.domain, "error_code": failure.code]) }
