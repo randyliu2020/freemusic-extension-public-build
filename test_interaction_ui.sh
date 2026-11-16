@@ -7,6 +7,8 @@ source_dir="$(cd "$(dirname "$0")" && pwd -P)"
 device_id="$1"
 output_dir="$2"
 [[ "$(uname -s)" == Darwin ]] || { echo "Xcode and iOS Simulator required" >&2; exit 2; }
+ui_arch="$(uname -m)"
+[[ "$ui_arch" == arm64 || "$ui_arch" == x86_64 ]] || { echo "Unsupported UI test runner architecture: $ui_arch" >&2; exit 2; }
 [[ ! -e "$output_dir" ]] || { echo "Use a new UI test artifact directory" >&2; exit 2; }
 mkdir -p "$output_dir"
 output_dir="$(cd "$output_dir" && pwd -P)"
@@ -46,7 +48,7 @@ xcodebuild test \
   -derivedDataPath "$build_dir" \
   -resultBundlePath "$output_dir/interaction.xcresult" \
   -parallel-testing-enabled NO -maximum-concurrent-test-simulator-destinations 1 \
-  CODE_SIGNING_ALLOWED=NO 2>&1 | tee "$output_dir/xcodebuild.log"
+  ONLY_ACTIVE_ARCH=YES "ARCHS=$ui_arch" CODE_SIGNING_ALLOWED=NO 2>&1 | tee "$output_dir/xcodebuild.log"
 stage="validate_two_actually_executed_ui_tests"
 xcrun xcresulttool get test-results summary --path "$output_dir/interaction.xcresult" > "$output_dir/xcresult-summary.json"
 python3 "$source_dir/verify_interaction_result.py" "$output_dir/xcresult-summary.json" > "$output_dir/validated-execution-counts.pending"

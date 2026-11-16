@@ -44,8 +44,8 @@ BOOL (^preservesObjects)(NSArray *,NSArray *)=^BOOL(NSArray *original,NSArray *c
             }
         }
         Check(opened&&[NSUserDefaults.standardUserDefaults integerForKey:@"smoke.fmnav.likes-appearance-count"]==1,@"Original Favorites NavigationLink opens exactly once and destination appears");
-        Check([state[@"axCandidateCount"] unsignedIntegerValue]==0&&[state[@"activationPath"] hasPrefix:@"primary_action_"],@"AX-empty visible Favorites row navigates through its original public cell primary action");
-        return @{@"native_tab_model_count":@5,@"discovery_hidden":@YES,@"favorites_opened":@YES,@"ax_empty_public_primary_action":@YES,@"original_app_used":@NO,@"diagnostics":state};
+        Check([state[@"axCandidateCount"] unsignedIntegerValue]==0&&[state[@"activationPath"] hasPrefix:@"selection_flow_"]&&[state[@"selectionCallbackDelivered"] boolValue],@"AX-empty visible Favorites row navigates through its original public cell selection delegate");
+        return @{@"native_tab_model_count":@5,@"discovery_hidden":@YES,@"favorites_opened":@YES,@"ax_empty_public_selection_flow":@YES,@"original_app_used":@NO,@"diagnostics":state};
     } @finally {Main(^{if(host.presentedViewController)[host dismissViewControllerAnimated:NO completion:nil];self.window.rootViewController=oldRoot;[self.window makeKeyAndVisible];});}
 }];
 [self test:@"profile_insights_preserve_original_swiftui_toolbar_groups" body:^NSDictionary *{

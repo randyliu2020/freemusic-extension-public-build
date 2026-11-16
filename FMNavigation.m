@@ -26,6 +26,8 @@ static NSString *FMNVisionLastErrorDomain=@"",*FMNLastReject=@"none";
 static NSUInteger FMNVisionLastLines,FMNVisionLastMatches,FMNVisionLastMappedCells,FMNVisibleCellCount;
 static NSUInteger FMNVisionLastExactTitles,FMNVisionLastNormalizedTitles;
 static float FMNVisionLastTitleConfidence;
+static NSString *FMNListDelegateClass=@"";
+static BOOL FMNShouldSelectImplemented,FMNDidSelectImplemented,FMNPrimaryImplemented,FMNSelectionAllowed,FMNSelectionDelivered,FMNPrimaryDelivered;
 static char FMNApplyingKey, FMNProfileItemKey, FMNProfileTargetKey, FMNProfileGroupKey;
 static void (^FMNProfileAction)(UIViewController *);
 static NSHashTable<UIViewController *> *FMNProfileOwners;
@@ -218,18 +220,51 @@ static BOOL FMNPerformCellAction(FMNCellTarget *target,UINavigationController *n
     if([list isKindOfClass:UICollectionView.class]) {
         UICollectionView *collection=(id)list;id<UICollectionViewDelegate> delegate=collection.delegate;
         if(collection.isEditing || [collection cellForItemAtIndexPath:target.indexPath]!=cell)return FMNReject(@"collection_cell_changed");
-        if(![delegate respondsToSelector:@selector(collectionView:performPrimaryActionForItemAtIndexPath:)])return FMNReject(@"collection_primary_action_missing");
-        if([delegate respondsToSelector:@selector(collectionView:canPerformPrimaryActionForItemAtIndexPath:)]&&![delegate collectionView:collection canPerformPrimaryActionForItemAtIndexPath:target.indexPath])return FMNReject(@"collection_primary_action_denied");
-        FMNAttempted=YES;FMNActivationPath=path;FMNStartupState=@"activating_primary_action";FMNStartupNavigation=navigation;FMNBeforeActivation=owner;FMNVerifyDeadline=NSProcessInfo.processInfo.systemUptime+3;
-        FMNLastReject=@"none";[delegate collectionView:collection performPrimaryActionForItemAtIndexPath:target.indexPath];return YES;
+        FMNListDelegateClass=delegate?NSStringFromClass([delegate class]):@"";
+        FMNShouldSelectImplemented=[delegate respondsToSelector:@selector(collectionView:shouldSelectItemAtIndexPath:)];
+        FMNDidSelectImplemented=[delegate respondsToSelector:@selector(collectionView:didSelectItemAtIndexPath:)];
+        FMNPrimaryImplemented=[delegate respondsToSelector:@selector(collectionView:performPrimaryActionForItemAtIndexPath:)];
+        FMNSelectionDelivered=NO;FMNPrimaryDelivered=NO;
+        if(!FMNDidSelectImplemented&&!FMNPrimaryImplemented)return FMNReject(@"collection_actions_missing");
+        for(NSIndexPath *selected in collection.indexPathsForSelectedItems)if(![selected isEqual:target.indexPath])return FMNReject(@"collection_has_other_selection");
+        BOOL primaryAllowed=FMNPrimaryImplemented&&(![delegate respondsToSelector:@selector(collectionView:canPerformPrimaryActionForItemAtIndexPath:)]||[delegate collectionView:collection canPerformPrimaryActionForItemAtIndexPath:target.indexPath]);
+        FMNSelectionAllowed=collection.allowsSelection&&(!FMNShouldSelectImplemented||[delegate collectionView:collection shouldSelectItemAtIndexPath:target.indexPath]);
+        if(!(FMNSelectionAllowed&&FMNDidSelectImplemented)&&!primaryAllowed)return FMNReject(@"collection_actions_denied");
+        if(!FMNLibraryStillSelected(navigation,owner)||collection.delegate!=delegate||[collection cellForItemAtIndexPath:target.indexPath]!=cell)return FMNReject(@"collection_changed_during_permission");
+        FMNAttempted=YES;FMNActivationPath=FMNSelectionAllowed&&FMNDidSelectImplemented?[path stringByReplacingOccurrencesOfString:@"primary_action_" withString:@"selection_flow_"]:path;FMNStartupState=@"activating_selection_flow";FMNStartupNavigation=navigation;FMNBeforeActivation=owner;FMNVerifyDeadline=NSProcessInfo.processInfo.systemUptime+3;
+        // Mirror one public UIKit selection event. SwiftUI's List coordinator
+        // can route NavigationLink in didSelect even when primaryAction is a
+        // supplied no-op. No delayed second activation/fallback is scheduled.
+        if(FMNSelectionAllowed) {
+            [collection selectItemAtIndexPath:target.indexPath animated:NO scrollPosition:UICollectionViewScrollPositionNone];
+            if(FMNDidSelectImplemented){FMNSelectionDelivered=YES;[delegate collectionView:collection didSelectItemAtIndexPath:target.indexPath];}
+        }
+        if(primaryAllowed&&navigation.topViewController==owner&&[collection cellForItemAtIndexPath:target.indexPath]==cell){FMNPrimaryDelivered=YES;[delegate collectionView:collection performPrimaryActionForItemAtIndexPath:target.indexPath];}
+        FMNLastReject=@"none";return YES;
     }
     if([list isKindOfClass:UITableView.class]) {
         UITableView *table=(id)list;id<UITableViewDelegate> delegate=table.delegate;
         if(table.isEditing || [table cellForRowAtIndexPath:target.indexPath]!=cell)return FMNReject(@"table_cell_changed");
-        if(![delegate respondsToSelector:@selector(tableView:performPrimaryActionForRowAtIndexPath:)])return FMNReject(@"table_primary_action_missing");
-        if([delegate respondsToSelector:@selector(tableView:canPerformPrimaryActionForRowAtIndexPath:)]&&![delegate tableView:table canPerformPrimaryActionForRowAtIndexPath:target.indexPath])return FMNReject(@"table_primary_action_denied");
-        FMNAttempted=YES;FMNActivationPath=path;FMNStartupState=@"activating_primary_action";FMNStartupNavigation=navigation;FMNBeforeActivation=owner;FMNVerifyDeadline=NSProcessInfo.processInfo.systemUptime+3;
-        FMNLastReject=@"none";[delegate tableView:table performPrimaryActionForRowAtIndexPath:target.indexPath];return YES;
+        FMNListDelegateClass=delegate?NSStringFromClass([delegate class]):@"";
+        FMNShouldSelectImplemented=[delegate respondsToSelector:@selector(tableView:willSelectRowAtIndexPath:)];
+        FMNDidSelectImplemented=[delegate respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)];
+        FMNPrimaryImplemented=[delegate respondsToSelector:@selector(tableView:performPrimaryActionForRowAtIndexPath:)];
+        FMNSelectionDelivered=NO;FMNPrimaryDelivered=NO;
+        if(!FMNDidSelectImplemented&&!FMNPrimaryImplemented)return FMNReject(@"table_actions_missing");
+        for(NSIndexPath *selected in table.indexPathsForSelectedRows)if(![selected isEqual:target.indexPath])return FMNReject(@"table_has_other_selection");
+        BOOL primaryAllowed=FMNPrimaryImplemented&&(![delegate respondsToSelector:@selector(tableView:canPerformPrimaryActionForRowAtIndexPath:)]||[delegate tableView:table canPerformPrimaryActionForRowAtIndexPath:target.indexPath]);
+        NSIndexPath *allowed=FMNShouldSelectImplemented?[delegate tableView:table willSelectRowAtIndexPath:target.indexPath]:target.indexPath;
+        if(allowed&&![allowed isEqual:target.indexPath])return FMNReject(@"table_selection_redirected");
+        FMNSelectionAllowed=table.allowsSelection&&allowed!=nil;
+        if(!(FMNSelectionAllowed&&FMNDidSelectImplemented)&&!primaryAllowed)return FMNReject(@"table_actions_denied");
+        if(!FMNLibraryStillSelected(navigation,owner)||table.delegate!=delegate||[table cellForRowAtIndexPath:target.indexPath]!=cell)return FMNReject(@"table_changed_during_permission");
+        FMNAttempted=YES;FMNActivationPath=FMNSelectionAllowed&&FMNDidSelectImplemented?[path stringByReplacingOccurrencesOfString:@"primary_action_" withString:@"selection_flow_"]:path;FMNStartupState=@"activating_selection_flow";FMNStartupNavigation=navigation;FMNBeforeActivation=owner;FMNVerifyDeadline=NSProcessInfo.processInfo.systemUptime+3;
+        if(FMNSelectionAllowed) {
+            [table selectRowAtIndexPath:target.indexPath animated:NO scrollPosition:UITableViewScrollPositionNone];
+            if(FMNDidSelectImplemented){FMNSelectionDelivered=YES;[delegate tableView:table didSelectRowAtIndexPath:target.indexPath];}
+        }
+        if(primaryAllowed&&navigation.topViewController==owner&&[table cellForRowAtIndexPath:target.indexPath]==cell){FMNPrimaryDelivered=YES;[delegate tableView:table performPrimaryActionForRowAtIndexPath:target.indexPath];}
+        FMNLastReject=@"none";return YES;
     }
     return FMNReject(@"list_type_unsupported");
 }
@@ -454,5 +489,7 @@ NSDictionary<NSString *,id> *FMNavigationDiagnostics(void) {
              @"visionLastDrawSucceeded":@(FMNVisionLastDrawn),@"visionLastDuration":@(FMNVisionLastDuration),@"visionLastErrorCode":@(FMNVisionLastErrorCode),
              @"visionLastErrorDomain":FMNVisionLastErrorDomain,@"visionLastLineCount":@(FMNVisionLastLines),@"visionLastMatchCount":@(FMNVisionLastMatches),
              @"visionLastExactTitleCount":@(FMNVisionLastExactTitles),@"visionLastNormalizedTitleCount":@(FMNVisionLastNormalizedTitles),@"visionLastTitleConfidence":@(FMNVisionLastTitleConfidence),
+             @"listDelegateClass":FMNListDelegateClass,@"shouldSelectImplemented":@(FMNShouldSelectImplemented),@"didSelectImplemented":@(FMNDidSelectImplemented),@"primaryActionImplemented":@(FMNPrimaryImplemented),
+             @"selectionAllowed":@(FMNSelectionAllowed),@"selectionCallbackDelivered":@(FMNSelectionDelivered),@"primaryActionDelivered":@(FMNPrimaryDelivered),
              @"visionLastMappedCells":@(FMNVisionLastMappedCells),@"lastRejection":FMNLastReject};
 }
