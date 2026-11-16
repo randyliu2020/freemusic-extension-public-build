@@ -327,7 +327,7 @@ static void RunParseBudgetTests(void) {
     longRequest.timeoutInterval = 30;
     NSTimeInterval begin = NSProcessInfo.processInfo.systemUptime;
     NSDictionary *result = FetchWithConfigurationAndWait(longRequest, NSURLSessionConfiguration.defaultSessionConfiguration, 32);
-    Check([result[@"status"] integerValue] == 200 && [result[@"json"][@"code"] integerValue] == 200 && [result[@"json"][@"data"][@"url"] != nil,
+    Check([result[@"status"] integerValue] == 200 && [result[@"json"][@"code"] integerValue] == 200 && result[@"json"][@"data"][@"url"] != nil,
           @"Actual NSURLSession accepts a 28-second anonymous resolution beyond the old 20-second cap");
     Check(NSProcessInfo.processInfo.systemUptime-begin >= 27.5 && calls == 1 && cleanupReason == nil,
           @"Delayed resolution completes once with successful cleanup");
