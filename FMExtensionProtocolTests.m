@@ -253,7 +253,7 @@ static void RunLXMCImportTests(void) {
     Check(forwarded[@"error"] == NSNull.null && [forwarded[@"status"] integerValue] == 207,
           @"Ordinary streamed import preserves the origin HTTP response status");
     Check([echo[@"body"] isEqual:ordinaryBody] && [echo[@"method"] isEqual:@"POST"] &&
-          [echo[@"path"] isEqual:@"/ms/api.php?action=import_playlist&_t=fixture-remote&echo_status=207",
+          [echo[@"path"] isEqual:@"/ms/api.php?action=import_playlist&_t=fixture-remote&echo_status=207"],
           @"Ordinary streamed import preserves every encoded body byte, HTTP method and query");
     Check([echo[@"headers"][@"cookie"] isEqual:@"fixture_cookie=local_only"] &&
           [echo[@"headers"][@"authorization"] isEqual:@"Bearer fixture-local-only"] &&

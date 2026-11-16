@@ -60,7 +60,17 @@ static NSString *FMDuration(double seconds){if(seconds<60)return [NSString strin
     [self reload];
 }
 - (void)viewWillAppear:(BOOL)animated{[super viewWillAppear:animated];[self reload];}
-- (void)reload{self.summary=FMSummary(self.period?:NSDate.date,self.yearly);NSCalendar *calendar=NSCalendar.currentCalendar;NSCalendarUnit unit=self.yearly?NSCalendarUnitYear:NSCalendarUnitMonth;NSDate *current=[calendar dateIntervalOfUnit:unit forDate:NSDate.date].start,*selected=[calendar dateIntervalOfUnit:unit forDate:self.period].start;self.navigationItem.rightBarButtonItems.firstObject.enabled=[selected compare:current]==NSOrderedAscending;[self.tableView reloadData];}
+- (void)reload {
+    NSDate *now=NSDate.date;
+    self.summary=FMSummary(self.period?:now,self.yearly);
+    NSCalendar *calendar=NSCalendar.currentCalendar;
+    NSCalendarUnit unit=self.yearly?NSCalendarUnitYear:NSCalendarUnitMonth;
+    NSDate *current=nil,*selected=nil;
+    BOOL hasCurrent=[calendar rangeOfUnit:unit startDate:&current interval:NULL forDate:now];
+    BOOL hasSelected=[calendar rangeOfUnit:unit startDate:&selected interval:NULL forDate:self.period?:now];
+    self.navigationItem.rightBarButtonItems.firstObject.enabled=hasCurrent&&hasSelected&&[selected compare:current]==NSOrderedAscending;
+    [self.tableView reloadData];
+}
 - (void)changeKind:(UISegmentedControl *)control{self.yearly=control.selectedSegmentIndex==1;[self reload];}
 - (void)previous{self.period=[NSCalendar.currentCalendar dateByAddingUnit:self.yearly?NSCalendarUnitYear:NSCalendarUnitMonth value:-1 toDate:self.period options:0];[self reload];}
 - (void)next{NSDate *next=[NSCalendar.currentCalendar dateByAddingUnit:self.yearly?NSCalendarUnitYear:NSCalendarUnitMonth value:1 toDate:self.period options:0];self.period=[next compare:NSDate.date]==NSOrderedDescending?NSDate.date:next;[self reload];}
