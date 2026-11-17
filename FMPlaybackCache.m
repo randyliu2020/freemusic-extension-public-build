@@ -1,0 +1,212 @@
+#import "FMPlaybackCache.h"
+#import <CommonCrypto/CommonDigest.h>
+#import <objc/runtime.h>
+#import <mach-o/dyld.h>
+#import <mach-o/loader.h>
+#if __has_feature(ptrauth_calls)
+#import <ptrauth.h>
+#endif
+
+// No raw writes into Swift objects, no KVC, and no synthetic player events.
+// The exact original quality-picker invalidator accepts only Swift self (x20).
+typedef void (__attribute__((swiftcall)) *FMCacheNativeInvalidator)(
+    void * __attribute__((swift_context)));
+typedef id (*FMCacheInitIMP)(id __attribute__((ns_consumed)), SEL)
+    __attribute__((ns_returns_retained));
+
+static NSObject *FMCacheLock;
+static NSHashTable *FMCacheReceivers;
+static NSSet<NSString *> *FMCacheTaintedServers;
+static NSString *FMCacheProcessID, *FMCacheSuffix;
+static NSUInteger FMCacheGeneration, FMCacheInvalidations, FMCacheRejectedThreadCalls;
+static BOOL FMCacheImageMatched, FMCacheInstalled;
+static uintptr_t FMCacheMainBase;
+static FMCacheNativeInvalidator FMCacheInvalidate;
+static FMCacheInitIMP FMCachePreviousInit;
+static NSString *const FMCacheTaintKey = @"FMX.playbackCache.taintedServers";
+#if defined(FMX_PLAYBACK_CACHE_TESTING) && FMX_PLAYBACK_CACHE_TESTING && TARGET_OS_SIMULATOR
+static BOOL FMCacheFixtureConfigured, FMCacheFixtureAllowed;
+static FMCacheNativeInvalidator FMCacheFixtureInvalidator;
+static __weak id FMCacheFixtureReceiver;
+#endif
+
+static BOOL FMCacheEnabledLocked(void) {
+#if defined(FMX_PLAYBACK_CACHE_TESTING) && FMX_PLAYBACK_CACHE_TESTING && TARGET_OS_SIMULATOR
+    if (FMCacheFixtureConfigured) return FMCacheFixtureAllowed;
+#endif
+    return FMCacheImageMatched && FMCacheInstalled;
+}
+static NSSet<NSString *> *FMCacheSanitizeServers(id value) {
+    NSMutableSet *result = [NSMutableSet set];
+    if (![value isKindOfClass:NSArray.class] && ![value isKindOfClass:NSSet.class]) return result;
+    for (id item in value) {
+        if ([item isKindOfClass:NSString.class] &&
+            ([@"wy" isEqual:item] || [@"qq" isEqual:item] || [@"kg" isEqual:item])) [result addObject:item];
+    }
+    return [result copy];
+}
+static void FMCachePrepareState(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        FMCacheLock = [NSObject new];
+        FMCacheReceivers = NSHashTable.weakObjectsHashTable;
+        FMCacheTaintedServers = FMCacheSanitizeServers([NSUserDefaults.standardUserDefaults objectForKey:FMCacheTaintKey]);
+        FMCacheProcessID = NSUUID.UUID.UUIDString;
+        FMCacheSuffix = [NSString stringWithFormat:@"|FMX:%@:0", FMCacheProcessID];
+    });
+}
+static BOOL FMCacheDigest(const uint8_t *bytes, size_t length, const char *expected) {
+    if (!bytes || length > UINT32_MAX || strlen(expected) != 64) return NO;
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(bytes, (CC_LONG)length, digest);
+    char hex[65];
+    for (NSUInteger i=0;i<32;i++) snprintf(hex+i*2,3,"%02x",digest[i]);
+    return !strcmp(hex,expected);
+}
+static uintptr_t FMCacheIMPAddress(IMP imp) {
+#if __has_feature(ptrauth_calls)
+    return (uintptr_t)ptrauth_strip((void *)imp,ptrauth_key_function_pointer);
+#else
+    return (uintptr_t)imp;
+#endif
+}
+static BOOL FMCacheVerifyImage(void) {
+    const struct mach_header_64 *header=(const struct mach_header_64 *)_dyld_get_image_header(0);
+    if (!header || header->magic!=MH_MAGIC_64 || header->cputype!=CPU_TYPE_ARM64 ||
+        header->filetype!=MH_EXECUTE || header->ncmds>1024 || header->sizeofcmds>65536) return NO;
+    const uint8_t uuid[16]={0x48,0xc7,0x7a,0x33,0x63,0xbc,0x3e,0x8f,0x8f,0xc7,0x5e,0xd6,0x13,0x29,0x24,0xc4};
+    const uint8_t *cursor=(const uint8_t *)(header+1),*end=cursor+header->sizeofcmds;
+    BOOL matchingUUID=NO, executableRange=NO;
+    for (uint32_t i=0;i<header->ncmds;i++) {
+        if ((size_t)(end-cursor)<sizeof(struct load_command)) return NO;
+        const struct load_command *command=(const struct load_command *)cursor;
+        if (command->cmdsize<sizeof(*command) || command->cmdsize>(size_t)(end-cursor)) return NO;
+        if (command->cmd==LC_UUID && command->cmdsize==sizeof(struct uuid_command))
+            matchingUUID=!memcmp(((const struct uuid_command *)command)->uuid,uuid,16);
+        if (command->cmd==LC_SEGMENT_64 && command->cmdsize>=sizeof(struct segment_command_64)) {
+            const struct segment_command_64 *segment=(const struct segment_command_64 *)command;
+            if (!strncmp(segment->segname,"__TEXT",16) && segment->fileoff==0 &&
+                segment->vmaddr==0x100000000ull && segment->filesize>=0x509b40 &&
+                segment->vmsize>=0x509b40 && (segment->initprot&5)==5) executableRange=YES;
+        }
+        cursor+=command->cmdsize;
+    }
+    if (!matchingUUID || !executableRange) return NO;
+    const uint8_t *base=(const uint8_t *)header;
+    // Digests, not original app bytecode. Require our complete authored payload,
+    // five entry branches, and the untouched init / native invalidator routines.
+    if (!FMCacheDigest(base+0x43b70,0x134,"6ba7d38fd9eaa30b148ff2d977ad7fb8c110e23aa57f2ea74d059ceed32e53ed") ||
+        !FMCacheDigest(base+0x4a1c0,0x15c,"18dcbaa8078cd254cce3b8f1da765da73421f73ec75a24bef09223e19a6d6a73") ||
+        !FMCacheDigest(base+0x509780,0x3c0,"ff82b4066bf01200033870a24ec34b82a170322ae15aad2cbd0b3d0444c57f8f")) return NO;
+    const uint32_t sites[]={0x4ae88,0x4dc6c,0x57138,0x73188,0x4b168};
+    const uint32_t targets[]={0x509780,0x5097a0,0x5097c0,0x5098c0,0x509940};
+    for (NSUInteger i=0;i<5;i++) {
+        uint32_t word; memcpy(&word,base+sites[i],4);
+        uint32_t expected=0x14000000u|(((targets[i]-sites[i])/4)&0x03ffffffu);
+        if (word!=expected) return NO;
+    }
+    FMCacheMainBase=(uintptr_t)header;
+    return YES;
+}
+
+static id FMCacheInit(id receiver __attribute__((ns_consumed)), SEL selector)
+    __attribute__((ns_returns_retained));
+static id FMCacheInit(id receiver __attribute__((ns_consumed)), SEL selector) {
+    id result=FMCachePreviousInit(receiver,selector);
+    if (result) @synchronized(FMCacheLock) { [FMCacheReceivers addObject:result]; }
+    return result;
+}
+void FMPlaybackCacheInstall(void) {
+    FMCachePrepareState();
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        if (!FMCacheVerifyImage()) return;
+        Class nativeClass=NSClassFromString(@"_TtC9FreeMusic18AudioPlayerManager");
+        Method method=nativeClass ? class_getInstanceMethod(nativeClass,sel_registerName("init")) : NULL;
+        if (!method || method_getNumberOfArguments(method)!=2 ||
+            FMCacheIMPAddress(method_getImplementation(method))!=FMCacheMainBase+0x43b70) return;
+        FMCachePreviousInit=(FMCacheInitIMP)method_getImplementation(method);
+        FMCacheInvalidate=(FMCacheNativeInvalidator)(FMCacheMainBase+0x4a1c0);
+        @synchronized(FMCacheLock) { FMCacheImageMatched=YES; FMCacheInstalled=YES; }
+        method_setImplementation(method,(IMP)FMCacheInit);
+    });
+}
+
+void FMPlaybackCacheSourceTransition(NSSet<NSString *> *affectedServers) {
+    FMCachePrepareState();
+    // Caller serializes runtime activation and source changes with the original
+    // UI/Swift dictionaries. Never synchronously hop while holding another lock.
+    if (!NSThread.isMainThread) {
+        @synchronized(FMCacheLock) { FMCacheRejectedThreadCalls++; }
+        return;
+    }
+    NSArray *receivers; FMCacheNativeInvalidator invalidate;
+    @synchronized(FMCacheLock) {
+        if (!FMCacheEnabledLocked()) return;
+        FMCacheGeneration++;
+        FMCacheSuffix=[NSString stringWithFormat:@"|FMX:%@:%lu",FMCacheProcessID,(unsigned long)FMCacheGeneration];
+        NSMutableSet *tainted=[FMCacheTaintedServers mutableCopy];
+        [tainted unionSet:FMCacheSanitizeServers(affectedServers)];
+        FMCacheTaintedServers=[tainted copy];
+        [NSUserDefaults.standardUserDefaults setObject:[FMCacheTaintedServers.allObjects sortedArrayUsingSelector:@selector(compare:)] forKey:FMCacheTaintKey];
+        receivers=FMCacheReceivers.allObjects; invalidate=FMCacheInvalidate;
+#if defined(FMX_PLAYBACK_CACHE_TESTING) && FMX_PLAYBACK_CACHE_TESTING && TARGET_OS_SIMULATOR
+        if (FMCacheFixtureConfigured) {
+            id receiver=FMCacheFixtureReceiver;
+            receivers=receiver ? @[receiver] : @[]; invalidate=FMCacheFixtureInvalidator;
+        }
+#endif
+    }
+    // Advance namespace BEFORE clearing. Already-completed/queued old callbacks
+    // may repopulate old keys; three original key builders cannot select them.
+    for (id receiver in receivers) {
+        if (!invalidate) continue;
+        invalidate((__bridge void *)receiver);
+        @synchronized(FMCacheLock) { FMCacheInvalidations++; }
+    }
+}
+
+NSString *FMPlaybackCacheCopySuffix(void) {
+    FMCachePrepareState();
+    @synchronized(FMCacheLock) { return FMCacheEnabledLocked() ? [FMCacheSuffix copy] : nil; }
+}
+BOOL FMPlaybackCacheShouldBypassAutomaticCache(NSString *server) {
+    FMCachePrepareState();
+    if (![server isKindOfClass:NSString.class]) return NO;
+    @synchronized(FMCacheLock) { return FMCacheEnabledLocked() && [FMCacheTaintedServers containsObject:server]; }
+}
+BOOL FMPlaybackCacheShouldBypassURL(NSURL *candidate, NSURL *nativeCacheDirectory) {
+    if (![candidate isKindOfClass:NSURL.class] || ![nativeCacheDirectory isKindOfClass:NSURL.class] ||
+        !candidate.isFileURL || !nativeCacheDirectory.isFileURL) return NO;
+    NSString *path=candidate.standardizedFileURL.path;
+    NSString *directory=nativeCacheDirectory.standardizedFileURL.path;
+    if (!path.length || !directory.length || [directory isEqual:@"/"]) return NO;
+    NSString *prefix=[directory hasSuffix:@"/"] ? directory : [directory stringByAppendingString:@"/"];
+    if (![path hasPrefix:prefix]) return NO;
+    NSString *filename=candidate.lastPathComponent;
+    NSRange separator=[filename rangeOfString:@"_"];
+    if (separator.location==NSNotFound || separator.location==0) return NO;
+    return FMPlaybackCacheShouldBypassAutomaticCache([filename substringToIndex:separator.location]);
+}
+NSDictionary *FMPlaybackCacheDiagnostics(void) {
+    FMCachePrepareState();
+    @synchronized(FMCacheLock) {
+        return @{@"installed":@(FMCacheInstalled),@"imageMatched":@(FMCacheImageMatched),
+                 @"generation":@(FMCacheGeneration),@"invalidations":@(FMCacheInvalidations),
+                 @"capturedManagers":@(FMCacheReceivers.allObjects.count),
+                 @"enabled":@(FMCacheEnabledLocked()),@"rejectedThreadCalls":@(FMCacheRejectedThreadCalls),
+                 @"persistentBypassServers":[FMCacheTaintedServers.allObjects sortedArrayUsingSelector:@selector(compare:)]};
+    }
+}
+#if defined(FMX_PLAYBACK_CACHE_TESTING) && FMX_PLAYBACK_CACHE_TESTING && TARGET_OS_SIMULATOR
+void FMPlaybackCacheTestConfigureReceiver(id receiver, void *swiftMethod, BOOL imageAllowed) {
+    FMCachePrepareState();
+    NSCAssert(NSThread.isMainThread,@"Fixture transitions must be on the UI thread");
+    @synchronized(FMCacheLock) {
+        FMCacheFixtureConfigured=YES;
+        FMCacheFixtureAllowed=imageAllowed && receiver && swiftMethod;
+        FMCacheFixtureReceiver=receiver;
+        FMCacheFixtureInvalidator=(FMCacheNativeInvalidator)swiftMethod;
+    }
+}
+#endif

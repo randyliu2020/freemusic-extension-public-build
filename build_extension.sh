@@ -13,6 +13,7 @@ mkdir -p "$output_dir"
 output_dir="$(cd "$output_dir" && pwd -P)"
 sources=("$source_dir/FMExtension.m" "$source_dir/LXSourceRuntime.m" "$source_dir/FMExtensionProtocol.m" "$source_dir/FMLockScreen.m" "$source_dir/FMSettingsEntry.m" "$source_dir/FMSearchPreferences.m" "$source_dir/FMQishuiSearch.m" "$source_dir/FMListeningHistory.m" "$source_dir/FMInsights.m" "$source_dir/FMInteraction.m" "$source_dir/FMLXMC.m")
 sources+=("$source_dir/FMLXMCUI.m" "$source_dir/FMNavigation.m" "$source_dir/FMListeningCapture.m")
+sources+=("$source_dir/FMPlaybackCache.m")
 for source_file in "${sources[@]}" "$source_dir/LXBootstrap.js"; do
   if [[ ! -f "$source_file" ]]; then
     echo "FAILED: missing source input: $source_file" >&2
@@ -31,7 +32,7 @@ xcrun --sdk iphoneos clang \
   -dynamiclib -fobjc-arc -fblocks -Os -Wall -Wextra \
   -Werror=implicit-function-declaration -I "$source_dir" \
   -install_name '@executable_path/Frameworks/FMExtension.dylib' \
-  -current_version 1.2.0 -compatibility_version 1.0.0 \
+  -current_version 1.3.0 -compatibility_version 1.0.0 \
   -Wl,-headerpad_max_install_names \
   -framework Foundation -framework UIKit -framework JavaScriptCore \
   -framework UniformTypeIdentifiers -framework Security \
@@ -72,7 +73,7 @@ manifest = {
     "artifact_sha256": {name: hashlib.sha256((output_dir / name).read_bytes()).hexdigest()
                         for name in ["FMExtension.dylib", "LXBootstrap.js"]},
 }
-for name in ["FMNavigation.m", "FMNavigation.h", "FMListeningCapture.m", "FMListeningCapture.h"]:
+for name in ["FMNavigation.m", "FMNavigation.h", "FMListeningCapture.m", "FMListeningCapture.h", "FMPlaybackCache.m", "FMPlaybackCache.h"]:
     manifest["source_sha256"][name] = hashlib.sha256((source_dir / name).read_bytes()).hexdigest()
 (output_dir / "build-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 print("DONE " + str(output_dir / "FMExtension.dylib"))

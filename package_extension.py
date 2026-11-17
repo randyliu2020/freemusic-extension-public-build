@@ -288,9 +288,11 @@ def new_entry(name: str, *, executable: bool = False) -> zipfile.ZipInfo:
     return info
 
 
-def package_ipa(original: Path, dylib: Path, bootstrap: Path, output: Path, *, artwork_1600: bool = False, v3_changes: bool = False, player_left_swipe: bool = False) -> dict:
+def package_ipa(original: Path, dylib: Path, bootstrap: Path, output: Path, *, artwork_1600: bool = False, v3_changes: bool = False, player_left_swipe: bool = False, playback_cache: bool = False) -> dict:
     if player_left_swipe and not v3_changes:
         raise PackageError("Player swipe requires the cumulative --v3-changes baseline")
+    if playback_cache and not v3_changes:
+        raise PackageError("Playback cache isolation requires the cumulative --v3-changes baseline")
     original, output = artwork_patch.check_paths(original, output)
     if not output.name.endswith(".unsigned.needs-resigning.ipa"):
         raise PackageError("Output name must end with .unsigned.needs-resigning.ipa")
@@ -341,9 +343,15 @@ def package_ipa(original: Path, dylib: Path, bootstrap: Path, output: Path, *, a
                     import player_swipe_patch
                     swipe_plan = player_swipe_patch.patch_plan(original_executable)
                     executable = interaction_patch.apply_verified_plan(executable, swipe_plan)
+                cache_plan = []
+                if playback_cache:
+                    import playback_cache_patch
+                    cache_plan = playback_cache_patch.patch_plan(original_executable)
+                    executable = interaction_patch.apply_verified_plan(executable, cache_plan)
                 v3report = {"navigation": navigation_report,
                     "lyric_changes": [{"offset": hex(change.offset), "length": len(change.after), "reason": change.reason} for change in lyric_plan],
                     "player_swipe_changes": [{"offset": hex(change.offset), "length": len(change.after), "reason": change.reason} for change in swipe_plan],
+                    "playback_cache_changes": [{"offset": hex(change.offset), "length": len(change.after), "reason": change.reason} for change in cache_plan],
                     "original_main_sha256": artwork_patch.digest(original_executable),
                     "combined_main_sha256": artwork_patch.digest(executable),
                     "device_execution_validated": False}
@@ -385,6 +393,7 @@ def package_ipa(original: Path, dylib: Path, bootstrap: Path, output: Path, *, a
         "artwork_1600_enabled": artwork_1600, "artwork_report": artreport,
         "v3_changes_enabled": v3_changes, "v3_report": v3report,
         "player_left_swipe_enabled": player_left_swipe,
+        "playback_cache_enabled": playback_cache,
         "bundle_id_changed": False, "entitlements_added": False, "original_preserved": True,
         "signing_note": "Main app and added dylib have no LC_CODE_SIGNATURE. Existing nested framework signatures are unchanged archive content, not authority to reuse. Fully sign nested code and main app with valid user-provided signing inputs; old app profile was removed.",
         "validation_scope": "Structural packaging checks only; extension behavior and iPhone installation/playback are not verified here."}
@@ -399,9 +408,10 @@ def main() -> int:
     parser.add_argument("--artwork-1600", action="store_true", help="Optional experimental artwork decode limit; default off")
     parser.add_argument("--v3-changes", action="store_true", help="Apply verified original-build lyric and navigation changes")
     parser.add_argument("--player-left-swipe", action="store_true", help="Add left-swipe dismissal to the original player top bars; preserve downward dismissal")
+    parser.add_argument("--playback-cache", action="store_true", help="Isolate automatic playback cache after JS source transitions; preserve downloaded files")
     args = parser.parse_args()
     try:
-        report = package_ipa(args.original, args.dylib, args.bootstrap, args.output, artwork_1600=args.artwork_1600, v3_changes=args.v3_changes, player_left_swipe=args.player_left_swipe)
+        report = package_ipa(args.original, args.dylib, args.bootstrap, args.output, artwork_1600=args.artwork_1600, v3_changes=args.v3_changes, player_left_swipe=args.player_left_swipe, playback_cache=args.playback_cache)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0
     except (OSError, PackageError, artwork_patch.PatchError, zipfile.BadZipFile, struct.error, UnicodeError) as error:

@@ -1007,6 +1007,7 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
             __block BOOL clean=NO;Main(^{FMXManager *manager=[(id)NSClassFromString(@"FMXManager") shared];[manager disable];clean=manager.runtime==nil && manager.playbackStatus==nil && manager.playbackRequest==nil && [NSUserDefaults.standardUserDefaults objectForKey:@"FMX.selectedSource"]==nil;});
             Check(clean,@"Manager disable must clear runtime, remembered source, and playback diagnostics");return nil;
         }];
+#include "V5PlaybackCacheTests.inc"
         [self test:@"square_and_portrait_previews" body:^NSDictionary *{
             CheckUpright(cover.CGImage);
             for(NSNumber *portrait in @[@NO,@YES]){UIImage *preview=PreviewArtwork(cover,portrait.boolValue);Check(preview.CGImage && CGImageGetWidth(preview.CGImage)==720 && CGImageGetHeight(preview.CGImage)==(portrait.boolValue?960:720),@"Preview pixel dimensions");CheckUpright(preview.CGImage);[UIImagePNGRepresentation(preview) writeToURL:[self.output URLByAppendingPathComponent:portrait.boolValue?@"portrait-preview.png":@"square-preview.png"] atomically:YES];}return @{@"red_top_blue_bottom_verified":@YES};

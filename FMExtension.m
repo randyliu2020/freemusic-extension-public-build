@@ -10,6 +10,7 @@
 #import "FMInteraction.h"
 #import "FMLXMCUI.h"
 #import "FMNavigation.h"
+#import "FMPlaybackCache.h"
 
 static NSString *const FMXChanged = @"FMX.changed";
 static NSString *const FMXSelected = @"FMX.selectedSource";
@@ -32,6 +33,14 @@ static NSArray<NSString *> *FMXRoutableSourceNames(NSDictionary *manifest) {
     for (NSString *source in @[@"wy", @"tx", @"kg"])
         if (FMXRoutableQualities(manifest, source).count) [names addObject:labels[source]];
     return names;
+}
+
+static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
+    NSMutableSet *servers = NSMutableSet.set;
+    for (NSString *source in @[@"wy", @"tx", @"kg"])
+        if (FMXRoutableQualities(manifest, source).count)
+            [servers addObject:[source isEqual:@"tx"] ? @"qq" : source];
+    return servers;
 }
 
 @interface FMXManager : NSObject
@@ -68,6 +77,9 @@ static NSArray<NSString *> *FMXRoutableSourceNames(NSDictionary *manifest) {
 }
 - (void)changed { [[NSNotificationCenter defaultCenter] postNotificationName:FMXChanged object:nil]; }
 - (void)disable {
+    // Advance the native cache namespace before retiring requests. A completed
+    // old request may still run its host callback after this transition.
+    FMPlaybackCacheSourceTransition(FMXCacheServers(self.runtime.manifest));
     self.generation++;
     LXSourceRuntime *old = self.runtime; self.runtime = nil; [old invalidate];
     self.selectedFile = nil;
@@ -105,10 +117,14 @@ static NSArray<NSString *> *FMXRoutableSourceNames(NSDictionary *manifest) {
         NSArray *sources = FMXRoutableSourceNames(manifest);
         if (error || !sources.count) {
             self.runtime = nil; self.selectedFile = nil; [runtime invalidate];
+            FMPlaybackCacheSourceTransition(NSSet.set);
             self.status = error ? [@"初始化失败：" stringByAppendingString:error.localizedDescription]
                 : @"此音源没有本版可用平台：仅支持网易云、QQ 和酷狗基础音源，酷狗须含标准音质。";
         }
         else {
+            // Native parsing may have filled caches while the new JS was still
+            // initializing. Establish its own generation only once usable.
+            FMPlaybackCacheSourceTransition(FMXCacheServers(manifest));
             [[NSUserDefaults standardUserDefaults] setObject:filename forKey:FMXSelected];
             self.status = [NSString stringWithFormat:@"已启用 %@ · %@", file[@"name"], [sources componentsJoinedByString:@" / "]];
         }
@@ -141,7 +157,7 @@ static NSArray<NSString *> *FMXRoutableSourceNames(NSDictionary *manifest) {
     if (section == 1) return @"支持网易云、QQ 和酷狗的基础洛雪音源。酷狗 JS 使用标准音质；部分脚本需要额外歌曲信息或尚未支持的功能。仅启用你信任的脚本。";
     if (section == 2) return @"用当前封面在手机上生成轻微缩放的循环动画。系统需要时才生成；低电量或减少动态效果开启时显示静态封面。需要 iOS 26 或更高版本。";
     if (section == 4) return @"按实际听歌记录查看月度、年度偏好，只保存在本机。";
-    return @"音源服务的可用歌曲和音质由对应脚本及服务决定。";
+    return @"扩展 v5。换源后重新获取播放地址；使用过 JS 的平台不复用自动音乐缓存，手动下载保留。歌曲和音质由对应音源服务决定。";
 }
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)path {
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
@@ -270,6 +286,7 @@ static NSString *FMXQuality(NSString *level, NSArray *available) {
 __attribute__((constructor)) static void FMXInitialize(void) {
     @autoreleasepool {
         if (![[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] isEqual:@"4.2.7"] || ![NSBundle.mainBundle.executablePath.lastPathComponent isEqual:@"FreeMusic"]) return;
+        FMPlaybackCacheInstall();
         // Capture must install before the host registers its original AVPlayer
         // time observer. UI setup remains deferred to the main run loop below.
         FMInsightsInstall();

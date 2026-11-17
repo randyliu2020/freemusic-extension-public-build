@@ -158,7 +158,7 @@ stage="compile_simulator_dylib"
 xcrun --sdk iphonesimulator clang \
   -target "${arch}-apple-ios26.0-simulator" -isysroot "$sdk_path" \
   -dynamiclib -fobjc-arc -fblocks -O1 -g -Wall -Wextra -Wno-unused-parameter \
-  -Werror=implicit-function-declaration -DFMX_LOCKSCREEN_TESTING=1 -DFMX_LISTENING_CAPTURE_TESTING=1 -I "$source_dir" \
+  -Werror=implicit-function-declaration -DFMX_LOCKSCREEN_TESTING=1 -DFMX_LISTENING_CAPTURE_TESTING=1 -DFMX_PLAYBACK_CACHE_TESTING=1 -I "$source_dir" \
   -install_name '@executable_path/Frameworks/FMExtension.dylib' \
   -framework Foundation -framework UIKit -framework JavaScriptCore \
   -framework UniformTypeIdentifiers -framework Security -framework MediaPlayer \
@@ -167,7 +167,7 @@ xcrun --sdk iphonesimulator clang \
   "$source_dir/FMExtension.m" "$source_dir/FMExtensionProtocol.m" "$source_dir/FMQishuiSearch.m" \
   "$source_dir/LXSourceRuntime.m" "$source_dir/FMLockScreen.m" "$source_dir/FMSettingsEntry.m" "$source_dir/FMSearchPreferences.m" \
   "$source_dir/FMListeningHistory.m" "$source_dir/FMInsights.m" "$source_dir/FMInteraction.m" "$source_dir/FMLXMC.m" "$source_dir/FMLXMCUI.m" "$source_dir/FMNavigation.m" -lz \
-  "$source_dir/FMListeningCapture.m" \
+  "$source_dir/FMListeningCapture.m" "$source_dir/FMPlaybackCache.m" \
   -o "$app_dir/Frameworks/FMExtension.dylib" 2>&1 | tee "$output_dir/compile-dylib.log"
 
 stage="compile_self_authored_host"
@@ -186,6 +186,7 @@ xcrun --sdk iphonesimulator swiftc \
   -framework SwiftUI -framework UIKit -framework Foundation \
   -Xlinker -install_name -Xlinker '@executable_path/Frameworks/SmokeSettingsFixture.dylib' \
   "$source_dir/smoke/SettingsFixture.swift" "$source_dir/smoke/LXMCFixture.swift" "$source_dir/smoke/InteractionFixture.swift" "$source_dir/smoke/NavigationFixture.swift" \
+  "$source_dir/smoke/PlaybackCacheFixture.swift" \
   -o "$app_dir/Frameworks/SmokeSettingsFixture.dylib" 2>&1 | tee "$output_dir/compile-swiftui-fixture.log"
 cp "$source_dir/LXBootstrap.js" "$app_dir/LXBootstrap.js"
 python3 - "$app_dir" "$sdk_version" "$source_dir" "$output_dir" <<'PY'
@@ -200,7 +201,9 @@ for name in ['smoke/V3InteractionTests.inc','test_interaction_ui.sh','smoke/Inte
     manifest['source_sha256'][name]=hashlib.sha256((source/name).read_bytes()).hexdigest()
 for name in ['smoke/V3ListeningCaptureTests.inc','verify_interaction_result.py','test_verify_interaction_result.py']:
     manifest['source_sha256'][name]=hashlib.sha256((source/name).read_bytes()).hexdigest()
-manifest['test_macros']=['FMX_LOCKSCREEN_TESTING','FMX_LISTENING_CAPTURE_TESTING']
+for name in ['FMPlaybackCache.m','FMPlaybackCache.h','smoke/PlaybackCacheFixture.swift','smoke/V5PlaybackCacheTests.inc']:
+    manifest['source_sha256'][name]=hashlib.sha256((source/name).read_bytes()).hexdigest()
+manifest['test_macros']=['FMX_LOCKSCREEN_TESTING','FMX_LISTENING_CAPTURE_TESTING','FMX_PLAYBACK_CACHE_TESTING']
 (out/'build.json').write_text(json.dumps(manifest,indent=2)+'\n')
 PY
 codesign --force --sign - "$app_dir/Frameworks/FMExtension.dylib" >"$output_dir/sign.log" 2>&1

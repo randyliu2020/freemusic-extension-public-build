@@ -260,6 +260,30 @@ class ActualIPATests(unittest.TestCase):
         with self.assertRaisesRegex(package.PackageError, "SHA256 mismatch"):
             package.package_ipa(self.output, self.dylib, self.bootstrap, self.directory / "twice.unsigned.needs-resigning.ipa")
 
+    def test_v5_cache_patch_preserves_other_entries_and_v4_player(self):
+        import interaction_patch
+        import player_swipe_patch
+        import playback_cache_patch
+        import navigation_patch
+        output = self.directory / "v5.unsigned.needs-resigning.ipa"
+        report = package.package_ipa(self.original, self.dylib, self.bootstrap, output,
+                                     v3_changes=True, player_left_swipe=True, playback_cache=True)
+        with zipfile.ZipFile(self.original) as before, zipfile.ZipFile(output) as after:
+            original = before.read(package.MAIN)
+            expected, _ = package.rewrite_macho(original, inject=True, expected_type=2)
+            expected, _ = navigation_patch.patch_binary(expected, original)
+            cache = playback_cache_patch.patch_plan(original)
+            changes = interaction_patch.patch_plan(original) + player_swipe_patch.patch_plan(original) + cache
+            expected = interaction_patch.apply_verified_plan(expected, changes)
+            self.assertEqual(after.read(package.MAIN), expected)
+            self.assertEqual(package.parse_macho(expected).segments, package.parse_macho(original).segments)
+            self.assertEqual(len(expected), len(original))
+            for name in before.namelist():
+                if name != package.MAIN and not package.is_obsolete_app_signature(name):
+                    self.assertEqual(before.read(name), after.read(name), name)
+            self.assertTrue(report["playback_cache_enabled"])
+            self.assertEqual(len(report["v3_report"]["playback_cache_changes"]), len(cache))
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(add_help=False)

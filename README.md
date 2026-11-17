@@ -1,4 +1,4 @@
-# FreeMusic 4.2.7 extension — v4 incremental update
+# FreeMusic 4.2.7 extension — v5 incremental update
 
 Source-only build for a user-authorized modification of FreeMusic-Folia 4.2.7.
 This repository does not contain the original application, signing identities,
@@ -91,6 +91,14 @@ with valid signing inputs. Keep the bundle identifier and provisioning/entitleme
 identifiers consistent. No certificate or profile is fabricated or reused.
 
 ## Limits
+
+- JS source transitions invalidate native pre-resolved URLs and waiting players,
+  and give both native in-memory cache-key builders a new generation suffix.
+  Late results can retain their old keys but cannot become hits in a new generation.
+  Previously JS-managed platforms skip automatic disk music caches because those
+  native files do not record their source identity. Explicit downloads remain
+  eligible, and no music files are deleted. This can cause extra network parsing
+  on those platforms, including after JS is disabled.
 
 - JS APIs: musicUrl, Promise, HTTP text/JSON/form, cancellation, timers, buffer
   UTF-8/base64/hex, MD5, AES-128-CBC/ECB and randomBytes.
