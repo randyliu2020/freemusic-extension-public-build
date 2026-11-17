@@ -17,7 +17,7 @@ static NSMutableArray *cases;
 static FMLXMCLocalStore *fixtureStore;
 static IMP defaultIMP,ephemeralIMP,storeIMP;
 static uint16_t port;
-static atomic_uint httpRequests,leakedPrivateRequests;
+static atomic_uint httpRequests,leakedPrivateRequests,remoteReorders,invalidRemoteReorders;
 static atomic_int listMode;
 static NSData *JSON(id value){return [NSJSONSerialization dataWithJSONObject:value options:NSJSONWritingSortedKeys error:nil];}
 static void Check(BOOL ok,NSString *name){[cases addObject:@{@"name":name,@"passed":@(ok)}];if(!ok)failures++;printf("%s %s\n",ok?"PASS":"FAIL",name.UTF8String);}
@@ -76,15 +76,26 @@ static NSArray *Tracks(NSNumber *identifier){return Fetch(@"playlist_get_tracks"
 @interface LXLoopbackTransport:NSURLProtocol<NSURLSessionDataDelegate>
 @property(nonatomic,strong) NSURLSession *session;
 @property(nonatomic,strong) NSURLSessionDataTask *task;
+@property(atomic) BOOL stopped;
 @end
 @implementation LXLoopbackTransport
 + (BOOL)canInitWithRequest:(NSURLRequest *)request{return [request.URL.host isEqual:@"aacert.com"];}
 + (NSURLRequest *)canonicalRequestForRequest:(NSURLRequest *)request{return request;}
 - (void)startLoading{
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
     NSMutableURLRequest *request=[self.request mutableCopy];NSURLComponents *parts=[NSURLComponents componentsWithURL:request.URL resolvingAgainstBaseURL:NO];parts.scheme=@"http";parts.host=@"127.0.0.1";parts.port=@(port);request.URL=parts.URL;
+    // NSURLSession can hand a custom protocol an in-memory POST as a stream.
+    // Materialize only this test transport hop, with explicit HTTP framing.
+    if(request.HTTPBodyStream){NSInputStream *stream=request.HTTPBodyStream;[stream open];NSMutableData *data=[NSMutableData data];uint8_t bytes[4096];NSInteger count=0;
+        while(!self.stopped&&(count=[stream read:bytes maxLength:sizeof(bytes)])>0){[data appendBytes:bytes length:(NSUInteger)count];if(data.length>65536)break;}[stream close];
+        if(self.stopped)return;if(count<0||data.length>65536){[self.client URLProtocol:self didFailWithError:stream.streamError?:[NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCannotDecodeContentData userInfo:nil]];return;}request.HTTPBodyStream=nil;request.HTTPBody=data;
+    }
+    [request setValue:nil forHTTPHeaderField:@"Transfer-Encoding"];if(request.HTTPBody)[request setValue:@(request.HTTPBody.length).stringValue forHTTPHeaderField:@"Content-Length"];
+    if(self.stopped)return;
     self.session=[NSURLSession sessionWithConfiguration:NSURLSessionConfiguration.ephemeralSessionConfiguration delegate:self delegateQueue:nil];self.task=[self.session dataTaskWithRequest:request];[self.task resume];
+    });
 }
-- (void)stopLoading{[self.task cancel];[self.session invalidateAndCancel];}
+- (void)stopLoading{self.stopped=YES;[self.task cancel];[self.session invalidateAndCancel];}
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)task didReceiveResponse:(NSURLResponse *)response completionHandler:(void(^)(NSURLSessionResponseDisposition))completionHandler{[self.client URLProtocol:self didReceiveResponse:response cacheStoragePolicy:NSURLCacheStorageNotAllowed];completionHandler(NSURLSessionResponseAllow);}
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)task didReceiveData:(NSData *)data{[self.client URLProtocol:self didLoadData:data];}
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error{if(error)[self.client URLProtocol:self didFailWithError:error];else[self.client URLProtocolDidFinishLoading:self];[session finishTasksAndInvalidate];}
@@ -97,7 +108,15 @@ static int StartServer(void){int listener=socket(AF_INET,SOCK_STREAM,0);struct s
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{while(YES){int client=accept(listener,NULL,NULL);if(client<0)return;dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{@autoreleasepool{
         int one=1;setsockopt(client,SOL_SOCKET,SO_NOSIGPIPE,&one,sizeof(one));struct timeval timeout={2,0};setsockopt(client,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));NSMutableData *received=[NSMutableData data];NSData *separator=[@"\r\n\r\n" dataUsingEncoding:NSUTF8StringEncoding];uint8_t bytes[4096];NSRange range;
         do{ssize_t count=recv(client,bytes,sizeof(bytes),0);if(count<=0){close(client);return;}[received appendBytes:bytes length:(NSUInteger)count];range=[received rangeOfData:separator options:0 range:NSMakeRange(0,received.length)];}while(range.location==NSNotFound&&received.length<65536);
+        if(range.location==NSNotFound){close(client);return;}
+        NSString *head=[[NSString alloc]initWithData:[received subdataWithRange:NSMakeRange(0,range.location)] encoding:NSUTF8StringEncoding];NSUInteger length=0;
+        for(NSString *line in [head componentsSeparatedByString:@"\r\n"])if([line.lowercaseString hasPrefix:@"content-length:"])length=(NSUInteger)[[line substringFromIndex:15] integerValue];
+        NSUInteger start=NSMaxRange(range);if(length>65536){close(client);return;}
+        // Closing with an unread POST body can reset the connection and make a
+        // valid production reorder fail intermittently. Consume the whole body.
+        while(received.length<start+length){ssize_t count=recv(client,bytes,MIN(sizeof(bytes),start+length-received.length),0);if(count<=0){close(client);return;}[received appendBytes:bytes length:(NSUInteger)count];}
         NSString *raw=[[NSString alloc]initWithData:received encoding:NSUTF8StringEncoding];if(!raw){close(client);return;}atomic_fetch_add(&httpRequests,1);if([raw containsString:@"fmx-lxmc"]||[raw containsString:@"FMX-LXMC-LOCAL"])atomic_fetch_add(&leakedPrivateRequests,1);
+        if([head containsString:@"action=playlist_reorder"]){NSString *bodyText=[[NSString alloc]initWithData:[received subdataWithRange:NSMakeRange(start,length)] encoding:NSUTF8StringEncoding];atomic_fetch_add(&remoteReorders,1);if(![bodyText isEqual:@"ids=77"])atomic_fetch_add(&invalidRemoteReorders,1);}
         BOOL list=[raw containsString:@"action=playlist_list"],cloudImport=[raw containsString:@"action=import_playlist"];int mode=atomic_load(&listMode);
         if(list&&mode==2){close(client);return;}
         NSDictionary *payload=list?@{@"code":@200,@"data":@[@{@"id":@77,@"title":@"Existing cloud playlist",@"user_id":@42,@"count":@3}]}:cloudImport?@{@"code":@200,@"data":@{@"title":@"Original platform import",@"tracks":@[]}}:@{@"code":@200,@"data":@YES};
@@ -161,7 +180,8 @@ int main(int argc,const char *argv[]){@autoreleasepool{
     NSArray *beforeReorder=Tracks(identifier);NSString *recordIDs=[NSString stringWithFormat:@"%@,%@",beforeReorder[1][@"record_id"],beforeReorder[0][@"record_id"]];NSDictionary *reordered=Fetch(@"playlist_tracks_reorder",@{@"playlist_id":identifier.stringValue,@"record_ids":recordIDs});
     Check([reordered[@"data"] isEqual:@YES]&&[Tracks(identifier).firstObject[@"id"] isEqual:beforeReorder.lastObject[@"id"]],@"original_track_reorder_route_persists_local_order");
     NSDictionary *deletedTrack=Fetch(@"playlist_del_track",@{@"record_id":[Tracks(identifier).firstObject[@"record_id"] description]});Check([deletedTrack[@"data"] isEqual:@YES]&&Tracks(identifier).count==1,@"original_track_delete_route_updates_local_playlist");
-    NSDictionary *orderedLists=Fetch(@"playlist_reorder",@{@"ids":[NSString stringWithFormat:@"%@,%@,77",copyID,identifier]});Check([orderedLists[@"data"] isEqual:@YES]&&[fixtureStore.nativePlaylists.firstObject[@"id"] isEqual:copyID],@"mixed_playlist_reorder_keeps_local_order_and_remote_ids_separate");
+    BOOL reordersPassed=YES;for(NSUInteger attempt=0;attempt<8;attempt++){NSNumber *firstID=attempt%2?copyID:identifier,*lastID=attempt%2?identifier:copyID;NSDictionary *orderedLists=Fetch(@"playlist_reorder",@{@"ids":[NSString stringWithFormat:@"%@,%@,77",firstID,lastID]});BOOL correct=[orderedLists[@"data"] isEqual:@YES]&&[fixtureStore.nativePlaylists.firstObject[@"id"] isEqual:firstID];reordersPassed&=correct;if(!correct)NSLog(@"Reorder attempt %lu response %@ expected %@ actual %@",(unsigned long)attempt,orderedLists,firstID,fixtureStore.nativePlaylists.firstObject[@"id"]);}
+    Check(reordersPassed&&atomic_load(&remoteReorders)==8&&atomic_load(&invalidRemoteReorders)==0,@"mixed_playlist_reorder_keeps_local_order_and_remote_ids_separate");
     NSDictionary *deletedList=Fetch(@"playlist_delete",@{@"id":copyID.stringValue});Check([deletedList[@"data"] isEqual:@YES]&&fixtureStore.nativePlaylists.count==1&&[Tracks(copyID) isKindOfClass:NSArray.class]==NO,@"original_playlist_delete_route_removes_only_selected_local_playlist");
     unsigned transportBefore=atomic_load(&httpRequests);NSDictionary *unknown=Fetch(@"playlist_get_tracks",@{@"playlist_id":@"-1999999"});Check([unknown[@"code"] integerValue]!=200&&atomic_load(&httpRequests)==transportBefore,@"stale_local_identity_fails_locally_instead_of_reaching_cloud");
     NSURL *corrupt=[NSURL fileURLWithPath:[root.path stringByAppendingString:@"-corrupt"]];[NSFileManager.defaultManager createDirectoryAtURL:corrupt withIntermediateDirectories:YES attributes:nil error:nil];NSData *garbage=[@"authored-corrupt-data" dataUsingEncoding:NSUTF8StringEncoding];[garbage writeToURL:[corrupt URLByAppendingPathComponent:@"playlists.json"] atomically:YES];FMLXMCLocalStore *damaged=[[FMLXMCLocalStore alloc]initWithDirectory:corrupt];
