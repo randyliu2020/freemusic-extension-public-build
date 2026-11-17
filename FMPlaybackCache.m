@@ -9,8 +9,8 @@
 
 // No raw writes into Swift objects, no KVC, and no synthetic player events.
 // The exact original quality-picker invalidator accepts only Swift self (x20).
-typedef void (__attribute__((swiftcall)) *FMCacheNativeInvalidator)(
-    void * __attribute__((swift_context)));
+typedef void (*FMCacheNativeInvalidator)(
+    void * __attribute__((swift_context))) __attribute__((swiftcall));
 typedef id (*FMCacheInitIMP)(id __attribute__((ns_consumed)), SEL)
     __attribute__((ns_returns_retained));
 
@@ -178,8 +178,8 @@ BOOL FMPlaybackCacheShouldBypassAutomaticCache(NSString *server) {
 BOOL FMPlaybackCacheShouldBypassURL(NSURL *candidate, NSURL *nativeCacheDirectory) {
     if (![candidate isKindOfClass:NSURL.class] || ![nativeCacheDirectory isKindOfClass:NSURL.class] ||
         !candidate.isFileURL || !nativeCacheDirectory.isFileURL) return NO;
-    NSString *path=candidate.standardizedFileURL.path;
-    NSString *directory=nativeCacheDirectory.standardizedFileURL.path;
+    NSString *path=candidate.path.stringByStandardizingPath;
+    NSString *directory=nativeCacheDirectory.path.stringByStandardizingPath;
     if (!path.length || !directory.length || [directory isEqual:@"/"]) return NO;
     NSString *prefix=[directory hasSuffix:@"/"] ? directory : [directory stringByAppendingString:@"/"];
     if (![path hasPrefix:prefix]) return NO;
