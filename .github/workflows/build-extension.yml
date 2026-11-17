@@ -78,8 +78,30 @@ jobs:
         run: |
           set -euo pipefail
           xcrun clang -fobjc-arc -fblocks -framework Foundation \
-            FMExtensionProtocol.m FMQishuiSearch.m FMLXMC.m FMExtensionProtocolTests.m -lz -o protocol-tests
+            FMExtensionProtocol.m FMQishuiSearch.m FMLXMC.m FMTrackMetadata.m FMExtensionProtocolTests.m -lz -o protocol-tests
           ./protocol-tests intercept-contract-fixtures.json
+
+      - name: Test LX song metadata compatibility and credential isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun clang -fobjc-arc -fblocks -Wall -Wextra -framework Foundation \
+            FMTrackMetadata.m FMTrackMetadataTests.m -o track-metadata-tests
+          ./track-metadata-tests
+
+      - name: Test real JS download retries and audio file validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p v7-validation
+          xcrun clang -fobjc-arc -fblocks -Wall -Wextra -Werror=implicit-function-declaration \
+            -framework Foundation -framework AVFoundation -framework AudioToolbox -framework CoreMedia \
+            FMQualityResolver.m FMJSDownloadCoordinator.m FMJSDownloadTests.m -o download-coordinator-tests
+          ./download-coordinator-tests v7-validation/download-coordinator-tests.json
+
+      - name: Test native download queue integration with real transfers
+        shell: bash
+        run: bash test_native_download_macos.sh "$PWD/v7-validation/native-download-tests.json"
 
       - name: Test Qishui search and cursor pagination
         shell: bash
@@ -133,6 +155,11 @@ jobs:
         if: ${{ !cancelled() }}
         shell: bash
         run: bash test_ios_smoke.sh . smoke-artifact
+
+      - name: Record JS and download validation provenance
+        if: always()
+        shell: bash
+        run: python3 record_v7_validation.py v7-validation smoke-artifact
 
       - name: Upload simulator validation evidence
         if: always()

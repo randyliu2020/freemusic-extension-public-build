@@ -65,6 +65,8 @@ manifest = {
 }
 for name in ["FMNavigation.m", "FMNavigation.h", "FMListeningCapture.m", "FMListeningCapture.h", "FMPlaybackCache.m", "FMPlaybackCache.h", "FMQualityResolver.m", "FMQualityResolver.h", "FMAdaptivePlayback.m", "FMAdaptivePlayback.h", "FMAdaptivePlaybackBridge.swift", "FMPlaybackQualityDisplay.m", "FMPlaybackQualityDisplay.h", "FMPlaybackQualityBridge.swift", "compile_extension.sh"]:
     manifest["source_sha256"][name] = hashlib.sha256((source_dir / name).read_bytes()).hexdigest()
+for name in ["FMTrackMetadata.m", "FMTrackMetadata.h", "FMJSDownloadCoordinator.m", "FMJSDownloadCoordinator.h", "FMDownloadIntegration.m", "FMDownloadIntegration.h"]:
+    manifest["source_sha256"][name] = hashlib.sha256((source_dir / name).read_bytes()).hexdigest()
 (output_dir / "build-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 print("DONE " + str(output_dir / "FMExtension.dylib"))
 PY

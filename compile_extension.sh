@@ -19,7 +19,7 @@ elif [[ "$mode" != device ]]; then
   echo 'Unknown extension build mode' >&2
   exit 2
 fi
-sources=(FMExtension LXSourceRuntime FMExtensionProtocol FMLockScreen FMSettingsEntry FMSearchPreferences FMQishuiSearch FMListeningHistory FMInsights FMInteraction FMLXMC FMLXMCUI FMNavigation FMListeningCapture FMPlaybackCache FMQualityResolver FMAdaptivePlayback FMPlaybackQualityDisplay)
+sources=(FMExtension LXSourceRuntime FMExtensionProtocol FMLockScreen FMSettingsEntry FMSearchPreferences FMQishuiSearch FMListeningHistory FMInsights FMInteraction FMLXMC FMLXMCUI FMNavigation FMListeningCapture FMPlaybackCache FMQualityResolver FMAdaptivePlayback FMPlaybackQualityDisplay FMTrackMetadata FMJSDownloadCoordinator FMDownloadIntegration)
 objects=()
 for source in "${sources[@]}"; do
   object="$object_dir/$source.o"
@@ -35,7 +35,7 @@ xcrun --sdk "$sdk" swiftc -target "$target" -sdk "$sdk_path" \
   -O "${swift_flags[@]}" "${objects[@]}" \
   "$source_dir/FMAdaptivePlaybackBridge.swift" "$source_dir/FMPlaybackQualityBridge.swift" \
   -Xlinker -install_name -Xlinker '@executable_path/Frameworks/FMExtension.dylib' \
-  -Xlinker -current_version -Xlinker 1.4.0 \
+  -Xlinker -current_version -Xlinker 1.5.0 \
   -Xlinker -compatibility_version -Xlinker 1.0.0 \
   -Xlinker -headerpad_max_install_names \
   -framework Foundation -framework UIKit -framework JavaScriptCore \

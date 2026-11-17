@@ -1,4 +1,4 @@
-# FreeMusic 4.2.7 extension — v6 adaptive JS quality update
+# FreeMusic 4.2.7 extension — v7 JS compatibility and adaptive downloads
 
 Source-only build for a user-authorized modification of FreeMusic-Folia 4.2.7.
 This repository does not contain the original application, signing identities,
@@ -21,8 +21,11 @@ Tokens stay in memory, pagination follows returned cursors, and a failed source
 does not discard successful results. Qishui connection status appears in Settings.
 Qishui playback retains the host's own track-detail and playback flow.
 
-The JavaScriptCore adapter implements a documented subset of the LX custom-source
-API. NetEase and QQ ID-only musicUrl scripts can be selected.
+The JavaScriptCore adapter implements LX mobile's musicUrl host contract and the
+documented networking, buffer and crypto helpers used by supported scripts.
+NetEase and QQ musicUrl scripts can be selected. Track metadata already received
+from search/import is normalized to the LX fields without inventing unavailable
+media IDs or quality hashes. Missing platform data can still limit a script.
 Kugou's exact native hash request can use scripts advertising standard 128k
 quality; failures retain the original fallback path. When JS is enabled for QQ, a premium/QMC request can receive a plain JS audio URL with null QMC metadata; the original response decoder passes the plain URL through without invoking its encrypted-media branch. No decryption or authorization checks are altered.
 No membership, authentication, DRM or account checks are modified.
@@ -30,6 +33,14 @@ No membership, authentication, DRM or account checks are modified.
 This is an experimental binary extension, not recovered original source code.
 Compilation/fixture success does not prove that a re-signed IPA launches or that
 network interception works on an iPhone. Device validation is required.
+
+## V7 additions
+
+- Align AES-ECB padding and raw RSA with LX mobile. Support binary request/response bytes, multipart form bodies and additional buffer/console behavior. This is a JavaScriptCore implementation, not the original Android QuickJS native bridge; unsupported platform/source capabilities remain explicit.
+- Playback and native manual downloads use independent highest-first JS resolver sessions. Download retries must not consume a playing item's remaining quality candidates or reuse another source generation.
+- Native manual download integration is restricted to the exact verified CacheManager and JS-owned URLs. Existing task identities, original download UI and original completion/save/list-registration callbacks are retained. Unowned downloads remain native.
+- Real downloaded files are checked before success; unsuccessful candidates proceed to lower supported qualities. Cancellation/source changes retire temporary data and stale callbacks. Already saved files are preserved.
+- Synthetic loopback and independent host tests never use third-party sources, credentials or original IPA code in CI. Packaging still requires full signing and testing on the user's device.
 
 ## V6 additions
 

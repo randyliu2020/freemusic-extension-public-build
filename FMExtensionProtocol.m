@@ -9,6 +9,7 @@ static NSString * const FMXErrorDomain = @"FMExtensionProtocol";
 static const NSUInteger FMXMaximumBodySize = 64 * 1024;
 static FMXParseHandler FMXHandler;
 static FMXParsePredicate FMXPredicate;
+static void (^FMXMetadataObserver)(id);
 static FMQishuiSearchClient *FMXQishuiClient;
 static NSDictionary<NSString *, NSValue *> *FMXGetterIMPs;
 static _Thread_local const void *FMXActiveGetterObject;
@@ -213,6 +214,13 @@ static NSArray *FMXProtocolClasses(id self, SEL selector) {
     }
 }
 
++ (void)setTrackMetadataObserver:(void (^)(id))observer {
+    @synchronized(self) {
+        FMXMetadataObserver=[observer copy];
+        FMLXMCSetTrackObserver(observer ? ^(NSDictionary *track){observer(track);} : nil);
+    }
+}
+
 + (BOOL)canInitWithRequest:(NSURLRequest *)request {
     NSDictionary *kugou = FMXKugouParameters(request);
     if (kugou) {
@@ -232,7 +240,8 @@ static NSArray *FMXProtocolClasses(id self, SEL selector) {
     // bridge. Ordinary external-link imports are forwarded unchanged afterwards.
     if ([action isEqualToString:@"import_playlist"] && [method isEqualToString:@"POST"]) return YES;
     if ([action isEqualToString:@"search"] && [method isEqualToString:@"GET"]) {
-        return [NSUserDefaults.standardUserDefaults boolForKey:FMXAggregateKey]
+        BOOL observe; @synchronized(self) { observe=FMXMetadataObserver!=nil; }
+        return (observe || [NSUserDefaults.standardUserDefaults boolForKey:FMXAggregateKey])
             && [parameters[@"keyword"] length] > 0
             && [@[@"0", @"2", @"3"] containsObject:parameters[@"platform"]];
     }
@@ -287,7 +296,10 @@ static NSArray *FMXProtocolClasses(id self, SEL selector) {
         });
         dispatch_resume(self.deadline);
         if (kugou) [self beginParse:kugou];
-        else if ([parameters[@"action"] isEqualToString:@"search"]) [self beginSearch:parameters];
+        else if ([parameters[@"action"] isEqualToString:@"search"]) {
+            if([NSUserDefaults.standardUserDefaults boolForKey:FMXAggregateKey])[self beginSearch:parameters];
+            else [self forwardPreparedRequest];
+        }
         else [self prepareParseBody];
     });
 }
@@ -512,6 +524,12 @@ static NSArray *FMXProtocolClasses(id self, SEL selector) {
     if (!error && !response) error = FMXError(NSURLErrorBadServerResponse, @"原接口未返回响应");
     [self endWorkWithReason:error];
     if (error) { [self.client URLProtocol:self didFailWithError:error]; return; }
+    NSString *action=FMXQueryParameters(self.request)[@"action"];
+    NSInteger status=[response isKindOfClass:NSHTTPURLResponse.class]?((NSHTTPURLResponse *)response).statusCode:0;
+    if(data.length<=4*1024*1024&&status>=200&&status<300&&[@[@"search",@"import_playlist"] containsObject:action?:@""]){
+        void (^observer)(id);@synchronized(FMExtensionProtocol.class){observer=FMXMetadataObserver;}
+        if(observer&&data.length){id payload=[NSJSONSerialization JSONObjectWithData:data options:0 error:nil];if(payload)observer(payload);}
+    }
     // Preserve original HTTP status, headers, response body and non-JSON error responses.
     [self.client URLProtocol:self didReceiveResponse:response cacheStoragePolicy:NSURLCacheStorageNotAllowed];
     if (data.length) [self.client URLProtocol:self didLoadData:data];
@@ -527,6 +545,8 @@ static NSArray *FMXProtocolClasses(id self, SEL selector) {
     if (error && FMXKugouParameters(self.request)) { payload = @{@"url":@""}; error = nil; }
     NSData *data = error ? nil : [NSJSONSerialization dataWithJSONObject:payload options:0 error:&error];
     if (error) { [self.client URLProtocol:self didFailWithError:error]; return; }
+    NSString *action=FMXQueryParameters(self.request)[@"action"];
+    if([@[@"search",@"import_playlist"] containsObject:action?:@""]){void (^observer)(id);@synchronized(FMExtensionProtocol.class){observer=FMXMetadataObserver;}if(observer)observer(payload);}
     NSHTTPURLResponse *response = [[NSHTTPURLResponse alloc] initWithURL:self.request.URL statusCode:200 HTTPVersion:@"HTTP/1.1"
         headerFields:@{@"Content-Type":@"application/json; charset=utf-8", @"Cache-Control":@"no-store"}];
     [self.client URLProtocol:self didReceiveResponse:response cacheStoragePolicy:NSURLCacheStorageNotAllowed];

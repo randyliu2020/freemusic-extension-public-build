@@ -195,6 +195,8 @@ for name in ['FMPlaybackCache.m','FMPlaybackCache.h','smoke/PlaybackCacheFixture
 for name in ['FMQualityResolver.m','FMQualityResolver.h','FMAdaptivePlayback.m','FMAdaptivePlayback.h','FMAdaptivePlaybackBridge.swift','FMPlaybackQualityDisplay.m','FMPlaybackQualityDisplay.h','FMPlaybackQualityBridge.swift','compile_extension.sh','smoke/AdaptivePlaybackFixture.swift','smoke/V6AdaptivePlaybackTests.inc','smoke/V6QualityRoutingTests.inc','smoke/PlaybackQualityFixture.swift','smoke/V6PlaybackQualityTests.inc']:
     manifest['source_sha256'][name]=hashlib.sha256((source/name).read_bytes()).hexdigest()
 manifest['test_macros']=['FMX_LOCKSCREEN_TESTING','FMX_LISTENING_CAPTURE_TESTING','FMX_PLAYBACK_CACHE_TESTING','FMX_ADAPTIVE_PLAYBACK_TESTING','FMX_PLAYBACK_QUALITY_TESTING']
+for name in ['FMTrackMetadata.m','FMTrackMetadata.h','FMJSDownloadCoordinator.m','FMJSDownloadCoordinator.h','FMDownloadIntegration.m','FMDownloadIntegration.h']:
+    manifest['source_sha256'][name]=hashlib.sha256((source/name).read_bytes()).hexdigest()
 (out/'build.json').write_text(json.dumps(manifest,indent=2)+'\n')
 PY
 codesign --force --sign - "$app_dir/Frameworks/FMExtension.dylib" >"$output_dir/sign.log" 2>&1

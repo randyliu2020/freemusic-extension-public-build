@@ -1,5 +1,6 @@
 #import "FMExtensionProtocol.h"
 #import "FMLXMC.h"
+#import "FMTrackMetadata.h"
 #import <objc/runtime.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
@@ -211,15 +212,22 @@ static void RunLXMCImportTests(void) {
     id previousAggregate = [NSUserDefaults.standardUserDefaults objectForKey:@"FMX.aggregateSearch"];
     [NSUserDefaults.standardUserDefaults setBool:NO forKey:@"FMX.aggregateSearch"];
     [FMExtensionProtocol setParseHandler:nil canHandle:nil];
+    FMTrackMetadataReset();
+    __block NSUInteger observedTracks=0;
+    [FMExtensionProtocol setTrackMetadataObserver:^(id response){
+        if([response isKindOfClass:NSDictionary.class]&&response[@"source"])observedTracks++;
+        FMTrackMetadataObserveResponse(response);
+    }];
     NSDictionary *fixture = @{@"type":@"playListPart_v2", @"data":@{@"id":@"fixture-only", @"name":@"Protocol Import Fixture", @"list":@[
         @{@"source":@"wy", @"name":@"Authored One", @"singer":@"Fixture Artist", @"interval":@"01:23", @"meta":@{@"songId":@12345}},
-        @{@"source":@"tx", @"name":@"Authored Two", @"singer":@"Fixture Artist", @"interval":@"02:34", @"meta":@{@"songId":@"Ab0123456789Cd"}}
+        @{@"source":@"tx", @"name":@"Authored Two", @"singer":@"Fixture Artist", @"interval":@"02:34", @"cookie":@"fixture-private-only", @"meta":@{@"songId":@"Ab0123456789Cd",@"id":@8765,@"albumMid":@"fixture-album-mid",@"strMediaMid":@"fixture-media-mid",@"_qualitys":@{@"flac":@{@"size":@123456,@"ext":@"flac",@"auth":@"fixture-private-quality"}}}}
     ]}};
     NSError *error = nil;
     NSData *fixtureData = [NSJSONSerialization dataWithJSONObject:fixture options:0 error:&error];
     FMLXMCImportDocument *document = fixtureData ? FMLXMCParseData(fixtureData, &error) : nil;
     NSString *token = document.playlists.count ? FMLXMCRegisterPlaylist(document.playlists.firstObject, &error) : nil;
     Check(token.length > 0 && !error && document.importedTrackCount == 2, @"LX import authored fixture registers two mapped tracks");
+    Check(observedTracks==2,@"LX import observes accepted raw tracks only after successful document validation");
     if (token.length) {
         NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~"];
         NSString *body = [@"url=" stringByAppendingString:[token stringByAddingPercentEncodingWithAllowedCharacters:allowed]];
@@ -235,6 +243,10 @@ static void RunLXMCImportTests(void) {
         Check(first[@"error"] == NSNull.null && [first[@"status"] integerValue] == 200 && [firstJSON isEqual:expected],
               @"NSURLSession streamed LX token returns the exact native import title and tracks envelope");
         Check(atomic_load(&originRequests) == beforeOrigin, @"Single-use LX token never reaches the local origin transport or network");
+        NSDictionary *metadata=FMTrackMetadataForParameters(@{@"id":@"Ab0123456789Cd"},@"tx");
+        Check([metadata[@"albumMid"] isEqual:@"fixture-album-mid"]&&[metadata[@"strMediaMid"] isEqual:@"fixture-media-mid"]&&[metadata[@"songId"] isEqual:@"8765"]&&[metadata[@"_types"][@"flac"][@"size"] isEqual:@123456],@"LXMC through native protocol retains script-required media and quality metadata");
+        NSString *safeMetadata=[[NSString alloc]initWithData:[NSJSONSerialization dataWithJSONObject:metadata options:0 error:nil] encoding:NSUTF8StringEncoding];
+        Check(![safeMetadata containsString:@"fixture-private"]&&![[[NSString alloc]initWithData:first[@"raw"] encoding:NSUTF8StringEncoding] containsString:@"fixture-media-mid"],@"LX extras stay internal and imported credentials never reach JS metadata");
 
         // A fresh stream, including a different session configuration, must not
         // resurrect a consumed token or fall back to forwarding its secret value.
@@ -271,6 +283,18 @@ static void RunLXMCImportTests(void) {
           [responseHeaders[@"content-type"] isEqual:@"application/json"] && [forwarded[@"raw"] isEqual:expectedResponse],
           @"Ordinary streamed import preserves origin response headers and exact JSON response bytes");
     Check(atomic_load(&originRequests) == beforeForward + 1, @"Ordinary remote-link import forwards exactly once without interceptor recursion");
+    NSUInteger beforeInvalid=observedTracks;
+    NSDictionary *invalidDocument=@{@"type":@"playList_v2",@"data":@[fixture[@"data"],@{@"name":@"Invalid trailing list",@"list":@"not an array"}]};
+    Check(FMLXMCParseData([NSJSONSerialization dataWithJSONObject:invalidDocument options:0 error:nil],&error)==nil&&observedTracks==beforeInvalid,@"partly parsed invalid LX document does not populate track metadata");
+    NSDictionary *acceptedSong=fixture[@"data"][@"list"][0];
+    NSDictionary *mixedDocument=@{@"type":@"playListPart_v2",@"data":@{@"name":@"Filtered observer fixture",@"list":@[acceptedSong,acceptedSong,@{@"source":@"kw",@"name":@"Unsupported",@"meta":@{@"songId":@123}},@{@"source":@"wy",@"name":@"Invalid identifier",@"meta":@{@"songId":@"bad-id"}}]}};
+    FMLXMCImportDocument *mixed=FMLXMCParseData([NSJSONSerialization dataWithJSONObject:mixedDocument options:0 error:nil],&error);
+    Check(mixed.importedTrackCount==1&&mixed.playlists.firstObject.duplicateCount==1&&observedTracks==beforeInvalid+1,@"LX observer excludes duplicate, unsupported and invalid tracks");
+    NSUInteger beforeRemoved=observedTracks;
+    [FMExtensionProtocol setTrackMetadataObserver:nil];
+    FMLXMCParseData(fixtureData,&error);
+    Check(observedTracks==beforeRemoved,@"clearing the protocol observer also removes local LX observation");
+    FMTrackMetadataReset();
     if (previousAggregate) [NSUserDefaults.standardUserDefaults setObject:previousAggregate forKey:@"FMX.aggregateSearch"];
     else [NSUserDefaults.standardUserDefaults removeObjectForKey:@"FMX.aggregateSearch"];
 }
@@ -583,6 +607,22 @@ int main(int argc, const char *argv[]) {
         RunKugouTests(fixtures, listener >= 0);
         if (listener >= 0) RunParseBudgetTests();
         if (listener >= 0) RunLXMCImportTests();
+
+        if (listener >= 0) {
+            [NSUserDefaults.standardUserDefaults setBool:NO forKey:@"FMX.aggregateSearch"];
+            __block NSUInteger observed=0;
+            __block NSDictionary *observedResponse=nil;
+            [FMExtensionProtocol setTrackMetadataObserver:^(id response){observed++;observedResponse=response;}];
+            NSMutableURLRequest *search=[NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://aacert.com/ms/api.php?action=search&keyword=authored&platform=2&page=0"]];
+            [search setValue:@"local-contract" forHTTPHeaderField:@"X-FMX-Test"];
+            unsigned before=atomic_load(&originRequests);
+            Check([FMExtensionProtocol canInitWithRequest:search],@"metadata observer accepts native search without enabling aggregation");
+            NSDictionary *result=Fetch(search);
+            Check(observed==1&&[result[@"json"] isEqual:observedResponse],@"native search response reaches observer and caller unchanged");
+            Check(atomic_load(&originRequests)==before+1,@"metadata observation makes exactly one original request");
+            [FMExtensionProtocol setTrackMetadataObserver:nil];
+            Check(![FMExtensionProtocol canInitWithRequest:search],@"removing observer restores ordinary nonaggregate selection");
+        }
 
         // Direct lifecycle checks keep custom waiting streams outside Foundation's own upload reader.
         FMXWaitingStream *waiting = FMXWaitingStream.new;

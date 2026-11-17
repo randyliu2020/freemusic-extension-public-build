@@ -4,6 +4,7 @@
 #import <Security/Security.h>
 #import <math.h>
 #import <dispatch/dispatch.h>
+#import <string.h>
 
 NSString * const LXSourceRuntimeErrorDomain = @"FreeMusic.LXSourceRuntime";
 static const NSUInteger LXMaxResponseBytes = 4 * 1024 * 1024;
@@ -15,6 +16,16 @@ static NSString *LXJSON(id value) {
     if (![NSJSONSerialization isValidJSONObject:value]) return nil;
     NSData *data = [NSJSONSerialization dataWithJSONObject:value options:0 error:nil];
     return data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
+}
+static NSString *LXHTTPStatusMessage(NSInteger status) {
+    // NSURLSession does not expose a custom HTTP/1 reason phrase. Supply the
+    // standard phrase used by LX callbacks for common API responses.
+    NSDictionary *phrases=@{@200:@"OK",@201:@"Created",@202:@"Accepted",@204:@"No Content",@206:@"Partial Content",
+        @301:@"Moved Permanently",@302:@"Found",@303:@"See Other",@304:@"Not Modified",@307:@"Temporary Redirect",@308:@"Permanent Redirect",
+        @400:@"Bad Request",@401:@"Unauthorized",@403:@"Forbidden",@404:@"Not Found",@405:@"Method Not Allowed",@408:@"Request Timeout",
+        @409:@"Conflict",@410:@"Gone",@413:@"Payload Too Large",@416:@"Range Not Satisfiable",@422:@"Unprocessable Entity",@429:@"Too Many Requests",
+        @500:@"Internal Server Error",@502:@"Bad Gateway",@503:@"Service Unavailable",@504:@"Gateway Timeout"};
+    return phrases[@(status)] ?: [NSHTTPURLResponse localizedStringForStatusCode:status] ?: @"";
 }
 static NSDictionary *LXJSONObject(NSString *text) {
     NSData *data = [text dataUsingEncoding:NSUTF8StringEncoding];
@@ -84,6 +95,49 @@ static NSDictionary *LXCodec(NSString *operation, id value, NSString *encoding) 
     else result = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     return result ? @{ @"value":result } : @{ @"error":@"Buffer is not valid UTF-8" };
 }
+// Security imports RSA public keys as PKCS#1. LX sources commonly supply
+// X.509/SPKI PUBLIC KEY PEM, so unwrap only the exact RSA algorithm structure.
+static BOOL LXDERItem(NSData *data, NSUInteger *offset, uint8_t tag, NSRange *payload) {
+    const uint8_t *p=data.bytes; NSUInteger limit=data.length, cursor=*offset;
+    if(cursor+2>limit || p[cursor++]!=tag)return NO;
+    NSUInteger size=p[cursor++];
+    if(size&0x80){
+        NSUInteger count=size&0x7f;size=0;
+        if(count==0||count>4||cursor+count>limit||p[cursor]==0)return NO;
+        for(NSUInteger i=0;i<count;i++)size=(size<<8)|p[cursor++];
+        if(size<128)return NO;
+    }
+    if(size>limit-cursor)return NO;
+    *payload=NSMakeRange(cursor,size);*offset=cursor+size;return YES;
+}
+static NSData *LXRSAPublicKeyData(NSString *text) {
+    if(![text isKindOfClass:NSString.class]||text.length>16384||[text containsString:@"PRIVATE KEY"])return nil;
+    NSString *base64=text;
+    for(NSString *marker in @[@"-----BEGIN PUBLIC KEY-----",@"-----END PUBLIC KEY-----",@"-----BEGIN RSA PUBLIC KEY-----",@"-----END RSA PUBLIC KEY-----"])
+        base64=[base64 stringByReplacingOccurrencesOfString:marker withString:@""];
+    base64=[[base64 componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] componentsJoinedByString:@""];
+    NSData *der=[[NSData alloc] initWithBase64EncodedString:base64 options:0];
+    if(!der.length||der.length>8192)return nil;
+    NSUInteger outer=0;NSRange sequence;
+    if(!LXDERItem(der,&outer,0x30,&sequence)||outer!=der.length)return nil;
+    NSData *contents=[der subdataWithRange:sequence];const uint8_t *p=contents.bytes;
+    if(!contents.length)return nil;
+    if(p[0]==0x02){
+        NSUInteger pos=0;NSRange modulus,exponent;
+        if(!LXDERItem(contents,&pos,0x02,&modulus)||!modulus.length||!LXDERItem(contents,&pos,0x02,&exponent)||!exponent.length||pos!=contents.length)return nil;
+        return der;
+    }
+    NSUInteger pos=0;NSRange algorithm,bits;
+    if(!LXDERItem(contents,&pos,0x30,&algorithm)||!LXDERItem(contents,&pos,0x03,&bits)||pos!=contents.length||bits.length<2||p[bits.location]!=0)return nil;
+    static const uint8_t rsaOID[]={0x06,0x09,0x2a,0x86,0x48,0x86,0xf7,0x0d,0x01,0x01,0x01};
+    NSData *alg=[contents subdataWithRange:algorithm];
+    if(!((alg.length==sizeof(rsaOID)||alg.length==sizeof(rsaOID)+2)&&memcmp(alg.bytes,rsaOID,sizeof(rsaOID))==0))return nil;
+    if(alg.length>sizeof(rsaOID)){const uint8_t *a=alg.bytes;if(a[sizeof(rsaOID)]!=0x05||a[sizeof(rsaOID)+1]!=0)return nil;}
+    NSData *pkcs1=[contents subdataWithRange:NSMakeRange(bits.location+1,bits.length-1)];
+    NSUInteger check=0;NSRange pkcs1Sequence;
+    if(!LXDERItem(pkcs1,&check,0x30,&pkcs1Sequence)||check!=pkcs1.length||!pkcs1Sequence.length||((const uint8_t *)pkcs1.bytes)[pkcs1Sequence.location]!=0x02)return nil;
+    return LXRSAPublicKeyData([pkcs1 base64EncodedStringWithOptions:0]);
+}
 static NSDictionary *LXCrypto(NSString *operation, NSDictionary *args) {
     if ([operation isEqualToString:@"md5"]) {
         NSData *data = [args[@"value"] dataUsingEncoding:NSUTF8StringEncoding];
@@ -110,10 +164,33 @@ static NSDictionary *LXCrypto(NSString *operation, NSDictionary *args) {
         if (!data || key.length != kCCKeySizeAES128 || (cbc && iv.length != kCCBlockSizeAES128)) return @{ @"error":@"Invalid AES key/IV/data" };
         NSMutableData *out = [NSMutableData dataWithLength:data.length + kCCBlockSizeAES128];
         size_t count = 0;
-        CCCryptorStatus status = CCCrypt(kCCEncrypt, kCCAlgorithmAES, kCCOptionPKCS7Padding | (ecb ? kCCOptionECBMode : 0), key.bytes, key.length, ecb ? NULL : iv.bytes, data.bytes, data.length, out.mutableBytes, out.length, &count);
+        // Official LX mobile uses CBC/PKCS7 but ECB/NoPadding.
+        if(ecb && data.length % kCCBlockSizeAES128)return @{ @"error":@"AES ECB NoPadding input must be a multiple of 16 bytes" };
+        CCCryptorStatus status = CCCrypt(kCCEncrypt, kCCAlgorithmAES, ecb ? kCCOptionECBMode : kCCOptionPKCS7Padding, key.bytes, key.length, ecb ? NULL : iv.bytes, data.bytes, data.length, out.mutableBytes, out.length, &count);
         if (status != kCCSuccess) return @{ @"error":@"AES encryption failed" };
         out.length = count;
         return @{ @"bytes":LXByteArray(out) };
+    }
+    if ([operation isEqualToString:@"rsaEncrypt"]) {
+        NSData *data=LXBytes(args[@"bytes"]), *der=LXRSAPublicKeyData(args[@"key"]);
+        if(!data||!der)return @{@"error":@"Invalid RSA public key or data"};
+        CFErrorRef error=NULL;
+        SecKeyRef key=SecKeyCreateWithData((__bridge CFDataRef)der,(__bridge CFDictionaryRef)@{(__bridge id)kSecAttrKeyType:(__bridge id)kSecAttrKeyTypeRSA,(__bridge id)kSecAttrKeyClass:(__bridge id)kSecAttrKeyClassPublic},&error);
+        if(error)CFRelease(error);
+        if(!key)return @{@"error":@"Invalid RSA public key"};
+        size_t length=SecKeyGetBlockSize(key);
+        if(length<64||length>1024||data.length>length||!SecKeyIsAlgorithmSupported(key,kSecKeyOperationTypeEncrypt,kSecKeyAlgorithmRSAEncryptionRaw)){
+            CFRelease(key);return @{@"error":@"RSA NoPadding input/key size unsupported"};
+        }
+        // Java RSA/ECB/NoPadding left-pads a short positive integer to the
+        // modulus size. Apple raw RSA requires that complete sized block.
+        NSMutableData *block=[NSMutableData dataWithLength:length];
+        if(data.length)memcpy((uint8_t *)block.mutableBytes+length-data.length,data.bytes,data.length);
+        error=NULL;
+        NSData *encrypted=CFBridgingRelease(SecKeyCreateEncryptedData(key,kSecKeyAlgorithmRSAEncryptionRaw,(__bridge CFDataRef)block,&error));
+        CFRelease(key);if(error)CFRelease(error);
+        if(!encrypted||encrypted.length!=length)return @{@"error":@"RSA NoPadding encryption failed"};
+        return @{@"bytes":LXByteArray(encrypted)};
     }
     return @{ @"error":@"Unsupported crypto operation" };
 }
@@ -125,6 +202,7 @@ static NSDictionary *LXCrypto(NSString *operation, NSDictionary *args) {
 @property(nonatomic,strong) NSMutableData *data;
 @property(nonatomic,strong) NSHTTPURLResponse *response;
 @property(nonatomic) NSUInteger redirects;
+@property(nonatomic) BOOL binary;
 @end
 @implementation LXHTTPState @end
 
@@ -196,7 +274,7 @@ static NSDictionary *LXCrypto(NSString *operation, NSDictionary *args) {
         configuration.HTTPCookieStorage = nil; configuration.HTTPCookieAcceptPolicy = NSHTTPCookieAcceptPolicyNever;
         configuration.HTTPShouldSetCookies = NO; configuration.URLCredentialStorage = nil; configuration.URLCache = nil;
         configuration.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
-        configuration.timeoutIntervalForRequest = 15; configuration.timeoutIntervalForResource = 30;
+        configuration.timeoutIntervalForRequest = 13; configuration.timeoutIntervalForResource = 60;
         configuration.HTTPMaximumConnectionsPerHost = 4;
         configuration.protocolClasses = @[];
         // The app adapter may prepend its class in a global getter hook, so an
@@ -384,7 +462,7 @@ static NSDictionary *LXCrypto(NSString *operation, NSDictionary *args) {
     NSURL *URL = [NSURL URLWithString:URLString];
     if (!LXIsHTTPURL(URL) || URLString.length > 16384 || !options) { [self deliverHTTP:identifier response:nil error:@"Invalid HTTP request"]; return; }
     NSTimeInterval timeout = [options[@"timeout"] doubleValue] / 1000.0;
-    timeout = isfinite(timeout) ? MAX(1,MIN(timeout,30)) : 15;
+    timeout = isfinite(timeout) && timeout>0 ? MAX(0.001,MIN(timeout,60)) : 13;
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:URL cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:timeout];
     // Local request metadata, not an HTTP header. Prevent a source requesting
     // the app's backend from recursively invoking the app's source adapter.
@@ -393,6 +471,8 @@ static NSDictionary *LXCrypto(NSString *operation, NSDictionary *args) {
     if (![@[@"GET",@"POST",@"PUT",@"PATCH",@"DELETE",@"HEAD",@"OPTIONS"] containsObject:method]) { [self deliverHTTP:identifier response:nil error:@"Unsupported HTTP method"]; return; }
     request.HTTPMethod = method;
     request.HTTPShouldHandleCookies = NO;
+    [request setValue:@"application/json" forHTTPHeaderField:@"Accept"];
+    [request setValue:@"Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/69.0.3497.100 Safari/537.36" forHTTPHeaderField:@"User-Agent"];
     NSDictionary *headers = options[@"headers"];
     if (![headers isKindOfClass:NSDictionary.class] || headers.count > 64) { [self deliverHTTP:identifier response:nil error:@"Invalid headers"]; return; }
     NSCharacterSet *badHeaderName = [[NSCharacterSet characterSetWithCharactersInString:@"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&'*+-.^_`|~"] invertedSet];
@@ -403,7 +483,40 @@ static NSDictionary *LXCrypto(NSString *operation, NSDictionary *args) {
         if (headerBytes > 32768) { [self deliverHTTP:identifier response:nil error:@"HTTP headers exceed 32 KiB"]; return; }
         [request setValue:headers[key] forHTTPHeaderField:key];
     }
-    id body = options[@"body"], form = options[@"form"];
+    id body = options[@"body"], form = options[@"form"], multipart=options[@"multipart"], encodedBody=options[@"bodyBase64"];
+    if((NSUInteger)(body!=nil||encodedBody!=nil)+(NSUInteger)(form!=nil)+(NSUInteger)(multipart!=nil)>1){[self deliverHTTP:identifier response:nil error:@"Conflicting HTTP bodies"];return;}
+    NSData *requestData=nil;
+    if(multipart){
+        if(![multipart isKindOfClass:NSArray.class]||[multipart count]>128){[self deliverHTTP:identifier response:nil error:@"Invalid multipart fields"];return;}
+        NSString *boundary=[@"LX-" stringByAppendingString:NSUUID.UUID.UUIDString];
+        NSMutableData *out=NSMutableData.data;
+        NSCharacterSet *bad=NSCharacterSet.controlCharacterSet;
+        for(id item in multipart){
+            if(![item isKindOfClass:NSDictionary.class]){[self deliverHTTP:identifier response:nil error:@"Invalid multipart part"];return;}
+            NSString *name=item[@"name"],*filename=item[@"filename"],*contentType=item[@"contentType"],*encoded=item[@"data"];
+            BOOL valid=[name isKindOfClass:NSString.class]&&name.length<=256&&[name rangeOfCharacterFromSet:bad].location==NSNotFound;
+            for(id optional in @[filename ?: @"",contentType ?: @""])valid=valid&&[optional isKindOfClass:NSString.class]&&[optional length]<=512&&[optional rangeOfCharacterFromSet:bad].location==NSNotFound;
+            if(!valid||![encoded isKindOfClass:NSString.class]||encoded.length>LXMaxRequestBytes*2){[self deliverHTTP:identifier response:nil error:@"Invalid multipart header or data"];return;}
+            NSData *part=[[NSData alloc] initWithBase64EncodedString:encoded options:0];
+            if(!part){[self deliverHTTP:identifier response:nil error:@"Invalid multipart bytes"];return;}
+            NSString *(^quote)(NSString *)=^NSString *(NSString *s){return [[s stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"] stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""];};
+            NSMutableString *header=[NSMutableString stringWithFormat:@"--%@\r\nContent-Disposition: form-data; name=\"%@\"",boundary,quote(name)];
+            if(filename)[header appendFormat:@"; filename=\"%@\"",quote(filename)];
+            [header appendString:@"\r\n"];
+            if(contentType.length)[header appendFormat:@"Content-Type: %@\r\n",contentType];
+            [header appendString:@"\r\n"];
+            [out appendData:[header dataUsingEncoding:NSUTF8StringEncoding]];[out appendData:part];[out appendData:[@"\r\n" dataUsingEncoding:NSUTF8StringEncoding]];
+            if(out.length>LXMaxRequestBytes){[self deliverHTTP:identifier response:nil error:@"HTTP body exceeds 1 MiB"];return;}
+        }
+        [out appendData:[[NSString stringWithFormat:@"--%@--\r\n",boundary] dataUsingEncoding:NSUTF8StringEncoding]];
+        [request setValue:[NSString stringWithFormat:@"multipart/form-data; boundary=%@",boundary] forHTTPHeaderField:@"Content-Type"];
+        requestData=out;
+    } else if(encodedBody){
+        if(![encodedBody isKindOfClass:NSString.class]||[encodedBody length]>LXMaxRequestBytes*2){[self deliverHTTP:identifier response:nil error:@"Invalid binary body"];return;}
+        requestData=[[NSData alloc] initWithBase64EncodedString:encodedBody options:0];
+        if(!requestData){[self deliverHTTP:identifier response:nil error:@"Invalid binary body"];return;}
+        if(![request valueForHTTPHeaderField:@"Content-Type"])[request setValue:@"application/octet-stream" forHTTPHeaderField:@"Content-Type"];
+    }
     if (form) {
         if ([form isKindOfClass:NSString.class]) body = form;
         else if ([form isKindOfClass:NSDictionary.class]) {
@@ -418,11 +531,11 @@ static NSDictionary *LXCrypto(NSString *operation, NSDictionary *args) {
         if (![request valueForHTTPHeaderField:@"Content-Type"]) [request setValue:@"application/x-www-form-urlencoded" forHTTPHeaderField:@"Content-Type"];
     } else if ([options[@"jsonBody"] boolValue] && ![request valueForHTTPHeaderField:@"Content-Type"]) [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     if (body && ![body isKindOfClass:NSString.class]) { [self deliverHTTP:identifier response:nil error:@"HTTP body must be a string"]; return; }
-    request.HTTPBody = [body dataUsingEncoding:NSUTF8StringEncoding];
+    request.HTTPBody = requestData ?: [body dataUsingEncoding:NSUTF8StringEncoding];
     if (request.HTTPBody.length > LXMaxRequestBytes) { [self deliverHTTP:identifier response:nil error:@"HTTP body exceeds 1 MiB"]; return; }
     [_lock lock];
     if (_invalidated || _HTTPTasks.count >= 16) { [_lock unlock]; [self deliverHTTP:identifier response:nil error:@"HTTP concurrency limit reached"]; return; }
-    LXHTTPState *state = [LXHTTPState new]; state.identifier = identifier; state.data = [NSMutableData data];
+    LXHTTPState *state = [LXHTTPState new]; state.identifier = identifier; state.data = [NSMutableData data];state.binary=[options[@"binary"] boolValue];
     state.task = [_session dataTaskWithRequest:request]; _HTTPTasks[@(state.task.taskIdentifier)] = state;
     [state.task resume]; [_lock unlock];
 }
@@ -455,12 +568,14 @@ static NSDictionary *LXCrypto(NSString *operation, NSDictionary *args) {
     [_lock lock]; LXHTTPState *state = _HTTPTasks[@(task.taskIdentifier)]; [_HTTPTasks removeObjectForKey:@(task.taskIdentifier)]; [_lock unlock];
     if (!state) return;
     if (error) { [self deliverHTTP:state.identifier response:nil error:error.localizedDescription]; return; }
-    NSString *text = [[NSString alloc] initWithData:state.data encoding:NSUTF8StringEncoding];
-    if (!text) { [self deliverHTTP:state.identifier response:nil error:@"Binary/non-UTF-8 HTTP responses are unsupported"]; return; }
-    id body = state.data.length ? [NSJSONSerialization JSONObjectWithData:state.data options:NSJSONReadingFragmentsAllowed error:nil] : nil;
+    NSString *text = state.binary ? nil : [[NSString alloc] initWithData:state.data encoding:NSUTF8StringEncoding];
+    if (!state.binary && !text) { [self deliverHTTP:state.identifier response:nil error:@"Non-UTF-8 response requires binary:true"]; return; }
+    id body = !state.binary && state.data.length ? [NSJSONSerialization JSONObjectWithData:state.data options:NSJSONReadingFragmentsAllowed error:nil] : nil;
     NSMutableDictionary *headers = [NSMutableDictionary dictionary];
     [state.response.allHeaderFields enumerateKeysAndObjectsUsingBlock:^(id key, id value, BOOL *stop) { headers[[[key description] lowercaseString]] = [value description]; }];
-    [self deliverHTTP:state.identifier response:@{@"statusCode":@(state.response.statusCode), @"headers":headers, @"body":body ?: text, @"url":state.response.URL.absoluteString ?: @""} error:nil];
+    NSMutableDictionary *response=[@{@"statusCode":@(state.response.statusCode),@"statusMessage":LXHTTPStatusMessage(state.response.statusCode), @"headers":headers, @"url":state.response.URL.absoluteString ?: @""} mutableCopy];
+    if(state.binary)response[@"bodyBase64"]=[state.data base64EncodedStringWithOptions:0];else response[@"body"]=body ?: text;
+    [self deliverHTTP:state.identifier response:response error:nil];
 }
 - (void)redirectTask:(NSURLSessionTask *)task request:(NSURLRequest *)request completion:(void (^)(NSURLRequest *))completion {
     [_lock lock]; LXHTTPState *state = _HTTPTasks[@(task.taskIdentifier)]; BOOL okay = state && ++state.redirects <= 5 && LXIsHTTPURL(request.URL); [_lock unlock];

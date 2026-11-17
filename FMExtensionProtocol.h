@@ -23,6 +23,10 @@ typedef FMXParseCancellation _Nullable (^FMXParseHandler)(NSURLRequest *request,
 @interface FMExtensionProtocol : NSURLProtocol
 + (void)install;
 + (void)setParseHandler:(nullable FMXParseHandler)handler canHandle:(nullable FMXParsePredicate)predicate;
+/// Observes allowlisted track metadata already returned by native search/import.
+/// Installing this observer forwards ordinary search requests once without changing their response.
+/// Also observes accepted local LX playlist tracks before native-field conversion.
++ (void)setTrackMetadataObserver:(void (^ _Nullable)(id response))observer;
 /// Injectable catalogue collaborator; nil restores the verified same-App native configuration loader.
 + (void)setQishuiSearchClient:(nullable FMQishuiSearchClient *)client;
 @end

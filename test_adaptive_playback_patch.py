@@ -1,4 +1,20 @@
 """Execute only authored ARM64 bridges with caller/ARC/stack sentinels."""
+
+# Windows must use the user's unified D-drive tools; CI uses its declared runner dependencies.
+import sys as _tool_sys
+if _tool_sys.platform == 'win32':
+    import importlib.util as _tool_importlib
+    from pathlib import Path as _ToolPath
+    _tool_spec = _tool_importlib.spec_from_file_location(
+        '_unified_android_environment', 'D:/Program Files/Android/toolchain/config/environment.py')
+    _tool_env = _tool_importlib.module_from_spec(_tool_spec)
+    _tool_spec.loader.exec_module(_tool_env)
+    _tool_env.setup_environment()
+    _tool_deps = _ToolPath('D:/Program Files/Android/toolchain/auxiliary/freemusic-folia/testdeps')
+    if not _tool_deps.is_dir():
+        raise RuntimeError('Restore the existing test dependencies in the unified D-drive tool directory.')
+    _tool_sys.path.insert(0, str(_tool_deps))
+
 from pathlib import Path
 import struct
 import unittest

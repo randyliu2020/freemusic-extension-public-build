@@ -13,6 +13,11 @@ static const NSUInteger FMMaximumLists = 100;
 static const NSUInteger FMMaximumTracks = 20000;
 static const NSUInteger FMMaximumPending = 16;
 static NSString * const FMBridgePrefix = @"https://fmx-lxmc.invalid/import/";
+static FMLXMCTrackObserver FMTrackObserver;
+
+void FMLXMCSetTrackObserver(FMLXMCTrackObserver observer) {
+    @synchronized(FMLXMCPlaylist.class){FMTrackObserver=[observer copy];}
+}
 
 @interface FMLXMCPlaylist ()
 @property(nonatomic, copy, readwrite) NSString *title;
@@ -155,6 +160,9 @@ FMLXMCImportDocument *FMLXMCParseData(NSData *data, NSError **error) {
     NSArray *lists = single ? @[payload] : payload;
     if (!lists.count || lists.count > FMMaximumLists) return FMFail(error, 8, @"歌单数量必须在 1 到 100 之间。");
     NSMutableArray *normalized = [NSMutableArray array];
+    FMLXMCTrackObserver observer;
+    @synchronized(FMLXMCPlaylist.class){observer=FMTrackObserver;}
+    NSMutableArray<NSDictionary *> *observedTracks=observer?NSMutableArray.array:nil;
     NSUInteger inputCount = 0, trackCount = 0;
     for (id item in lists) {
         if (![item isKindOfClass:NSDictionary.class] || ![item[@"list"] isKindOfClass:NSArray.class]) return FMFail(error, 7, @"歌单列表结构无效。");
@@ -178,6 +186,7 @@ FMLXMCImportDocument *FMLXMCParseData(NSData *data, NSError **error) {
             NSString *key = [NSString stringWithFormat:@"%@:%@", track[@"server"], track[@"id"]];
             if ([seen containsObject:key]) { duplicate++; continue; }
             [seen addObject:key]; [tracks addObject:track];
+            [observedTracks addObject:song];
         }
         FMLXMCPlaylist *list = [FMLXMCPlaylist new];
         list.title = name; list.tracks = tracks; list.inputCount = songs.count;
@@ -187,6 +196,9 @@ FMLXMCImportDocument *FMLXMCParseData(NSData *data, NSError **error) {
     FMLXMCImportDocument *document = [FMLXMCImportDocument new];
     document.format = format; document.playlists = normalized; document.inputCount = inputCount;
     document.importedTrackCount = trackCount; document.skippedCount = inputCount - trackCount;
+    // Observation is local and advisory. Invalid/incomplete parse results never
+    // partially populate metadata, and observer failures cannot break importing.
+    for(NSDictionary *track in observedTracks){@try{observer(track);}@catch(__unused NSException *exception){}}
     return document;
 }
 

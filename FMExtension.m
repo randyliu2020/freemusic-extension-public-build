@@ -13,6 +13,8 @@
 #import "FMPlaybackCache.h"
 #import "FMQualityResolver.h"
 #import "FMAdaptivePlayback.h"
+#import "FMTrackMetadata.h"
+#import "FMDownloadIntegration.h"
 
 static NSString *const FMXChanged = @"FMX.changed";
 static NSString *const FMXSelected = @"FMX.selectedSource";
@@ -83,6 +85,7 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
     // old request may still run its host callback after this transition.
     FMPlaybackCacheSourceTransition(FMXCacheServers(self.runtime.manifest));
     FMAdaptivePlaybackSourceTransition();
+    FMDownloadIntegrationSourceTransition();
     self.generation++;
     LXSourceRuntime *old = self.runtime; self.runtime = nil; [old invalidate];
     self.selectedFile = nil;
@@ -160,7 +163,7 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
     if (section == 1) return @"支持网易云、QQ 和酷狗的基础洛雪音源。酷狗 JS 使用标准音质；部分脚本需要额外歌曲信息或尚未支持的功能。仅启用你信任的脚本。";
     if (section == 2) return @"用当前封面在手机上生成轻微缩放的循环动画。系统需要时才生成；低电量或减少动态效果开启时显示静态封面。需要 iOS 26 或更高版本。";
     if (section == 4) return @"按实际听歌记录查看月度、年度偏好，只保存在本机。";
-    return @"扩展 v6。启用 JS 后优先尝试支持的最高音质，失败逐档降低；播放失败也会继续尝试剩余档位。播放页的小音质标识以音频实际信息为准，无法确认时显示未知。换源后重新解析，手动下载保留。";
+    return @"扩展 v7。启用 JS 后，播放和下载优先尝试支持的最高音质；解析、播放或下载失败会继续尝试剩余档位。播放页的小音质标识以音频实际信息为准。换源后重新解析，已下载文件保留。";
 }
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)path {
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
@@ -282,6 +285,8 @@ __attribute__((constructor)) static void FMXInitialize(void) {
         if (![[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] isEqual:@"4.2.7"] || ![NSBundle.mainBundle.executablePath.lastPathComponent isEqual:@"FreeMusic"]) return;
         FMPlaybackCacheInstall();
         FMAdaptivePlaybackInstall();
+        FMDownloadIntegrationInstall();
+        [FMExtensionProtocol setTrackMetadataObserver:^(id payload){FMTrackMetadataObserveResponse(payload);}];
         // Capture must install before the host registers its original AVPlayer
         // time observer. UI setup remains deferred to the main run loop below.
         FMInsightsInstall();
@@ -305,9 +310,7 @@ __attribute__((constructor)) static void FMXInitialize(void) {
                 }
                 // Native auth, cookies, QMC keys and custom API settings are not
                 // passed to user scripts. Only the documented song metadata is.
-                NSMutableDictionary *info = [@{@"name":parameters[@"title"] ?: @"", @"singer":parameters[@"singer"] ?: @"", @"source":source, @"types":@[], @"_types":@{}} mutableCopy];
-                info[@"songmid"] = parameters[@"id"] ?: @"";
-                if ([source isEqual:@"kg"]) info[@"hash"] = parameters[@"id"] ?: @"";
+                NSDictionary *info = FMTrackMetadataForParameters(parameters,source);
                 NSString *diagnosticID = NSUUID.UUID.UUIDString;
                 selectedRuntime = runtime; selectedSource = source; diagnostic = diagnosticID;
                 FMXPlaybackStatus(runtime, diagnosticID, source, @"正在通过 JS 从最高支持音质解析", YES);
@@ -334,6 +337,17 @@ __attribute__((constructor)) static void FMXInitialize(void) {
                     }
                     FMAdaptivePlaybackRegisterURL(url, session, requestedQuality,
                         [NSString stringWithFormat:@"%@:%@", source, parameters[@"id"] ?: @""]);
+                    FMDownloadIntegrationRegisterURL(url,
+                        [NSString stringWithFormat:@"%@:%@",source,parameters[@"id"]?:@""],
+                        ^FMQualityResolver *{
+                            // A download owns its own attempts; it must never consume the player's session.
+                            return [[FMQualityResolver alloc] initWithPlatform:source supportedQualities:qualities timeout:35
+                                isCurrent:^BOOL{return [FMXManager shared].runtime==runtime&&runtime.manifest!=nil;}
+                                resolve:^dispatch_block_t(NSString *quality,NSTimeInterval timeout,FMQualityAttemptCompletion resolved){
+                                    NSString *identifier=[runtime resolveMusicURLForSource:source musicInfo:info quality:quality timeout:timeout invalidateOnTimeout:NO completion:resolved];
+                                    return ^{[runtime cancelRequestWithIdentifier:identifier];};
+                                }];
+                        },^BOOL{return [FMXManager shared].runtime==runtime&&runtime.manifest!=nil;});
                     FMXPlaybackStatus(runtime, diagnosticID, source, @"JS 已返回播放地址，实际音质将在播放后确认", NO);
                     // Plain URL responses deliberately contain no QMC metadata.
                     // The original decoder's nil-QMC branch passes them directly

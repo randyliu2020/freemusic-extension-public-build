@@ -25,8 +25,15 @@ FOUNDATION_EXPORT const NSUInteger FMLXMCMaximumExpandedBytes;
 @property(nonatomic, readonly) NSUInteger skippedCount;
 @end
 
-/// Synchronous pure parser: call away from the main thread. Supports gzip and plain
-/// UTF-8 JSON, playListPart[_v2] and playList[_v2]. No network, files, or credentials.
+/// Optional internal observer of accepted, deduplicated LX track dictionaries.
+/// Invoked on the parsing thread only after the whole document validates; never
+/// changes the native import response. Receivers must allowlist fields they keep.
+typedef void (^FMLXMCTrackObserver)(NSDictionary *track);
+FOUNDATION_EXPORT void FMLXMCSetTrackObserver(FMLXMCTrackObserver _Nullable observer);
+
+/// Synchronous parser: call away from the main thread. Supports gzip and plain
+/// UTF-8 JSON, playListPart[_v2] and playList[_v2]. No network or file access;
+/// native output excludes account fields, even when an internal observer is set.
 FOUNDATION_EXPORT FMLXMCImportDocument * _Nullable FMLXMCParseData(NSData *data, NSError **error);
 
 /// Reads a local, regular file through a bounded descriptor (no network or symlink

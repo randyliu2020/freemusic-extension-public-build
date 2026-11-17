@@ -23,7 +23,14 @@ function harness() {
       if (operation === 'randomBytes') return {bytes:[...crypto.randomBytes(args.size)]};
       if (operation === 'aesEncrypt') {
         const cipher = crypto.createCipheriv(args.mode, Buffer.from(args.key), args.mode.endsWith('ecb') ? null : Buffer.from(args.iv));
+        if(args.mode.endsWith('ecb'))cipher.setAutoPadding(false);
         return {bytes:[...Buffer.concat([cipher.update(Buffer.from(args.bytes)),cipher.final()])]};
+      }
+      if(operation === 'rsaEncrypt') {
+        const key=crypto.createPublicKey(args.key),length=Math.ceil(key.asymmetricKeyDetails.modulusLength/8);
+        if(args.bytes.length>length)return {error:'RSA NoPadding input/key size unsupported'};
+        const block=Buffer.alloc(length);Buffer.from(args.bytes).copy(block,length-args.bytes.length);
+        return {bytes:[...crypto.publicEncrypt({key,padding:crypto.constants.RSA_NO_PADDING},block)]};
       }
       return {error:'Unsupported crypto'};
     }
@@ -105,7 +112,10 @@ async function authenticatedQQFixture() {
   assert.equal(h.run('typeof __LXNative'), 'undefined');
   assert.equal(h.run('typeof require'), 'undefined');
   assert.equal(h.run('typeof fetch'), 'undefined');
+  assert.equal(h.run('typeof Buffer'), 'undefined');
   assert.equal(h.run('lx.env'), 'mobile');
+  assert.equal(h.run('lx.version'), '2.0.0');
+  assert.equal(h.run('lx.currentScriptInfo.rawScript'),'fixture');
   const extended = harness();
   assert.equal(extended.run("typeof lx.send('inited',{sources:{wy:{type:'music',actions:['musicUrl'],qualitys:['128k']},qs:{type:'music',actions:['musicUrl'],qualitys:['128k']}}}).then"),'function');
   assert.deepEqual(Object.keys(extended.events[0][1].sources),['wy']);
@@ -118,10 +128,11 @@ async function authenticatedQQFixture() {
   assert.equal(h.run("lx.utils.crypto.md5('abc')"),'900150983cd24fb0d6963f7d28e17f72');
   assert.equal(h.run("lx.utils.crypto.randomBytes(32).length"),32);
   assert.throws(() => h.run('lx.utils.crypto.randomBytes(-1)'),/0\.\.\.65536/);
-  assert.throws(() => h.run('lx.utils.crypto.rsaEncrypt()'),/Unsupported LX API/);
+  assert.throws(() => h.run('lx.utils.crypto.rsaEncrypt()'),/Invalid RSA key/);
   assert.throws(() => h.run('lx.utils.zlib.inflate()'),/Unsupported LX API/);
-  const encrypted = h.run("lx.utils.buffer.bufToString(lx.utils.crypto.aesEncrypt('hello','aes-128-ecb','0123456789abcdef',''),'hex')");
-  assert.equal(encrypted,'674c7ef38e78cabd9cec9c125823a639');
+  const encrypted = h.run("lx.utils.buffer.bufToString(lx.utils.crypto.aesEncrypt('0123456789abcdef','aes-128-ecb','0123456789abcdef',''),'hex')");
+  assert.equal(encrypted,'72727e881edcfd0100a718687909b565');
+  assert.throws(()=>h.run("lx.utils.crypto.aesEncrypt('hello','aes-128-ecb','0123456789abcdef','')"));
   assert.equal(h.run("lx.utils.buffer.bufToString(lx.utils.crypto.aesEncrypt('hello','aes-128-cbc','0123456789abcdef','abcdef0123456789'),'hex')"),'ffcb80bec2437fc2e30b0ef0a8ec5b64');
   h.run("globalThis.cancel = lx.request('https://fixture.invalid/api',{method:'POST',body:'literal=abc&x=%20'},(e,r,b)=>{globalThis.response=[e,r,b]})");
   assert.equal(h.requests[0].options.body,'literal=abc&x=%20');
@@ -136,8 +147,31 @@ async function authenticatedQQFixture() {
   assert.deepEqual(h.cancelled,['3']);
   h.run("__LXHTTPDone('3','',JSON.stringify({body:'ignored'}))");
   assert.throws(()=>h.run("lx.request('file:///etc/passwd',{},()=>{})"),/http\/https/);
-  assert.throws(()=>h.run("lx.request('https://fixture.invalid',{formData:{}},()=>{})"),/formData/);
-  assert.throws(()=>h.run("lx.request('https://fixture.invalid',{responseType:'arraybuffer'},()=>{})"),/binary HTTP response/);
+  const binary=harness();
+  binary.run("lx.request('https://fixture.invalid/binary',{method:'POST',body:new Uint8Array([0,255,128]),binary:true},(e,r,b)=>{globalThis.binaryReply=[e,r,b]})");
+  assert.equal(binary.requests[0].options.bodyBase64,'AP+A');
+  assert.equal(binary.requests[0].options.binary,true);
+  binary.context.__LXHTTPDone('1','',JSON.stringify({statusCode:200,statusMessage:'ok',headers:{},bodyBase64:'AP+A'}));
+  assert.equal(binary.run('binaryReply[2].type'),'Buffer');
+  assert.equal(binary.run("lx.utils.buffer.bufToString(lx.utils.buffer.from(binaryReply[2]),'hex')"),'00ff80');
+  assert.equal(binary.run('binaryReply[1].body===binaryReply[2]'),true);
+  assert.equal(binary.run("lx.utils.buffer.bufToString(lx.utils.buffer.from('abc','hex'),'hex')"),'ab0c');
+  assert.equal(binary.run("lx.utils.buffer.bufToString(lx.utils.buffer.from('gg','hex'),'hex')"),'00');
+  assert.equal(binary.run("Array.isArray(lx.utils.buffer.bufToString([1,2],'binary'))"),true);
+  binary.run("lx.request('https://fixture.invalid/form',{method:'POST',formData:{text:'中文',file:{value:new Uint8Array([0,255]),options:{filename:'test.bin',contentType:'application/octet-stream'}}}},()=>{})");
+  assert.deepEqual(binary.requests[1].options.multipart,[{name:'text',data:'5Lit5paH'},{name:'file',data:'AP8=',filename:'test.bin',contentType:'application/octet-stream'}]);
+  assert.throws(()=>binary.run("lx.request('https://fixture.invalid/form',{formData:{file:{uri:'file:///private'}}},()=>{})"),/Unsupported multipart/);
+  assert.throws(()=>binary.run("lx.request('https://fixture.invalid/form',{formData:{'bad\\r\\nheader':'value'}},()=>{})"),/Invalid multipart/);
+  assert.throws(()=>binary.run("lx.request('https://fixture.invalid/form',{body:'a',form:{}},()=>{})"),/only one/);
+  assert.throws(()=>binary.run("lx.request('https://fixture.invalid/form',{body:new Uint8Array(1048577)},()=>{})"),/1 MiB/);
+  assert.throws(()=>binary.run("lx.utils.crypto.md5(123)"),/string/);
+  await assert.rejects(binary.run("lx.on('unsupported',()=>{})"),/Only request/);
+  await assert.rejects(binary.run("lx.send('unsupported',{})"),/Unsupported LX event/);
+  assert.doesNotThrow(()=>binary.run("console.group('fixture');console.table({a:1});console.time('x');console.timeEnd('x');console.groupEnd()"));
+  const publicKey='-----BEGIN PUBLIC KEY-----\nMIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCVSng5pQU3K5uc/BhOVIJaQCwWo4wAFYuGnSKtBC940NyvpvwXdyoWCVYjvoA694YjeT89VjBw4Ytt78l0PLbqsughA4uGmDzSQdiYFld614S+vlVwM+CZMPIYoCiEN+xi2saoN5Rd4zMJyNbg0ArZk74YlrgVOaVQonToT+crxwIDAQAB\n-----END PUBLIC KEY-----';
+  binary.context.fixturePublicKey=publicKey;
+  assert.equal(binary.run("lx.utils.buffer.bufToString(lx.utils.crypto.rsaEncrypt('LX RSA fixture',fixturePublicKey),'hex')"),'5e5519516031099dfe498ea0bcddf9dd9bda08341df240d2c88881dc9e280a1a5c34f28250d424036e5a21cbc37a40b9e7a8cedd157630544268858b3731490805412ffa1b52a8b7f159dc89a97a18e75504264f285e9e57d29a28ffd043efc6521cfa45275090786b71425a0a0d2fe92f9ca4448405d9875ae017bac1bc03ff');
+  assert.throws(()=>binary.run("lx.utils.crypto.rsaEncrypt(new Uint8Array(129),fixturePublicKey)"),/size/);
   h.run("globalThis.timerValue='';globalThis.timer=setTimeout((a,b)=>timerValue=a+b,25,'a','b')");
   const timerID=h.run('timer'); assert.equal(h.timers.get(timerID).delay,25);
   h.run(`__LXTimerFire('${timerID}')`); assert.equal(h.run('timerValue'),'ab');

@@ -15,6 +15,9 @@ typedef void (^LXSourceURLCompletion)(NSURL * _Nullable URL, NSError * _Nullable
 /// cannot stop executing JS. Hard timeouts discard the instance. The optional
 /// per-attempt soft timeout retains a responsive context, but a stalled JS queue
 /// is still discarded after a bounded responsiveness check.
+/// LX v2 mobile compatibility includes CBC/PKCS7, ECB/NoPadding, public RSA
+/// NoPadding, and text/JSON/binary/multipart network requests. Network responses
+/// are bounded at 4 MiB, request bodies at 1 MiB; no file/stream multipart input.
 @interface LXSourceRuntime : NSObject
 
 /// Read LXBootstrap.js from the containing app's resources and pass its contents.
