@@ -1,4 +1,5 @@
 #import "FMSearchPreferences.h"
+#import "FMSettingsMigration.h"
 #import <dispatch/dispatch.h>
 #import <objc/runtime.h>
 
@@ -8,7 +9,6 @@ static NSString *const FMXAggregatePreference = @"FMX.aggregateSearch";
 static NSString *const FMXNativeSearchPlatform = @"searchPlatform";
 static NSString *const FMXPreviousPlatform = @"FMX.singleSearchPlatform";
 static NSString *const FMXPlatformManaged = @"FMX.managesSearchPlatform";
-static NSString *const FMXV2Configured = @"FMX.settingsAndQishuiConfigured";
 static BOOL FMXUpdatingPreferences;
 static IMP FMXOriginalSetInteger;
 static IMP FMXOriginalSetObject;
@@ -99,6 +99,9 @@ void FMSearchPreferencesInstall(void) {
         dispatch_async(dispatch_get_main_queue(), ^{ FMSearchPreferencesInstall(); });
         return;
     }
+    // Migrate before installing any legacy setter hooks. Explicit opt-out and
+    // saved source choices must survive upgrades and interrupted launches.
+    if (!FMSettingsPrepareStandard(NULL)) return;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
@@ -106,12 +109,8 @@ void FMSearchPreferencesInstall(void) {
         // and launch the source-specific decoder. Other keys/suites pass through.
         FMXInstallPreferenceSetter(object_getClass(defaults), @selector(setInteger:forKey:), (IMP)FMXSetInteger, &FMXOriginalSetInteger);
         FMXInstallPreferenceSetter(object_getClass(defaults), @selector(setObject:forKey:), (IMP)FMXSetObject, &FMXOriginalSetObject);
-        // The requested v2 behavior is aggregate search from Home by default.
-        // This migration runs once; later explicit opt-out survives restarts.
-        if (![defaults boolForKey:FMXV2Configured]) {
-            [defaults setBool:YES forKey:FMXAggregatePreference];
-            [defaults setBool:YES forKey:FMXV2Configured];
-        }
+        // Defaults and the legacy one-time marker are owned by the versioned
+        // migration. Never re-enable aggregate mode just because a flag is absent.
         FMSearchPreferencesRefresh();
         [NSNotificationCenter.defaultCenter addObserverForName:NSUserDefaultsDidChangeNotification
             object:defaults queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {

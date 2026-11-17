@@ -1,6 +1,7 @@
 #import "FMExtensionProtocol.h"
 #import "FMLXMC.h"
 #import "FMTrackMetadata.h"
+#import "FMQishuiSearch.h"
 #import <objc/runtime.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
@@ -10,6 +11,129 @@
 static NSUInteger failures;
 static void Check(BOOL condition, NSString *name) {
     if (!condition) { failures++; fprintf(stderr, "FAIL: %s\n", name.UTF8String); }
+}
+
+static NSDictionary *SearchTrack(NSString *source, NSString *identifier, NSString *title, NSString *singer) {
+    return @{@"server":source, @"id":identifier, @"title":title, @"singer":singer};
+}
+static NSDictionary *SearchResponse(NSArray *tracks, NSInteger total) {
+    return @{@"code":@200, @"data":tracks, @"total":@(total)};
+}
+static NSArray *SearchPairs(NSDictionary *response) {
+    NSMutableArray *pairs = NSMutableArray.array;
+    for (NSDictionary *track in response[@"data"]) [pairs addObject:@[track[@"server"], track[@"id"]]];
+    return pairs;
+}
+
+static void RunSearchRankingTests(void) {
+    NSDictionary *wrongArtist = SearchTrack(@"kg", @"other", @"知足", @"另一位歌手");
+    NSDictionary *duet = SearchTrack(@"qq", @"duet", @"知足", @"于文文 / 胡彦斌");
+    NSDictionary *live = SearchTrack(@"wy", @"live", @"知足（Live版）", @"于文文 / 胡彦斌");
+    NSDictionary *unrelated = SearchTrack(@"wy", @"unrelated", @"远方", @"其他歌手");
+    NSArray *sources = @[SearchResponse(@[wrongArtist, unrelated], 20), SearchResponse(@[live, duet], 30)];
+    NSDictionary *result = FMXMergeSearchResponsesForKeyword(sources, 0, @"知足 于文文 胡彦斌");
+    Check([result[@"data"][0] isEqual:duet] && [result[@"data"][1] isEqual:live],
+          @"rank exact title with both named singers before the same-title other singer, retaining the live version");
+    Check([FMXMergeSearchResponsesForKeyword(sources, 0, @"于文文 胡彦斌 知足")[@"data"][0] isEqual:duet],
+          @"rank artist-before-title query as the same exact combination");
+    NSDictionary *tokens = FMXMergeSearchResponsesForKeyword(sources, 0, @"胡彦斌 知足 于文文");
+    Check([tokens[@"data"][0] isEqual:live] && [tokens[@"data"][1] isEqual:duet],
+          @"all title and singer tokens match regardless of order, with stable ties");
+
+    NSDictionary *artistOnly = @{@"server":@"qq", @"id":@"artist", @"title":@"另一首", @"singer":NSNull.null, @"artist":@"胡彦斌"};
+    NSDictionary *nameMention = SearchTrack(@"kg", @"mention", @"致胡彦斌", @"其他歌手");
+    Check([FMXMergeSearchResponsesForKeyword(@[SearchResponse(@[nameMention, artistOnly], 2)], 0, @"胡彦斌")[@"data"][0] isEqual:artistOnly],
+          @"exact artist fallback field outranks a title merely mentioning the artist and tolerates null singer");
+
+    NSDictionary *cafe = SearchTrack(@"qq", @"cafe", @"Café!", @"A Singer");
+    NSDictionary *cafeRemix = SearchTrack(@"wy", @"cafe-remix", @"Cafe (Remix)", @"A Singer");
+    NSDictionary *normalized = FMXMergeSearchResponsesForKeyword(@[SearchResponse(@[cafeRemix, cafe], 2)], 0, @" ＣＡＦＥ ");
+    Check([normalized[@"data"][0] isEqual:cafe], @"ranking folds case, fullwidth letters, diacritics and punctuation without rewriting the original title");
+    Check([normalized[@"data"][0][@"title"] isEqual:@"Café!"], @"normalized rank never changes the displayed title");
+
+    NSDictionary *studio = SearchTrack(@"kg", @"studio", @"知足", @"另一位歌手");
+    NSDictionary *cover = SearchTrack(@"qq", @"cover", @"知足（翻唱版）", @"翻唱歌手");
+    NSDictionary *subtitle = SearchTrack(@"qq", @"subtitle", @"知足（电影主题曲）", @"另一位歌手");
+    NSArray *versions = @[SearchResponse(@[subtitle, live, cover, studio], 4)];
+    NSDictionary *titleResult = FMXMergeSearchResponsesForKeyword(versions, 0, @"知足");
+    Check([SearchPairs(titleResult) isEqual:@[@[@"kg",@"studio"],@[@"wy",@"live"],@[@"qq",@"cover"],@[@"qq",@"subtitle"]]],
+          @"exact song title precedes recognized version suffixes; arbitrary subtitles are not stripped");
+    Check([titleResult[@"data"] containsObject:live] && [titleResult[@"data"] containsObject:cover],
+          @"live and cover recordings remain selectable with their own identifiers and metadata");
+    Check([FMXMergeSearchResponsesForKeyword(versions, 0, @"知足 Live版")[@"data"][0] isEqual:live],
+          @"explicit live-version query promotes that version over the studio recording");
+
+    NSDictionary *sameQQ = SearchTrack(@"qq", @"shared", @"知足", @"甲");
+    NSDictionary *sameWY = SearchTrack(@"wy", @"shared", @"知足", @"甲");
+    NSDictionary *secondQQ = SearchTrack(@"qq", @"different-id", @"知足", @"甲");
+    NSDictionary *repeatQQ = SearchTrack(@"qq", @"shared", @"知足（Live）", @"changed duplicate");
+    NSArray *identitySources = @[SearchResponse(@[sameQQ, secondQQ, repeatQQ], 30), SearchResponse(@[sameWY], 40)];
+    NSDictionary *identityResult = FMXMergeSearchResponsesForKeyword(identitySources, 2, @"知足");
+    NSArray *expectedPairs = @[@[@"qq",@"shared"],@[@"wy",@"shared"],@[@"qq",@"different-id"]];
+    Check([SearchPairs(identityResult) isEqual:expectedPairs], @"deduplicate only repeated source and ID, never merge cross-platform or distinct-ID same-name songs");
+    Check(identityResult[@"data"][0] == sameQQ, @"dedup retains first original native track dictionary");
+    Check([identityResult[@"page"] isEqual:@2] && [identityResult[@"count"] isEqual:@3] && [identityResult[@"total"] isEqual:@70],
+          @"ranking retains current page, source total and unique result count");
+    for (NSUInteger i=0; i<3; i++) {
+        Check([SearchPairs(FMXMergeSearchResponsesForKeyword(identitySources, 2, @"知足")) isEqual:expectedPairs],
+              @"equal relevance deterministically preserves source round-robin then within-source order");
+    }
+    for (id keyword in @[NSNull.null, @"", @"  —— ! /  "]) {
+        NSDictionary *withoutQuery = FMXMergeSearchResponsesForKeyword(sources, 3, keyword == NSNull.null ? nil : keyword);
+        Check([withoutQuery isEqual:FMXMergeSearchResponses(sources, 3)], @"blank or punctuation-only query preserves legacy merge behavior");
+    }
+    NSArray *before = [NSJSONSerialization JSONObjectWithData:[NSJSONSerialization dataWithJSONObject:sources options:0 error:NULL] options:0 error:NULL];
+    NSDictionary *nextPage = FMXMergeSearchResponsesForKeyword(@[SearchResponse(@[unrelated], 50)], 1, @"远方");
+    Check([nextPage[@"data"] isEqual:@[unrelated]] && [nextPage[@"page"] isEqual:@1], @"next-page ranking never leaks candidates from an earlier page or query");
+    Check([sources isEqual:before], @"ranking leaves source response arrays and track metadata untouched");
+
+    NSArray *partlyFailed = @[NSNull.null, @{@"code":@503, @"data":@[duet]},
+        SearchResponse(@[NSNull.null, @{@"id":@"bad", @"server":@"qq", @"title":@99}, wrongArtist, duet], 4),
+        @{@"code":@200, @"data":@"malformed"}];
+    NSDictionary *survivors = FMXMergeSearchResponsesForKeyword(partlyFailed, 0, @"知足 于文文 胡彦斌");
+    Check([survivors[@"data"] isEqual:@[duet, wrongArtist]], @"failed and malformed sources cannot suppress or inject into valid ranked results");
+    Check([FMXMergeSearchResponsesForKeyword(@[NSNull.null, @{@"code":@500}], 0, @"知足")[@"data"] count] == 0,
+          @"merge never invents tracks when every source is unavailable");
+    NSDictionary *near = SearchTrack(@"qq", @"near", @"Faded", @"Unknown");
+    NSDictionary *far = SearchTrack(@"wy", @"far", @"Elsewhere", @"Other");
+    Check([FMXMergeSearchResponsesForKeyword(@[SearchResponse(@[far, near], 2)], 0, @"Fadex")[@"data"][0] isEqual:near],
+          @"bounded edit-distance fallback improves misspelled queries below exact relevance tiers");
+    NSString *longText = [@"x" stringByPaddingToLength:2048 withString:@"x" startingAtIndex:0];
+    NSDictionary *longTrack = SearchTrack(@"qq", @"long", longText, longText);
+    Check([FMXMergeSearchResponsesForKeyword(@[SearchResponse(@[longTrack, near], 2)], 0, longText)[@"data"] count] == 2,
+          @"large query and metadata remain safe and do not discard valid candidates");
+}
+
+// Only authored data is used by the aggregate integration fixture. The Qishui
+// subclass never reads native configuration and never creates a network task.
+@interface FMXSearchFixtureQishui : FMQishuiSearchClient
+@property(nonatomic, copy) NSString *lastKeyword;
+@property(nonatomic) NSInteger lastPage;
+@property(nonatomic) NSUInteger calls;
+@property(nonatomic) BOOL forceFailure;
+@end
+@implementation FMXSearchFixtureQishui
+- (FMXQishuiCancellation)search:(NSString *)keyword page:(NSInteger)page timeout:(NSTimeInterval)timeout completion:(FMXQishuiCompletion)completion {
+    self.calls++;
+    self.lastKeyword = keyword;
+    self.lastPage = page;
+    if (self.forceFailure) completion(nil, [NSError errorWithDomain:@"SearchFixture" code:503 userInfo:nil]);
+    else completion(SearchResponse(@[SearchTrack(@"qs", [NSString stringWithFormat:@"p%ld-live",(long)page], @"知足（Live）", @"于文文 / 胡彦斌")], 10), nil);
+    return ^(NSError *reason) {};
+}
+@end
+
+static NSDictionary *SearchLoopbackResponse(NSString *path, NSInteger *status) {
+    NSURLComponents *components = [NSURLComponents componentsWithString:[@"http://127.0.0.1" stringByAppendingString:path]];
+    NSMutableDictionary *query = NSMutableDictionary.dictionary;
+    for (NSURLQueryItem *item in components.queryItems) if (item.value) query[item.name] = item.value;
+    NSInteger platform = [query[@"platform"] integerValue], page = [query[@"page"] integerValue];
+    if (platform == 0 || [query[@"fixture_failure"] isEqual:@"1"]) {
+        *status = 503;
+        return @{@"code":@503, @"msg":@"authored source unavailable"};
+    }
+    NSString *identifier = [NSString stringWithFormat:@"p%ld-%@", (long)page, platform == 2 ? @"other" : @"duet"];
+    return SearchResponse(@[SearchTrack(platform == 2 ? @"qq" : @"kg", identifier, @"知足", platform == 2 ? @"另一位歌手" : @"于文文 / 胡彦斌")], 10);
 }
 
 @interface FMXTestClient : NSObject <NSURLProtocolClient>
@@ -149,8 +273,9 @@ static int StartLoopbackServer(void) {
                     NSString *body = [[NSString alloc] initWithData:bodyData encoding:NSUTF8StringEncoding] ?: @"";
                     NSString *path = first.count > 1 ? first[1] : @"";
                     NSDictionary *echo = @{@"method":first.firstObject ?: @"", @"path":path, @"body":body, @"headers":headers};
-                    NSData *output = [NSJSONSerialization dataWithJSONObject:echo options:NSJSONWritingSortedKeys error:NULL];
                     NSInteger status = [path containsString:@"echo_status=207"] ? 207 : 200;
+                    if ([headers[@"x-fmx-search-fixture"] isEqual:@"ranking"]) echo = SearchLoopbackResponse(path, &status);
+                    NSData *output = [NSJSONSerialization dataWithJSONObject:echo options:NSJSONWritingSortedKeys error:NULL];
                     NSString *responseHead = [NSString stringWithFormat:@"HTTP/1.1 %ld Test\r\nContent-Type: application/json\r\nX-FMX-Origin: preserved\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",(long)status,(unsigned long)output.length];
                     NSMutableData *response = [[responseHead dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
                     [response appendData:output];
@@ -207,6 +332,47 @@ static NSDictionary *FetchWithConfiguration(NSURLRequest *request, NSURLSessionC
 
 static NSDictionary *Fetch(NSURLRequest *request) {
     return FetchWithConfiguration(request, NSURLSessionConfiguration.defaultSessionConfiguration);
+}
+
+static NSMutableURLRequest *SearchFixtureRequest(NSString *keyword, NSInteger page, BOOL fail) {
+    NSURLComponents *url = [NSURLComponents componentsWithString:@"https://aacert.com/ms/api.php"];
+    url.queryItems = @[[NSURLQueryItem queryItemWithName:@"action" value:@"search"],
+        [NSURLQueryItem queryItemWithName:@"keyword" value:keyword],
+        [NSURLQueryItem queryItemWithName:@"platform" value:@"2"],
+        [NSURLQueryItem queryItemWithName:@"page" value:@(page).stringValue],
+        [NSURLQueryItem queryItemWithName:@"fixture_failure" value:fail ? @"1" : @"0"]];
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url.URL];
+    request.timeoutInterval = 3;
+    [request setValue:@"local-contract" forHTTPHeaderField:@"X-FMX-Test"];
+    [request setValue:@"ranking" forHTTPHeaderField:@"X-FMX-Search-Fixture"];
+    return request;
+}
+
+static void RunSearchRankingIntegrationTests(void) {
+    id previousAggregate = [NSUserDefaults.standardUserDefaults objectForKey:@"FMX.aggregateSearch"];
+    [NSUserDefaults.standardUserDefaults setBool:YES forKey:@"FMX.aggregateSearch"];
+    FMXSearchFixtureQishui *qishui = [[FMXSearchFixtureQishui alloc] initWithConfiguration:nil deviceID:@"authored-local-fixture"];
+    [FMExtensionProtocol setQishuiSearchClient:qishui];
+    unsigned before = atomic_load(&originRequests);
+    NSDictionary *first = Fetch(SearchFixtureRequest(@"知足 于文文 胡彦斌", 4, NO));
+    NSDictionary *firstJSON = [first[@"json"] isKindOfClass:NSDictionary.class] ? first[@"json"] : @{};
+    Check([SearchPairs(firstJSON) isEqual:@[@[@"kg",@"p4-duet"],@[@"qs",@"p4-live"],@[@"qq",@"p4-other"]]],
+          @"actual aggregate NSURLSession applies the request keyword after one source fails and retains Qishui versions");
+    Check([firstJSON[@"page"] isEqual:@4] && [firstJSON[@"count"] isEqual:@3] && [qishui.lastKeyword isEqual:@"知足 于文文 胡彦斌"] && qishui.lastPage == 4,
+          @"aggregate forwards the same keyword and native page to each source and preserves page metadata");
+    Check(atomic_load(&originRequests) == before+3 && qishui.calls == 1, @"aggregate keeps three independent native requests and one isolated Qishui request");
+    NSDictionary *second = Fetch(SearchFixtureRequest(@"另一位歌手", 1, NO));
+    NSDictionary *secondJSON = [second[@"json"] isKindOfClass:NSDictionary.class] ? second[@"json"] : @{};
+    Check([SearchPairs(secondJSON) firstObject] && [[SearchPairs(secondJSON) firstObject] isEqual:@[@"qq",@"p1-other"]] && [secondJSON[@"page"] isEqual:@1],
+          @"next aggregate request uses its own singer query and page instead of stale ranking context");
+    qishui.forceFailure = YES;
+    NSDictionary *failed = Fetch(SearchFixtureRequest(@"知足", 0, YES));
+    NSDictionary *failedJSON = [failed[@"json"] isKindOfClass:NSDictionary.class] ? failed[@"json"] : nil;
+    Check([failed[@"error"] isKindOfClass:NSError.class] || (failedJSON && [failedJSON[@"code"] integerValue] != 200),
+          @"all-source failure remains an explicit failure rather than an empty successful ranking");
+    [FMExtensionProtocol setQishuiSearchClient:nil];
+    if (previousAggregate) [NSUserDefaults.standardUserDefaults setObject:previousAggregate forKey:@"FMX.aggregateSearch"];
+    else [NSUserDefaults.standardUserDefaults removeObjectForKey:@"FMX.aggregateSearch"];
 }
 
 // Native import integration, through actual NSURLSession body streams. The token
@@ -552,6 +718,7 @@ int main(int argc, const char *argv[]) {
             Check([pairs isEqual:test[@"expected_pairs"]], test[@"name"]);
             Check([result[@"count"] unsignedIntegerValue] == pairs.count, [test[@"name"] stringByAppendingString:@" count"]);
         }
+        RunSearchRankingTests();
         int listener = StartLoopbackServer();
         Check(listener >= 0, @"local TCP test server starts");
         Method defaultFactory = class_getClassMethod(NSURLSessionConfiguration.class, @selector(defaultSessionConfiguration));
@@ -619,6 +786,7 @@ int main(int argc, const char *argv[]) {
         RunKugouTests(fixtures, listener >= 0);
         if (listener >= 0) RunParseBudgetTests();
         if (listener >= 0) RunLXMCImportTests();
+        if (listener >= 0) RunSearchRankingIntegrationTests();
 
         if (listener >= 0) {
             [NSUserDefaults.standardUserDefaults setBool:NO forKey:@"FMX.aggregateSearch"];

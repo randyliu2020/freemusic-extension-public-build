@@ -101,7 +101,116 @@ static BOOL FMXIsValidTrack(id value) {
         && [track[@"title"] isKindOfClass:NSString.class];
 }
 
+// Ranking uses a separate normalized view. Never rewrite a native track or use
+// its normalized title as identity: a live recording and another platform's ID
+// must remain independently selectable and resolvable.
+static NSString *FMXSearchFold(id value) {
+    if (![value isKindOfClass:NSString.class]) return @"";
+    NSString *text = value;
+    if (text.length > 512) text = [text substringToIndex:512];
+    return [text stringByFoldingWithOptions:NSCaseInsensitiveSearch | NSDiacriticInsensitiveSearch | NSWidthInsensitiveSearch
+                                   locale:[NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"]];
+}
+
+static NSArray<NSString *> *FMXSearchWords(id value) {
+    NSString *text = FMXSearchFold(value);
+    NSArray *parts = [text componentsSeparatedByCharactersInSet:NSCharacterSet.alphanumericCharacterSet.invertedSet];
+    NSMutableArray *words = NSMutableArray.array;
+    for (NSString *part in parts) if (part.length && ![words containsObject:part]) [words addObject:part];
+    return words;
+}
+
+static NSString *FMXSearchText(id value) {
+    NSString *text = FMXSearchFold(value);
+    return [[text componentsSeparatedByCharactersInSet:NSCharacterSet.alphanumericCharacterSet.invertedSet] componentsJoinedByString:@""];
+}
+
+static NSString *FMXSearchBaseTitle(NSString *title) {
+    static NSRegularExpression *suffix, *version;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        suffix = [NSRegularExpression regularExpressionWithPattern:@"\\s*[\\(\\[【]([^\\)\\]】]*)[\\)\\]】]\\s*$" options:0 error:NULL];
+        version = [NSRegularExpression regularExpressionWithPattern:@"(^|[^a-z])(live|cover|remix|instrumental|acoustic|demo)($|[^a-z])|现场|翻唱|混音|伴奏|不插电|演唱会|清唱|录音室|纯音乐"
+                                                           options:NSRegularExpressionCaseInsensitive error:NULL];
+    });
+    NSString *base = FMXSearchFold(title);
+    for (NSUInteger i = 0; i < 3; i++) {
+        NSTextCheckingResult *match = [suffix firstMatchInString:base options:0 range:NSMakeRange(0, base.length)];
+        if (!match || ![version firstMatchInString:base options:0 range:[match rangeAtIndex:1]]) break;
+        base = [base substringToIndex:match.range.location];
+    }
+    return FMXSearchText(base);
+}
+
+static NSArray<NSString *> *FMXSearchArtists(NSDictionary *track) {
+    NSMutableArray *artists = NSMutableArray.array;
+    NSCharacterSet *separators = [NSCharacterSet characterSetWithCharactersInString:@"/／、&,，;；|"];
+    for (NSString *key in @[@"singer", @"artist"]) {
+        NSString *raw = FMXSearchFold(track[key]);
+        NSArray *parts = [[raw componentsSeparatedByCharactersInSet:separators] arrayByAddingObject:raw];
+        for (NSString *part in parts) {
+            NSString *artist = FMXSearchText(part);
+            if (artist.length && ![artists containsObject:artist]) [artists addObject:artist];
+        }
+    }
+    return artists;
+}
+
+// Bounded Levenshtein similarity is a last-resort tie score, below every exact,
+// token, prefix and substring match. Large metadata never creates unbounded work.
+static NSUInteger FMXSearchSimilarity(NSString *query, NSString *candidate) {
+    NSUInteger n = query.length, m = candidate.length;
+    if (!n || !m || n > 128 || m > 128) return 0;
+    NSUInteger previous[129], current[129];
+    for (NSUInteger j = 0; j <= m; j++) previous[j] = j;
+    for (NSUInteger i = 1; i <= n; i++) {
+        current[0] = i;
+        for (NSUInteger j = 1; j <= m; j++) {
+            NSUInteger substitution = previous[j - 1] + ([query characterAtIndex:i - 1] != [candidate characterAtIndex:j - 1]);
+            current[j] = MIN(MIN(previous[j] + 1, current[j - 1] + 1), substitution);
+        }
+        for (NSUInteger j = 0; j <= m; j++) previous[j] = current[j];
+    }
+    return 1000 - MIN(1000, previous[m] * 1000 / MAX(n, m));
+}
+
+static NSUInteger FMXSearchScore(NSDictionary *track, NSString *query, NSArray<NSString *> *words) {
+    NSString *title = FMXSearchText(track[@"title"]);
+    NSString *base = FMXSearchBaseTitle(track[@"title"]);
+    NSArray<NSString *> *artists = FMXSearchArtists(track);
+    if ([query isEqual:title]) return 100000;
+    NSUInteger score = [query isEqual:base] && base.length ? 90000 : 0;
+    for (NSString *artist in artists) {
+        if (title.length && ([query isEqual:[title stringByAppendingString:artist]] ||
+                            [query isEqual:[artist stringByAppendingString:title]])) return 100000;
+        if (base.length && ([query isEqual:[base stringByAppendingString:artist]] ||
+                           [query isEqual:[artist stringByAppendingString:base]])) score = MAX(score, 95000);
+        if ([query isEqual:artist]) score = MAX(score, 80000);
+    }
+    BOOL allWords = words.count > 1;
+    for (NSString *word in words) {
+        BOOL found = [title containsString:word];
+        for (NSString *artist in artists) if ([artist containsString:word]) { found = YES; break; }
+        if (!found) { allWords = NO; break; }
+    }
+    if (allWords) score = MAX(score, 70000);
+    if ([title hasPrefix:query]) score = MAX(score, 60000);
+    else if ([title containsString:query]) score = MAX(score, 50000);
+    for (NSString *artist in artists) {
+        if ([artist hasPrefix:query]) score = MAX(score, 60000);
+        else if ([artist containsString:query]) score = MAX(score, 50000);
+    }
+    if (score) return score;
+    NSUInteger similarity = FMXSearchSimilarity(query, title);
+    for (NSString *artist in artists) similarity = MAX(similarity, FMXSearchSimilarity(query, artist));
+    return similarity;
+}
+
 NSDictionary *FMXMergeSearchResponses(NSArray *responses, NSInteger page) {
+    return FMXMergeSearchResponsesForKeyword(responses, page, nil);
+}
+
+NSDictionary *FMXMergeSearchResponsesForKeyword(NSArray *responses, NSInteger page, NSString *keyword) {
     NSMutableArray<NSArray *> *lists = [NSMutableArray array];
     NSUInteger longest = 0;
     NSInteger total = 0;
@@ -125,6 +234,20 @@ NSDictionary *FMXMergeSearchResponses(NSArray *responses, NSInteger page) {
             [seen addObject:key];
             [tracks addObject:track];
         }
+    }
+    NSString *query = FMXSearchText(keyword);
+    if (query.length && tracks.count > 1) {
+        NSArray *words = FMXSearchWords(keyword);
+        NSMutableArray<NSDictionary *> *ranked = NSMutableArray.array;
+        [tracks enumerateObjectsUsingBlock:^(NSDictionary *track, NSUInteger index, BOOL *stop) {
+            [ranked addObject:@{@"track":track, @"score":@(FMXSearchScore(track, query, words)), @"ordinal":@(index)}];
+        }];
+        [ranked sortUsingComparator:^NSComparisonResult(NSDictionary *left, NSDictionary *right) {
+            NSComparisonResult score = [right[@"score"] compare:left[@"score"]];
+            return score == NSOrderedSame ? [left[@"ordinal"] compare:right[@"ordinal"]] : score;
+        }];
+        [tracks removeAllObjects];
+        for (NSDictionary *entry in ranked) [tracks addObject:entry[@"track"]];
     }
     return @{@"code":@200, @"msg":@"成功", @"data":tracks,
              @"page":@(MAX(0, page)), @"count":@(tracks.count), @"total":@(MAX(total, (NSInteger)tracks.count))};
@@ -167,6 +290,7 @@ static NSArray *FMXProtocolClasses(id self, SEL selector) {
 @property(nonatomic, strong) NSMutableArray<NSError *> *errors;
 @property(nonatomic) NSUInteger pending;
 @property(nonatomic) NSInteger requestedPage;
+@property(nonatomic, copy) NSString *requestedKeyword;
 @property(nonatomic) BOOL finished;
 @property(nonatomic, copy) FMXParseCancellation cancelParse;
 @property(nonatomic, copy) FMXQishuiCancellation cancelQishui;
@@ -393,6 +517,7 @@ static NSArray *FMXProtocolClasses(id self, SEL selector) {
 
 - (void)beginSearch:(NSDictionary *)parameters {
     self.requestedPage = MAX(0, [parameters[@"page"] integerValue]);
+    self.requestedKeyword = parameters[@"keyword"] ?: @"";
     self.responses = [NSMutableArray arrayWithArray:@[NSNull.null, NSNull.null, NSNull.null, NSNull.null]];
     self.errors = [NSMutableArray array];
     self.childTasks = [NSMutableArray array];
@@ -458,7 +583,7 @@ static NSArray *FMXProtocolClasses(id self, SEL selector) {
             [response[@"data"] isKindOfClass:NSArray.class]) anySuccess = YES;
         else if (!firstFailure && [response[@"code"] isKindOfClass:NSNumber.class] && [response[@"code"] integerValue] != 200) firstFailure = response;
     }
-    if (anySuccess) [self finishPayload:FMXMergeSearchResponses(self.responses, self.requestedPage) error:nil];
+    if (anySuccess) [self finishPayload:FMXMergeSearchResponsesForKeyword(self.responses, self.requestedPage, self.requestedKeyword) error:nil];
     else if (firstFailure) [self finishPayload:firstFailure error:nil];
     else [self finishPayload:nil error:self.errors.firstObject ?: FMXError(NSURLErrorTimedOut, @"聚合搜索暂不可用")];
 }

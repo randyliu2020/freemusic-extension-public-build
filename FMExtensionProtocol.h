@@ -39,5 +39,9 @@ FOUNDATION_EXPORT NSDictionary<NSString *, NSString *> * _Nullable FMXRequestPar
 /// Successful responses in platform order (0, 2, 3, qs), with NSNull for failed sources.
 /// Merges in stable round-robin order and de-duplicates exact (server,id) pairs.
 FOUNDATION_EXPORT NSDictionary *FMXMergeSearchResponses(NSArray *responses, NSInteger page);
+/// Reorders only this page by title/artist relevance. Equal ranks retain the
+/// original platform round-robin order; track dictionaries and versions remain intact.
+FOUNDATION_EXPORT NSDictionary *FMXMergeSearchResponsesForKeyword(NSArray *responses, NSInteger page,
+                                                                 NSString * _Nullable keyword);
 
 NS_ASSUME_NONNULL_END

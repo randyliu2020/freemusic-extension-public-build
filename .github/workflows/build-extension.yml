@@ -124,8 +124,18 @@ jobs:
         run: |
           set -euo pipefail
           xcrun clang -fobjc-arc -fblocks -framework Foundation \
-            FMSearchPreferences.m FMSearchPreferencesTests.m -o search-preference-tests
+            FMSettingsMigration.m FMSearchPreferences.m FMSearchPreferencesTests.m -o search-preference-tests
           ./search-preference-tests
+
+      - name: Test settings upgrade preservation and interrupted-write recovery
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p v8-validation
+          xcrun clang -fobjc-arc -fblocks -Wall -Wextra -framework Foundation \
+            FMSettingsMigration.m FMSettingsMigrationTests.m -o settings-migration-tests
+          ./settings-migration-tests v8-validation/settings-migration-tests.json
 
       - name: Test monthly and annual listening statistics
         if: ${{ !cancelled() }}
@@ -167,6 +177,11 @@ jobs:
         if: always()
         shell: bash
         run: python3 record_v7_validation.py v7-validation smoke-artifact
+
+      - name: Record v8 validation provenance
+        if: always()
+        shell: bash
+        run: python3 record_v8_validation.py v8-validation smoke-artifact
 
       - name: Upload simulator validation evidence
         if: always()
