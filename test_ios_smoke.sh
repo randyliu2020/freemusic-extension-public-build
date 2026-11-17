@@ -295,6 +295,21 @@ if [[ "$needs_forced" == yes ]]; then
   stage="forced_coordinator_fixture"
   run_phase forced --force-artwork-capability
 fi
+stage="validate_native_before_ui"
+# Report the concrete assertion before expensive UI-test compilation, and
+# stop early on native failures. Successful runs still require all UI tests.
+python3 - "$output_dir" <<'PY'
+import json,pathlib,sys
+out=pathlib.Path(sys.argv[1]); natural=json.loads((out/'smoke-natural.json').read_text())
+phases=[natural]
+if natural.get('requires-forced-coordinator-pass'):
+    phases.append(json.loads((out/'smoke-forced.json').read_text()))
+for phase in phases:
+    rows=phase.get('tests',[])
+    print(json.dumps({'phase':phase.get('phase'),'total':len(rows),'passed':sum(bool(r.get('passed')) for r in rows),'failed':[r for r in rows if not r.get('passed')],'adaptive':[r for r in rows if r.get('name','').startswith('v6_')]},ensure_ascii=False),flush=True)
+if not all(p.get('complete') and p.get('passed') for p in phases):
+    raise SystemExit('Native smoke assertion failed; UI tests not started; inspect smoke-natural.json')
+PY
 stage="real_ui_interaction_tests"
 interaction_status=0
 bash "$source_dir/test_interaction_ui.sh" "$device_id" "$output_dir/interaction-ui" || interaction_status=$?

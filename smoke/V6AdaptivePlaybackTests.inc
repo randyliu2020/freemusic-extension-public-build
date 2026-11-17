@@ -25,6 +25,15 @@
         NSError *error=nil;Check([audio setCategory:AVAudioSessionCategoryPlayback error:&error],error.localizedDescription);
         Check([audio setActive:YES error:&error],error.localizedDescription);configure(setup,failure);
     });
+    NSString *(^failureDetails)(NSString *,id,NSArray *)=^NSString *(NSString *message,id fixture,NSArray *attempts){
+        __block NSDictionary *state,*production;
+        Main(^{
+            NSDictionary *all=fixture ? CFBridgingRelease(copyState((__bridge void *)fixture)) : @{};
+            state=[all dictionaryWithValuesForKeys:@[@"setups",@"actual_failures",@"native_failures",@"status",@"rate",@"time",@"error_domain",@"error_code",@"setup_callback_available",@"failure_callback_available",@"url_bridge_callback_available"]];
+            production=diagnostics();
+        });
+        return [NSString stringWithFormat:@"%@; fixture=%@; production=%@; attempts=%@",message,state,production,attempts ?: @[]];
+    };
     @try {
         // Normal retry, initially paused failure, and user pause while the lower
         // URL is still resolving each use a fresh genuine corrupt media load.
@@ -39,6 +48,8 @@
             @try {
                 Main(^{
                     fixture=CFBridgingRelease(create());NSDictionary *state=CFBridgingRelease(copyState((__bridge void *)fixture));
+                    Check([state[@"setup_callback_available"] boolValue] && [state[@"failure_callback_available"] boolValue] && [state[@"url_bridge_callback_available"] boolValue],
+                          @"Darwin RTLD_DEFAULT resolves all real setup, failure and URL bridge callbacks before playback");
                     bad=[NSURL URLWithString:state[@"bad"]];good=[NSURL URLWithString:state[@"good"]];
                     session=[[resolverClass alloc] initWithPlatform:@"wy" supportedQualities:@[@"128k",@"flac"] timeout:20 isCurrent:^BOOL{return current;} resolve:^dispatch_block_t(NSString *quality,NSTimeInterval budget,FMQualityAttemptCompletion completion){
                         [attempts addObject:quality];
@@ -52,7 +63,8 @@
                         else start((__bridge void *)fixture,(__bridge void *)url);
                     }];
                 });
-                Check(Until(^BOOL{return lower!=nil;},12),@"Real AVPlayerItem failure invokes the next quality, without a synthetic notification");
+                BOOL retried=Until(^BOOL{return lower!=nil;},12);
+                if(!retried)Check(NO,failureDetails(@"Real AVPlayerItem failure invokes the next quality, without a synthetic notification",fixture,attempts));
                 Main(^{
                     NSDictionary *state=CFBridgingRelease(copyState((__bridge void *)fixture));
                     Check([state[@"actual_failures"] unsignedIntegerValue]>0 && [state[@"native_failures"] unsignedIntegerValue]==0,
@@ -65,7 +77,7 @@
                 Check(Until(^BOOL{
                     NSDictionary *state=CFBridgingRelease(copyState((__bridge void *)fixture));
                     return [state[@"setups"] integerValue]==2 && [state[@"status"] integerValue]==AVPlayerItemStatusReadyToPlay;
-                },12),@"Returned lower URL is really decoded by a newly rebound host player");
+                },12),failureDetails(@"Returned lower URL is really decoded by a newly rebound host player",fixture,attempts));
                 Main(^{
                     NSDictionary *state=CFBridgingRelease(copyState((__bridge void *)fixture));
                     Check([state[@"url"] isEqual:good.absoluteString],@"Swift URL bridge preserves exact escaped URL and genuine receiver");
@@ -75,7 +87,7 @@
                     realFailures+=[state[@"actual_failures"] unsignedIntegerValue];
                 });
                 Check(Until(^BOOL{return player.currentItem.status==AVPlayerItemStatusReadyToPlay && player.rate>0 && CMTimeGetSeconds(player.currentTime)>0.25;},6),
-                      @"Actual lower-quality media time advances");
+                      failureDetails(@"Actual lower-quality media time advances",fixture,attempts));
                 Main(^{
                     AVPlayerItem *same=player.currentItem;transition();
                     Check(player.currentItem==same && player.rate>0,@"Source transition cancels retry ownership without stopping healthy media");
@@ -91,13 +103,15 @@
             @try {
                 Main(^{
                     fixture=CFBridgingRelease(create());NSDictionary *state=CFBridgingRelease(copyState((__bridge void *)fixture));
+                    Check([state[@"setup_callback_available"] boolValue] && [state[@"failure_callback_available"] boolValue] && [state[@"url_bridge_callback_available"] boolValue],
+                          @"Darwin RTLD_DEFAULT resolves all real setup, failure and URL bridge callbacks before playback");
                     bad=[NSURL URLWithString:state[@"bad"]];good=[NSURL URLWithString:state[@"good"]];
                     session=[[resolverClass alloc] initWithPlatform:@"wy" supportedQualities:@[@"flac",@"128k"] timeout:20 isCurrent:^BOOL{return current;} resolve:^dispatch_block_t(NSString *quality,NSTimeInterval budget,FMQualityAttemptCompletion completion){
                         if([quality isEqual:@"flac"])completion(bad,nil);else lower=[completion copy];return ^{};
                     }];
                     [session nextWithCompletion:^(NSURL *url,NSString *quality,NSError *error){registerURL(url,session,quality,@"wy:cancel-fixture");start((__bridge void *)fixture,(__bridge void *)url);}];
                 });
-                Check(Until(^BOOL{return lower!=nil;},12),@"Actual bad-media failure occurs before cancellation race");
+                Check(Until(^BOOL{return lower!=nil;},12),failureDetails(@"Actual bad-media failure occurs before cancellation race",fixture,nil));
                 Main(^{
                     if(mode==0){current=NO;transition();}
                     else start((__bridge void *)fixture,(__bridge void *)good);
@@ -128,7 +142,7 @@
                     [session nextWithCompletion:^(NSURL *url,NSString *quality,NSError *error){registerURL(url,session,quality,@"wy:duplicate");start((__bridge void *)fixture,(__bridge void *)url);}];
                 });
                 Check(Until(^BOOL{NSDictionary *s=CFBridgingRelease(copyState((__bridge void *)fixture));return [s[@"native_failures"] integerValue]>0;},12),
-                      @"Exhausted or unrelated media retains native failure handling");
+                      failureDetails(@"Exhausted or unrelated media retains native failure handling",fixture,nil));
                 Main(^{NSDictionary *s=CFBridgingRelease(copyState((__bridge void *)fixture));
                     Check([s[@"setups"] integerValue]==1,@"No repeated identical URL or unrelated-media replacement");
                     if(mode==0)Check(attempts==2,@"Each supported quality consumed once; duplicate URL never replayed");

@@ -116,7 +116,7 @@ public final class AdaptivePlaybackFixture: NSObject {
         ended = NotificationCenter.default.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main) { [weak self] _ in self?.realFailure(item) }
         player!.play()
         if pauseBeforeAttach { player!.pause(); pauseBeforeAttach = false }
-        if let symbol = dlsym(nil, "FMAdaptiveNativeDidSetup") {
+        if let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "FMAdaptiveNativeDidSetup") {
             typealias Call = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Void
             unsafeBitCast(symbol, to: Call.self)(Unmanaged.passUnretained(self).toOpaque(), Unmanaged.passUnretained(player!).toOpaque())
         }
@@ -126,7 +126,7 @@ public final class AdaptivePlaybackFixture: NSObject {
         guard player?.currentItem === item else { return }
         failures += 1
         var handled = false
-        if let symbol = dlsym(nil, "FMAdaptiveNativeHandleFailure") {
+        if let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "FMAdaptiveNativeHandleFailure") {
             typealias Call = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Bool
             handled = unsafeBitCast(symbol, to: Call.self)(Unmanaged.passUnretained(self).toOpaque(), player.map { Unmanaged.passUnretained($0).toOpaque() })
         }
@@ -146,6 +146,11 @@ public final class AdaptivePlaybackFixture: NSObject {
     var state: NSDictionary {
         ["setups": setups, "actual_failures": failures, "native_failures": nativeFailures,
          "url": lastURL, "status": player?.currentItem?.status.rawValue ?? -1,
+         "setup_callback_available": dlsym(UnsafeMutableRawPointer(bitPattern: -2), "FMAdaptiveNativeDidSetup") != nil,
+         "failure_callback_available": dlsym(UnsafeMutableRawPointer(bitPattern: -2), "FMAdaptiveNativeHandleFailure") != nil,
+         "url_bridge_callback_available": dlsym(UnsafeMutableRawPointer(bitPattern: -2), "FMAdaptiveNativeSetupValue") != nil,
+         "error_domain": (player?.currentItem?.error as NSError?)?.domain ?? "",
+         "error_code": (player?.currentItem?.error as NSError?)?.code ?? 0,
          "rate": player?.rate ?? 0, "time": player.map { CMTimeGetSeconds($0.currentTime()) } ?? 0,
          "bad": badURL.absoluteString, "good": goodURL.absoluteString]
     }
