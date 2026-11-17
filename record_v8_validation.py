@@ -7,8 +7,9 @@ import sys
 
 SOURCES = ["FMSettingsMigration.h", "FMSettingsMigration.m", "FMSettingsMigrationTests.m",
            "FMSearchPreferences.h", "FMSearchPreferences.m", "FMSearchPreferencesTests.m",
+           "FMExtensionProtocol.h", "FMExtensionProtocol.m", "FMExtensionProtocolTests.m", "intercept-contract-fixtures.json",
            "record_v8_validation.py"]
-REPORTS = ["settings-migration-tests.json"]
+REPORTS = ["settings-migration-tests.json", "search-ranking-tests.json"]
 
 def main():
     source = Path(__file__).resolve().parent

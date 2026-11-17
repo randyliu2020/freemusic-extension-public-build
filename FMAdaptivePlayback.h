@@ -9,6 +9,8 @@ FOUNDATION_EXPORT void FMAdaptivePlaybackInstall(void);
 FOUNDATION_EXPORT void FMAdaptivePlaybackRegisterURL(NSURL *URL, FMQualityResolver *session, NSString *requestedQuality, NSString *trackKey);
 /// Cancels retry ownership; never stops or replaces a healthy current player.
 FOUNDATION_EXPORT void FMAdaptivePlaybackSourceTransition(void);
+/// Retire the prior selection immediately, before the newly selected URL resolves.
+FOUNDATION_EXPORT void FMAdaptivePlaybackSelectionWillChange(id manager);
 FOUNDATION_EXPORT NSDictionary *FMAdaptivePlaybackDiagnostics(void);
 /// Reports a real host setup, including native/non-JS items. Quality is requested, not measured.
 FOUNDATION_EXPORT void FMAdaptivePlaybackSetPlayerObserver(void (^ _Nullable observer)(id manager, AVPlayer *player, NSString * _Nullable requestedQuality));

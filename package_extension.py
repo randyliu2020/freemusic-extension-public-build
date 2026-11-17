@@ -288,7 +288,11 @@ def new_entry(name: str, *, executable: bool = False) -> zipfile.ZipInfo:
     return info
 
 
-def package_ipa(original: Path, dylib: Path, bootstrap: Path, output: Path, *, artwork_1600: bool = False, v3_changes: bool = False, player_left_swipe: bool = False, playback_cache: bool = False, adaptive_playback: bool = False, native_download_format: bool = False) -> dict:
+def package_ipa(original: Path, dylib: Path, bootstrap: Path, output: Path, *, artwork_1600: bool = False, v3_changes: bool = False, player_left_swipe: bool = False, playback_cache: bool = False, adaptive_playback: bool = False, native_download_format: bool = False, playback_sequence: bool = False, artwork_selection: bool = False) -> dict:
+    if playback_sequence and not (v3_changes and playback_cache and adaptive_playback):
+        raise PackageError("Playback selection requires native cache and adaptive playback bridges")
+    if artwork_selection and not playback_sequence:
+        raise PackageError("Artwork selection requires the cumulative playback sequence baseline")
     if player_left_swipe and not v3_changes:
         raise PackageError("Player swipe requires the cumulative --v3-changes baseline")
     if playback_cache and not v3_changes:
@@ -362,12 +366,24 @@ def package_ipa(original: Path, dylib: Path, bootstrap: Path, output: Path, *, a
                     import native_format_patch
                     format_plan = native_format_patch.patch_plan(original_executable)
                     executable = interaction_patch.apply_verified_plan(executable, format_plan)
+                sequence_plan = []
+                if playback_sequence:
+                    import playback_sequence_patch
+                    sequence_plan = playback_sequence_patch.patch_plan(original_executable)
+                    executable = interaction_patch.apply_verified_plan(executable, sequence_plan)
+                artwork_selection_plan = []
+                if artwork_selection:
+                    import artwork_selection_patch
+                    artwork_selection_plan = artwork_selection_patch.patch_plan(original_executable)
+                    executable = interaction_patch.apply_verified_plan(executable, artwork_selection_plan)
                 v3report = {"navigation": navigation_report,
                     "lyric_changes": [{"offset": hex(change.offset), "length": len(change.after), "reason": change.reason} for change in lyric_plan],
                     "player_swipe_changes": [{"offset": hex(change.offset), "length": len(change.after), "reason": change.reason} for change in swipe_plan],
                     "playback_cache_changes": [{"offset": hex(change.offset), "length": len(change.after), "reason": change.reason} for change in cache_plan],
                     "adaptive_playback_changes": [{"offset": hex(change.offset), "length": len(change.after), "reason": change.reason} for change in adaptive_plan],
                     "native_download_format_changes": [{"offset": hex(change.offset), "length": len(change.after), "reason": change.reason} for change in format_plan],
+                    "playback_sequence_changes": [{"offset": hex(change.offset), "length": len(change.after), "reason": change.reason} for change in sequence_plan],
+                    "artwork_selection_changes": [{"offset": hex(change.offset), "length": len(change.after), "reason": change.reason} for change in artwork_selection_plan],
                     "original_main_sha256": artwork_patch.digest(original_executable),
                     "combined_main_sha256": artwork_patch.digest(executable),
                     "device_execution_validated": False}
@@ -412,6 +428,8 @@ def package_ipa(original: Path, dylib: Path, bootstrap: Path, output: Path, *, a
         "playback_cache_enabled": playback_cache,
         "adaptive_playback_enabled": adaptive_playback,
         "native_download_format_enabled": native_download_format,
+        "playback_sequence_enabled": playback_sequence,
+        "artwork_selection_enabled": artwork_selection,
         "bundle_id_changed": False, "entitlements_added": False, "original_preserved": True,
         "signing_note": "Main app and added dylib have no LC_CODE_SIGNATURE. Existing nested framework signatures are unchanged archive content, not authority to reuse. Fully sign nested code and main app with valid user-provided signing inputs; old app profile was removed.",
         "validation_scope": "Structural packaging checks only; extension behavior and iPhone installation/playback are not verified here."}
@@ -429,9 +447,11 @@ def main() -> int:
     parser.add_argument("--playback-cache", action="store_true", help="Isolate automatic playback cache after JS source transitions; preserve downloaded files")
     parser.add_argument("--adaptive-playback", action="store_true", help="Use verified native setup/failure bridges for JS quality fallback")
     parser.add_argument("--native-download-format", action="store_true", help="Preserve actual audio container extensions at the verified native download save boundary")
+    parser.add_argument("--playback-sequence", action="store_true", help="Retire stale selection work and retry missing native next-track preload near the end")
+    parser.add_argument("--artwork-selection", action="store_true", help="Prevent late artwork completion from replacing a newly selected coverless track")
     args = parser.parse_args()
     try:
-        report = package_ipa(args.original, args.dylib, args.bootstrap, args.output, artwork_1600=args.artwork_1600, v3_changes=args.v3_changes, player_left_swipe=args.player_left_swipe, playback_cache=args.playback_cache, adaptive_playback=args.adaptive_playback, native_download_format=args.native_download_format)
+        report = package_ipa(args.original, args.dylib, args.bootstrap, args.output, artwork_1600=args.artwork_1600, v3_changes=args.v3_changes, player_left_swipe=args.player_left_swipe, playback_cache=args.playback_cache, adaptive_playback=args.adaptive_playback, native_download_format=args.native_download_format, playback_sequence=args.playback_sequence, artwork_selection=args.artwork_selection)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0
     except (OSError, PackageError, artwork_patch.PatchError, zipfile.BadZipFile, struct.error, UnicodeError) as error:

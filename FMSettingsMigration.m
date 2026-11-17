@@ -18,13 +18,14 @@ static BOOL FMBool(id value){return [value isKindOfClass:NSNumber.class] && ([va
 static BOOL FMFileName(id value){return [value isKindOfClass:NSString.class] && [value length]>0 && [value length]<=255 && [[value lastPathComponent] isEqual:value] && ![value containsString:@"\\"] && ![value containsString:[NSString stringWithFormat:@"%C",(unichar)0]] && [[value pathExtension].lowercaseString isEqual:@"js"];} 
 static BOOL FMValidateExisting(NSDictionary *values,NSError **error){
     for(NSString *key in FMDefaults())if(values[key]&&!FMBool(values[key]))return FMFail(error,1,@"已有扩展设置格式异常，已保留原值，未重置设置。");
-    if(values[FMConfigured]&&!FMBool(values[FMConfigured]))return FMFail(error,1,@"旧版设置标记异常，已保留原设置。");
+    for(NSString *key in @[FMConfigured,@"FMX.sourceActivationPending"])
+        if(values[key]&&!FMBool(values[key]))return FMFail(error,1,@"旧版设置标记异常，已保留原设置。");
     if(values[@"FMX.selectedSource"]&&!FMFileName(values[@"FMX.selectedSource"]))return FMFail(error,1,@"保存的音源选择格式异常，已保留原设置。");
     return YES;
 }
 static NSDictionary *FMSnapshot(NSDictionary *values){
     NSMutableDictionary *snapshot=NSMutableDictionary.dictionary;
-    NSSet *keys=[NSSet setWithArray:@[@"FMX.aggregateSearch",@"FMX.dynamicArtwork",@"FMX.listeningInsightsEnabled",@"FMX.selectedSource",FMConfigured,@"FMX.singleSearchPlatform",@"FMX.managesSearchPlatform"]];
+    NSSet *keys=[NSSet setWithArray:@[@"FMX.aggregateSearch",@"FMX.dynamicArtwork",@"FMX.listeningInsightsEnabled",@"FMX.selectedSource",@"FMX.sourceActivationPending",FMConfigured,@"FMX.singleSearchPlatform",@"FMX.managesSearchPlatform"]];
     for(NSString *key in values)if([keys containsObject:key]||[key hasPrefix:@"FMX.name."])snapshot[key]=values[key];
     return snapshot;
 }

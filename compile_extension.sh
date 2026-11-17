@@ -19,7 +19,7 @@ elif [[ "$mode" != device ]]; then
   echo 'Unknown extension build mode' >&2
   exit 2
 fi
-sources=(FMExtension LXSourceRuntime FMExtensionProtocol FMLockScreen FMSettingsEntry FMSearchPreferences FMSettingsMigration FMQishuiSearch FMListeningHistory FMInsights FMInteraction FMLXMC FMLXMCUI FMNavigation FMListeningCapture FMPlaybackCache FMQualityResolver FMAdaptivePlayback FMPlaybackQualityDisplay FMTrackMetadata FMJSDownloadCoordinator FMDownloadIntegration)
+sources=(FMExtension LXSourceRuntime FMExtensionProtocol FMLockScreen FMSettingsEntry FMSearchPreferences FMSettingsMigration FMQishuiSearch FMListeningHistory FMInsights FMInteraction FMLXMC FMLXMCUI FMNavigation FMListeningCapture FMPlaybackCache FMQualityResolver FMAdaptivePlayback FMPlaybackSequence FMPlaybackQualityDisplay FMTrackMetadata FMJSDownloadCoordinator FMDownloadIntegration)
 objects=()
 for source in "${sources[@]}"; do
   object="$object_dir/$source.o"

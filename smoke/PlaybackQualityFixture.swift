@@ -3,7 +3,7 @@ import Combine
 
 // Authored manager, never the original executable. Its Published value exercises
 // String lifetime and notification delivery through the two indirect arguments.
-private final class FMPQFixtureManager: NSObject, ObservableObject {
+public final class FMPQFixtureManager: NSObject, ObservableObject {
     @Published var currentQuality = "HQ"
     let selectedQuality = "flac24bit"
     var changes = 0
@@ -12,6 +12,9 @@ private final class FMPQFixtureManager: NSObject, ObservableObject {
         super.init()
         subscription = objectWillChange.sink { [weak self] in self?.changes += 1 }
     }
+    @_silgen_name("FMPlaybackQualityFixtureReconcileNative")
+    @inline(never)
+    public func reconcile() { precondition(Thread.isMainThread) }
 }
 
 @_cdecl("FMPlaybackQualityFixtureCreate")

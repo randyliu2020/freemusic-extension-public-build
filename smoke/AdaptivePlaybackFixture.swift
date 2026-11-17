@@ -92,6 +92,16 @@ public final class AdaptivePlaybackFixture: NSObject {
     private(set) var setups = 0, failures = 0, nativeFailures = 0
     private(set) var lastURL = ""
     var pauseBeforeAttach = false
+    // Authored host model of the independently inspected native queue/cache
+    // contract. Preloaded media and failure observations below are real AVPlayer.
+    var sequenceQueue = ["A", "B", "C"]
+    var sequenceIndex = 0
+    var sequenceRequested: [String] = []
+    var sequenceActual = "A"
+    var sequenceReconciliations = 0, sequenceMediaFailures = 0, sequenceAdoptions = 0
+    var sequenceFailFirst = true
+    var sequencePreloads: [String: AVPlayer] = [:]
+    var sequenceObservations: [String: NSKeyValueObservation] = [:]
     var badURL: URL { URL(string: "http://127.0.0.1:\(server.port)/bad.wav")! }
     var goodURL: URL { URL(string: "http://127.0.0.1:\(server.port)/tone.wav?fixture=%E9%9F%B3%E4%B9%90")! }
     override init() {
@@ -138,7 +148,49 @@ public final class AdaptivePlaybackFixture: NSObject {
         precondition(Thread.isMainThread && flag == 1 && optional == nil && reason == 4)
         nativeFailures += 1
     }
+    @_silgen_name("FMPlaybackSequenceFixtureReconcileNative")
+    @inline(never)
+    public func reconcileSequence() {
+        precondition(Thread.isMainThread)
+        sequenceReconciliations += 1
+        let candidate = sequenceQueue[(sequenceIndex + 1) % sequenceQueue.count]
+        // The original 0x56e20 keeps next/previous matching keys, resets the
+        // attempted-for UUID, then 0x4ccfc skips keys still in its preload map.
+        if sequencePreloads[candidate] != nil { return }
+        let fails = sequenceFailFirst && sequenceRequested.isEmpty
+        sequenceRequested.append(candidate)
+        let preload = AVPlayer(url: fails ? badURL : goodURL)
+        preload.isMuted = true
+        sequencePreloads[candidate] = preload
+        sequenceObservations[candidate] = preload.currentItem!.observe(\.status, options: [.initial, .new]) { [weak self, weak preload] item, _ in
+            DispatchQueue.main.async {
+                guard let self, let preload, self.sequencePreloads[candidate] === preload else { return }
+                if item.status == .failed {
+                    self.sequenceMediaFailures += 1
+                    self.sequenceObservations[candidate]?.invalidate()
+                    self.sequenceObservations.removeValue(forKey: candidate)
+                    self.sequencePreloads.removeValue(forKey: candidate)
+                }
+            }
+        }
+    }
+    func sequenceNext() {
+        if let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "FMPlaybackSequenceNativeSelection") {
+            typealias Call = @convention(c) (UnsafeMutableRawPointer?) -> Void
+            unsafeBitCast(symbol, to: Call.self)(Unmanaged.passUnretained(self).toOpaque())
+        }
+        sequenceIndex = (sequenceIndex + 1) % sequenceQueue.count
+        sequenceActual = sequenceQueue[sequenceIndex]
+        let adopted = sequencePreloads.removeValue(forKey: sequenceActual)
+        sequenceObservations.removeValue(forKey: sequenceActual)?.invalidate()
+        if adopted != nil { sequenceAdoptions += 1 }
+        nativeSetup(goodURL, adopted)
+    }
     func stop() {
+        for observation in sequenceObservations.values { observation.invalidate() }
+        sequenceObservations.removeAll()
+        for preload in sequencePreloads.values { preload.pause(); preload.replaceCurrentItem(with: nil) }
+        sequencePreloads.removeAll()
         observation?.invalidate(); observation = nil
         if let ended { NotificationCenter.default.removeObserver(ended) }; ended = nil
         player?.pause(); player?.replaceCurrentItem(with: nil); server.stop()
@@ -152,7 +204,11 @@ public final class AdaptivePlaybackFixture: NSObject {
          "error_domain": (player?.currentItem?.error as NSError?)?.domain ?? "",
          "error_code": (player?.currentItem?.error as NSError?)?.code ?? 0,
          "rate": player?.rate ?? 0, "time": player.map { CMTimeGetSeconds($0.currentTime()) } ?? 0,
-         "bad": badURL.absoluteString, "good": goodURL.absoluteString]
+         "bad": badURL.absoluteString, "good": goodURL.absoluteString,
+         "sequence_requests": sequenceRequested, "sequence_actual": sequenceActual,
+         "sequence_reconciliations": sequenceReconciliations, "sequence_media_failures": sequenceMediaFailures,
+         "sequence_adoptions": sequenceAdoptions,
+         "sequence_ready": sequencePreloads.filter { $0.value.currentItem?.status == .readyToPlay }.map { $0.key }.sorted()]
     }
     deinit { stop() }
 }
@@ -182,4 +238,19 @@ public func adaptiveFixtureStartPaused(_ pointer: UnsafeMutableRawPointer, _ url
     let fixture = Unmanaged<AdaptivePlaybackFixture>.fromOpaque(pointer).takeUnretainedValue()
     fixture.pauseBeforeAttach = true
     fixture.nativeSetup(Unmanaged<NSURL>.fromOpaque(url).takeUnretainedValue() as URL, nil)
+}
+
+@_cdecl("FMPlaybackSequenceFixtureConfigure")
+public func playbackSequenceFixtureConfigure(_ pointer: UnsafeMutableRawPointer, _ shuffle: Bool, _ failFirst: Bool) {
+    let fixture = Unmanaged<AdaptivePlaybackFixture>.fromOpaque(pointer).takeUnretainedValue()
+    fixture.sequenceQueue = shuffle ? ["A", "C", "B"] : ["A", "B", "C"]
+    fixture.sequenceIndex = 0; fixture.sequenceActual = "A"; fixture.sequenceFailFirst = failFirst
+}
+@_cdecl("FMPlaybackSequenceFixturePrime")
+public func playbackSequenceFixturePrime(_ pointer: UnsafeMutableRawPointer) {
+    Unmanaged<AdaptivePlaybackFixture>.fromOpaque(pointer).takeUnretainedValue().reconcileSequence()
+}
+@_cdecl("FMPlaybackSequenceFixtureNext")
+public func playbackSequenceFixtureNext(_ pointer: UnsafeMutableRawPointer) {
+    Unmanaged<AdaptivePlaybackFixture>.fromOpaque(pointer).takeUnretainedValue().sequenceNext()
 }

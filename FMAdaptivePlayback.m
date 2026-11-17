@@ -1,6 +1,7 @@
 #import "FMAdaptivePlayback.h"
 #import "FMQualityResolver.h"
 #import "FMPlaybackQualityDisplay.h"
+#import "FMPlaybackSequence.h"
 #import <CommonCrypto/CommonDigest.h>
 #import <math.h>
 #import <string.h>
@@ -203,6 +204,11 @@ static void FMRetire(FMAdaptiveBinding *binding,BOOL cancel) {
     [binding detach];
     if(cancel)[binding.session cancel];
 }
+void FMAdaptivePlaybackSelectionWillChange(id manager) {
+    FMState();if(!NSThread.isMainThread||!manager)return;
+    FMAdaptiveBinding *binding=[FMBindings objectForKey:manager];
+    if(binding){FMRetire(binding,YES);[FMBindings removeObjectForKey:manager];FMCanceledCount++;}
+}
 void FMAdaptivePlaybackSourceTransition(void) {
     FMState();NSCAssert(NSThread.isMainThread,@"Source transition must be on main");
     if(!NSThread.isMainThread)return;
@@ -223,6 +229,7 @@ void FMAdaptiveNativeDidSetup(id manager,AVPlayer *player) {
     FMAdaptiveBinding *binding=entry.continuation;
     if(old && old!=binding){FMRetire(old,old.session!=entry.session);[FMBindings removeObjectForKey:manager];}
     FMPlaybackQualityDisplayObserve(manager,player,entry.quality);
+    FMPlaybackSequenceDidSetup(manager,player);
     if(FMPlayerObserver)FMPlayerObserver(manager,player,entry.quality);
     if(!entry||!item)return;
     [FMURLs removeObjectForKey:URL.absoluteString];
@@ -275,6 +282,7 @@ static void FMResumeNativeFailure(FMAdaptiveBinding *binding) {
 BOOL FMAdaptiveNativeHandleFailure(id manager,AVPlayer *currentNativePlayer) {
     FMState();
     if(!FMImageAllowed||!NSThread.isMainThread||FMNativeFailureDepth)return NO;
+    if(FMPlaybackSequenceSuppressOldFailure(manager,currentNativePlayer))return YES;
     FMAdaptiveBinding *binding=[FMBindings objectForKey:manager];
     if(!binding||binding.player!=currentNativePlayer||!FMStillCurrent(binding))return NO;
     if(binding.recovering)return YES; // duplicate native notifications for this same item

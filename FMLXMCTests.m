@@ -18,6 +18,16 @@ static NSDictionary *Song(NSString *source, id identifier) {
 }
 static NSDictionary *List(NSString *name, NSArray *songs) { return @{@"id":@"love", @"name":name, @"list":songs}; }
 static NSData *Part(NSArray *songs) { return JSON(@{@"type":@"playListPart_v2", @"data":List(@"Fixture Favorites", songs)}); }
+static FMLXMCPlaylist *IdentityList(id identifier, NSString *title, NSArray *songs) {
+    NSMutableDictionary *list = [List(title, songs) mutableCopy];
+    if (identifier) list[@"id"] = identifier; else [list removeObjectForKey:@"id"];
+    return FMLXMCParseData(JSON(@{@"type":@"playListPart_v2", @"data":list}), nil).playlists.firstObject;
+}
+static FMLXMCPlaylist *LexicalIDList(NSString *jsonIdentifier, NSArray *songs) {
+    NSString *json = [[NSString alloc] initWithData:Part(songs) encoding:NSUTF8StringEncoding];
+    json = [json stringByReplacingOccurrencesOfString:@"\"id\":\"love\"" withString:[@"\"id\":" stringByAppendingString:jsonIdentifier]];
+    return FMLXMCParseData([json dataUsingEncoding:NSUTF8StringEncoding], nil).playlists.firstObject;
+}
 static NSData *Gzip(NSData *source) {
     z_stream stream = {0};
     if (deflateInit2(&stream, Z_BEST_SPEED, Z_DEFLATED, 16 + MAX_WBITS, 8, Z_DEFAULT_STRATEGY) != Z_OK) abort();
@@ -68,6 +78,34 @@ int main(int argc, const char *argv[]) {
         FMLXMCImportDocument *legacy = FMLXMCParseData(JSON(@{@"type":@"playListPart", @"data":List(@"Legacy", @[oldSong])}), &error);
         Check(legacy.importedTrackCount == 1 && [legacy.playlists.firstObject.tracks.firstObject[@"duration"] isEqual:@3782], @"documented_legacy_single_list_mapping");
         Check(FMLXMCParseData(JSON(@{@"type":@"playList", @"data":@[List(@"Legacy", @[oldSong])]}), &error).playlists.count == 1, @"documented_legacy_multiple_lists");
+
+        FMLXMCPlaylist *identity = IdentityList(@"source-001", @"Same title", songs);
+        FMLXMCPlaylist *updatedIdentity = IdentityList(@"source-001", @"Renamed title", @[songs[1]]);
+        FMLXMCPlaylist *otherIdentity = IdentityList(@"source-002", @"Same title", songs);
+        Check([identity.originID isEqual:@"source-001"] && [identity.sourceIdentity isEqual:updatedIdentity.sourceIdentity] && ![identity.contentFingerprint isEqual:updatedIdentity.contentFingerprint], @"playlist_source_id_survives_title_and_song_updates");
+        Check(![identity.sourceIdentity isEqual:otherIdentity.sourceIdentity] && [identity.contentFingerprint isEqual:otherIdentity.contentFingerprint], @"same_title_and_content_do_not_merge_different_source_ids");
+        Check([IdentityList(@"00123", @"ID", songs).originID isEqual:@"00123"] && ![IdentityList(@"00123", @"ID", songs).sourceIdentity isEqual:IdentityList(@"123", @"ID", songs).sourceIdentity], @"playlist_string_id_preserves_leading_zeroes");
+        Check([IdentityList(@9223372036854775806LL, @"ID", songs).originID isEqual:@"9223372036854775806"] && [IdentityList(@9223372036854775806LL, @"ID", songs).sourceIdentity isEqual:IdentityList(@"9223372036854775806", @"ID", songs).sourceIdentity], @"playlist_signed_64_bit_identity_never_passes_through_double");
+        FMLXMCPlaylist *unsignedID = LexicalIDList(@"18446744073709551615", songs);
+        Check(unsignedID && ([unsignedID.originID isEqual:@"18446744073709551615"] || (!unsignedID.originID && !unsignedID.sourceIdentity)), @"playlist_unsigned_64_bit_identity_is_exact_or_explicitly_untrusted");
+        FMLXMCPlaylist *oversizedID = LexicalIDList(@"18446744073709551616", songs);
+        FMLXMCPlaylist *fractionID = LexicalIDList(@"9007199254740993.5", songs);
+        FMLXMCPlaylist *booleanID = IdentityList(@YES, @"ID", songs);
+        Check(oversizedID && fractionID && booleanID && !oversizedID.originID && !fractionID.originID && !booleanID.originID && !oversizedID.sourceIdentity && !fractionID.sourceIdentity, @"inexact_or_boolean_playlist_ids_are_not_fabricated");
+        FMLXMCPlaylist *missingID = IdentityList(nil, @"No ID", songs);
+        FMLXMCPlaylist *missingIDAgain = IdentityList(nil, @"No ID", songs);
+        FMLXMCPlaylist *missingIDUpdated = IdentityList(nil, @"No ID", @[songs[0]]);
+        Check(missingID && !missingID.originID && !missingID.sourceIdentity && [missingID.contentFingerprint isEqual:missingIDAgain.contentFingerprint] && ![missingID.contentFingerprint isEqual:missingIDUpdated.contentFingerprint], @"absent_source_identity_only_matches_exact_normalized_content");
+        Check(!IdentityList(@"", @"ID", songs).sourceIdentity && !IdentityList(@"  ", @"ID", songs).sourceIdentity && !IdentityList(@{}, @"ID", songs).sourceIdentity && !IdentityList([@"x" stringByPaddingToLength:257 withString:@"x" startingAtIndex:0], @"ID", songs).sourceIdentity, @"malformed_playlist_ids_fall_back_without_rejecting_valid_songs");
+        NSArray *reversedSongs = [[songs reverseObjectEnumerator] allObjects];
+        Check(![identity.contentFingerprint isEqual:IdentityList(@"source-001", @"Same title", reversedSongs).contentFingerprint] && ![identity.contentFingerprint isEqual:IdentityList(@"source-001", @"Renamed", songs).contentFingerprint], @"content_fingerprint_includes_track_order_and_playlist_title");
+        NSMutableDictionary *metadataSong = [songs[0] mutableCopy]; metadataSong[@"singer"] = @"Changed Singer";
+        NSArray *metadataSongs = @[metadataSong, songs[1], songs[2]];
+        Check(![identity.contentFingerprint isEqual:IdentityList(@"source-001", @"Same title", metadataSongs).contentFingerprint], @"content_fingerprint_includes_normalized_track_metadata");
+        NSDictionary *equivalentOldSong = @{@"songmid":@9223372036854775806LL, @"source":@"wy", @"name":@"Fixture Song", @"singer":@"Fixture Artist", @"interval":@"03:07", @"albumName":@"Fixture Album", @"img":@"https://example.invalid/cover.jpg"};
+        FMLXMCPlaylist *oldIdentity = FMLXMCParseData(JSON(@{@"type":@"playListPart", @"data":List(@"Same normalized", @[equivalentOldSong])}), nil).playlists.firstObject;
+        FMLXMCPlaylist *newIdentity = IdentityList(@"love", @"Same normalized", @[songs[0]]);
+        Check([oldIdentity.sourceIdentity isEqual:newIdentity.sourceIdentity] && [oldIdentity.contentFingerprint isEqual:newIdentity.contentFingerprint] && [plain.playlists.firstObject.sourceIdentity isEqual:packed.playlists.firstObject.sourceIdentity] && [plain.playlists.firstObject.contentFingerprint isEqual:packed.playlists.firstObject.contentFingerprint], @"identity_and_content_are_stable_across_lx_versions_and_gzip");
         NSMutableDictionary *unsafeCover = [Song(@"wy", @12) mutableCopy];
         NSMutableDictionary *unsafeMeta = [unsafeCover[@"meta"] mutableCopy]; unsafeMeta[@"picUrl"] = @"file:///private/fixture.jpg"; unsafeCover[@"meta"] = unsafeMeta;
         FMLXMCPlaylist *safe = FMLXMCParseData(Part(@[unsafeCover]), &error).playlists.firstObject;
@@ -92,6 +130,7 @@ int main(int argc, const char *argv[]) {
         NSData *responseData = FMLXMCResponseForRequest(request, &error);
         NSDictionary *response = responseData ? [NSJSONSerialization JSONObjectWithData:responseData options:0 error:nil] : nil;
         Check([response[@"code"] isEqual:@200] && [response[@"data"][@"tracks"] count] == 3 && [response[@"data"][@"title"] isEqual:@"Fixture Favorites"], @"bridge_returns_native_import_playlist_response");
+        Check([response isEqual:@{@"code":@200, @"data":@{@"title":packed.playlists.firstObject.title, @"tracks":packed.playlists.firstObject.tracks}}] && [NSSet setWithArray:[response[@"data"] allKeys]].count == 2, @"source_identity_never_changes_native_import_json");
         Check(FMLXMCRequestMatches(request) && !FMLXMCResponseForRequest(request, &error) && error.code == 17, @"same_token_second_submission_is_local_error");
         NSMutableURLRequest *normal = Request(@"https://music.163.com/playlist?id=123");
         Check(!FMLXMCRequestMatches(normal), @"ordinary_native_link_import_passes_through");

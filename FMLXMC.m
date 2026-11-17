@@ -1,10 +1,12 @@
 #import "FMLXMC.h"
 #import <zlib.h>
 #import <CoreFoundation/CoreFoundation.h>
+#import <CommonCrypto/CommonDigest.h>
 #import <fcntl.h>
 #import <sys/stat.h>
 #import <unistd.h>
 #import <math.h>
+#import <string.h>
 
 NSString * const FMLXMCErrorDomain = @"FMX.LXMC";
 const NSUInteger FMLXMCMaximumFileBytes = 8 * 1024 * 1024;
@@ -22,6 +24,9 @@ void FMLXMCSetTrackObserver(FMLXMCTrackObserver observer) {
 @interface FMLXMCPlaylist ()
 @property(nonatomic, copy, readwrite) NSString *title;
 @property(nonatomic, copy, readwrite) NSArray<NSDictionary *> *tracks;
+@property(nonatomic, copy, readwrite) NSString *originID;
+@property(nonatomic, copy, readwrite) NSString *sourceIdentity;
+@property(nonatomic, copy, readwrite) NSString *contentFingerprint;
 @property(nonatomic, readwrite) NSUInteger inputCount;
 @property(nonatomic, readwrite) NSUInteger duplicateCount;
 @property(nonatomic, readwrite) NSUInteger invalidCount;
@@ -53,6 +58,30 @@ static NSString *FMString(id value, NSUInteger limit) {
 }
 static BOOL FMMatches(NSString *string, NSString *pattern) {
     return string && [string rangeOfString:pattern options:NSRegularExpressionSearch].location != NSNotFound;
+}
+static NSString *FMOriginID(id value) {
+    if ([value isKindOfClass:NSString.class]) {
+        NSString *identifier = FMString(value, 256);
+        return [identifier stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].length ? identifier : nil;
+    }
+    if (![value isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID()) return nil;
+    // Never round-trip identity through double. JSON integers represented as
+    // signed/unsigned 64-bit NSNumber have an exact decimal string. Decimal and
+    // floating encodings (including oversized JSON integers) are not trusted;
+    // their original lexical precision cannot be recovered from this object.
+    const char *encoding = [value objCType];
+    if (!encoding || !encoding[0] || !strchr("cCsSiIlLqQ", encoding[0]) || encoding[1]) return nil;
+    NSString *identifier = [value stringValue];
+    return FMMatches(identifier, @"^-?[0-9]{1,20}$") ? identifier : nil;
+}
+static NSString *FMIdentityDigest(NSString *domain, id payload) {
+    NSData *data = [NSJSONSerialization dataWithJSONObject:@[domain, payload] options:NSJSONWritingSortedKeys error:nil];
+    if (!data) return nil;
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(data.bytes, (CC_LONG)data.length, digest);
+    NSMutableString *hex = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
+    for (NSUInteger index = 0; index < sizeof(digest); index++) [hex appendFormat:@"%02x", digest[index]];
+    return [domain stringByAppendingFormat:@":%@", hex];
 }
 static NSString *FMNumericID(id value) {
     NSString *result = nil;
@@ -190,6 +219,10 @@ FMLXMCImportDocument *FMLXMCParseData(NSData *data, NSError **error) {
         }
         FMLXMCPlaylist *list = [FMLXMCPlaylist new];
         list.title = name; list.tracks = tracks; list.inputCount = songs.count;
+        list.originID = FMOriginID(item[@"id"]);
+        list.sourceIdentity = list.originID ? FMIdentityDigest(@"lx-origin-v1", list.originID) : nil;
+        list.contentFingerprint = FMIdentityDigest(@"lx-content-v1", @{@"title":name, @"tracks":tracks});
+        if (!list.contentFingerprint) return FMFail(error, 14, @"歌单内容无法转换。");
         list.duplicateCount = duplicate; list.invalidCount = invalid; list.unsupportedSources = unsupported;
         [normalized addObject:list]; trackCount += tracks.count;
     }

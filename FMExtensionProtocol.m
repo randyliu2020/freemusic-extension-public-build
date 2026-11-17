@@ -193,7 +193,10 @@ static NSUInteger FMXSearchScore(NSDictionary *track, NSString *query, NSArray<N
         for (NSString *artist in artists) if ([artist containsString:word]) { found = YES; break; }
         if (!found) { allWords = NO; break; }
     }
-    if (allWords) score = MAX(score, 70000);
+    // For an unordered title/artist query, prefer the plain title very slightly
+    // over a recognized live/cover suffix. Explicit version matches still win
+    // in the exact tiers above; no version is removed from the results.
+    if (allWords) score = MAX(score, 70000 + ([title isEqual:base] ? 100 : 0));
     if ([title hasPrefix:query]) score = MAX(score, 60000);
     else if ([title containsString:query]) score = MAX(score, 50000);
     for (NSString *artist in artists) {

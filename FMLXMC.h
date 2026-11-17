@@ -11,6 +11,15 @@ FOUNDATION_EXPORT const NSUInteger FMLXMCMaximumExpandedBytes;
 @interface FMLXMCPlaylist : NSObject
 @property(nonatomic, copy, readonly) NSString *title;
 @property(nonatomic, copy, readonly) NSArray<NSDictionary *> *tracks;
+/// The original LX playlist identity, kept separately from native database IDs.
+/// Nil when absent, malformed, or represented by an inexact JSON number.
+@property(nonatomic, copy, readonly, nullable) NSString *originID;
+/// Versioned digest of originID, independent of title, songs and LX file version.
+/// A match is a candidate for an explicit user choice, never permission to replace.
+@property(nonatomic, copy, readonly, nullable) NSString *sourceIdentity;
+/// Digest of the complete normalized title and ordered native track dictionaries.
+/// With no reliable originID, this identifies exact content only, not later edits.
+@property(nonatomic, copy, readonly) NSString *contentFingerprint;
 @property(nonatomic, readonly) NSUInteger inputCount;
 @property(nonatomic, readonly) NSUInteger duplicateCount;
 @property(nonatomic, readonly) NSUInteger invalidCount;

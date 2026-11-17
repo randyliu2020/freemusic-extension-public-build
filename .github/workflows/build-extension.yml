@@ -30,6 +30,7 @@ jobs:
           python test_playback_cache_patch.py -v
           python test_adaptive_playback_patch.py -v
           python test_native_format_patch.py -v
+          python test_playback_sequence_patch.py -v
 
   build:
     needs: instruction-tests
@@ -78,9 +79,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p v8-validation
           xcrun clang -fobjc-arc -fblocks -framework Foundation \
             FMExtensionProtocol.m FMQishuiSearch.m FMLXMC.m FMTrackMetadata.m FMExtensionProtocolTests.m -lz -o protocol-tests
-          ./protocol-tests intercept-contract-fixtures.json
+          ./protocol-tests intercept-contract-fixtures.json v8-validation/search-ranking-tests.json
 
       - name: Test LX song metadata compatibility and credential isolation
         shell: bash

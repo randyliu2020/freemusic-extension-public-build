@@ -22,6 +22,8 @@
 - (NSURL *)directory;
 - (void)activate:(NSDictionary *)file;
 - (void)disable;
+- (void)retireRuntime;
+- (void)restoreSavedSource;
 @end
 
 typedef void (*InstallFunction)(void);
@@ -823,7 +825,7 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
         Main(^{
             if(!self.forced) {
                 NSUserDefaults *defaults=NSUserDefaults.standardUserDefaults;
-                for(NSString *key in @[@"FMX.settingsAndQishuiConfigured",@"FMX.managesSearchPlatform",@"FMX.singleSearchPlatform"])[defaults removeObjectForKey:key];
+                for(NSString *key in @[@"FMX.settingsAndQishuiConfigured",@"FMX.managesSearchPlatform",@"FMX.singleSearchPlatform",@"FMX.settings.schemaVersion",@"FMX.settings.preUpgradeBackup",@"FMX.settings.upgradeJournal"])[defaults removeObjectForKey:key];
                 [defaults setBool:NO forKey:@"FMX.aggregateSearch"];[defaults setInteger:4 forKey:@"searchPlatform"];
             }
             if(self.forced) {
@@ -852,7 +854,8 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
         __block UITableViewController *panel=nil;
         __block SmokeSettingsViewController *settings=nil;
         [self test:@"aggregate_preferences_save_normalize_and_restore_native_source" body:^NSDictionary *{
-            Check(Until(^BOOL{NSUserDefaults *d=NSUserDefaults.standardUserDefaults;return [d boolForKey:@"FMX.settingsAndQishuiConfigured"] && [d boolForKey:@"FMX.aggregateSearch"] && [d integerForKey:@"searchPlatform"]==3 && [d integerForKey:@"FMX.singleSearchPlatform"]==4;},5),@"First v2 launch enables aggregate and safely migrates the original Qishui selection");
+            Check(Until(^BOOL{NSUserDefaults *d=NSUserDefaults.standardUserDefaults;return [d integerForKey:@"FMX.settings.schemaVersion"]==1 && [d boolForKey:@"FMX.settingsAndQishuiConfigured"] && ![d boolForKey:@"FMX.aggregateSearch"] && [d integerForKey:@"searchPlatform"]==4 && ![d boolForKey:@"FMX.managesSearchPlatform"];},5),@"Versioned upgrade preserves an explicit aggregate opt-out and original Qishui selection");
+            Main(^{SetAggregateEnabled(YES);NSUserDefaults *d=NSUserDefaults.standardUserDefaults;Check([d integerForKey:@"searchPlatform"]==3 && [d integerForKey:@"FMX.singleSearchPlatform"]==4,@"Explicitly enabling aggregate safely normalizes the original decoder");});
             __block BOOL restored=NO,normalizes=NO,stableOptOut=NO,otherSuite=NO;
             Main(^{NSUserDefaults *d=NSUserDefaults.standardUserDefaults;SetAggregateEnabled(NO);restored=[d integerForKey:@"searchPlatform"]==4 && ![d boolForKey:@"FMX.managesSearchPlatform"];
                 InstallSearchPreferences();stableOptOut=![d boolForKey:@"FMX.aggregateSearch"] && [d integerForKey:@"searchPlatform"]==4;
@@ -864,7 +867,7 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
                 [d setInteger:4 forKey:@"searchPlatform"];SetAggregateEnabled(YES);
             });
             Check(restored && normalizes && stableOptOut && otherSuite,@"Aggregate preferences restore the saved source, normalize both setter paths, and leave opt-out/other suites alone");
-            return @{@"migrated_from_native_platform":@4,@"aggregate_native_decoder_platform":@3,@"original_source_restored_on_disable":@YES,@"repeat_install_preserves_opt_out":@YES,@"other_suite_untouched":@YES};
+            return @{@"migrated_from_native_platform":@4,@"aggregate_native_decoder_platform":@3,@"original_source_restored_on_disable":@YES,@"upgrade_preserves_explicit_opt_out":@YES,@"repeat_install_preserves_opt_out":@YES,@"other_suite_untouched":@YES};
         }];
         [self test:@"home_search_and_unrelated_modal_have_no_extension_overlay" body:^NSDictionary *{
             // Cold Simulator startup can expose a hittable view before its scene
@@ -1082,7 +1085,7 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
                 Check([script writeToURL:[directory URLByAppendingPathComponent:filename] atomically:YES encoding:NSUTF8StringEncoding error:&error],error.localizedDescription);
                 Main(^{[manager activate:@{@"file":filename,@"name":@"No routable fixture"}];});
                 Check(Until(^BOOL{return manager.runtime==nil && [manager.status containsString:@"没有本版可用平台"];},5),@"Valid LX manifest without a usable native route must be rejected");
-                __block BOOL clear=NO;Main(^{clear=manager.selectedFile==nil && [NSUserDefaults.standardUserDefaults objectForKey:@"FMX.selectedSource"]==nil;});Check(clear,@"Rejected source must not remain selected");
+                __block BOOL clear=NO;Main(^{clear=manager.selectedFile==nil && [[NSUserDefaults.standardUserDefaults objectForKey:@"FMX.selectedSource"] isEqual:@"SmokeFixture.js"] && [NSUserDefaults.standardUserDefaults boolForKey:@"FMX.sourceActivationPending"];});Check(clear,@"Rejected source is not active; last working selection survives with automatic retry paused");
             }
             return @{@"rejected_fixtures":@[@"kw-only",@"wy-empty-quality",@"kg-flac-only"]};
         }];
@@ -1103,7 +1106,9 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
 #include "V5PlaybackCacheTests.inc"
 #include "V6QualityRoutingTests.inc"
 #include "V6AdaptivePlaybackTests.inc"
+#include "V8PlaybackSequenceTests.inc"
 #include "V6PlaybackQualityTests.inc"
+#include "V8SourceSelectionTests.inc"
         [self test:@"square_and_portrait_previews" body:^NSDictionary *{
             CheckUpright(cover.CGImage);
             for(NSNumber *portrait in @[@NO,@YES]){UIImage *preview=PreviewArtwork(cover,portrait.boolValue);Check(preview.CGImage && CGImageGetWidth(preview.CGImage)==720 && CGImageGetHeight(preview.CGImage)==(portrait.boolValue?960:720),@"Preview pixel dimensions");CheckUpright(preview.CGImage);[UIImagePNGRepresentation(preview) writeToURL:[self.output URLByAppendingPathComponent:portrait.boolValue?@"portrait-preview.png":@"square-preview.png"] atomically:YES];}return @{@"red_top_blue_bottom_verified":@YES};

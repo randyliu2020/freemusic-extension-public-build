@@ -197,7 +197,7 @@ for name in ['FMQualityResolver.m','FMQualityResolver.h','FMAdaptivePlayback.m',
 manifest['test_macros']=['FMX_LOCKSCREEN_TESTING','FMX_LISTENING_CAPTURE_TESTING','FMX_PLAYBACK_CACHE_TESTING','FMX_ADAPTIVE_PLAYBACK_TESTING','FMX_PLAYBACK_QUALITY_TESTING']
 for name in ['FMTrackMetadata.m','FMTrackMetadata.h','FMJSDownloadCoordinator.m','FMJSDownloadCoordinator.h','FMDownloadIntegration.m','FMDownloadIntegration.h']:
     manifest['source_sha256'][name]=hashlib.sha256((source/name).read_bytes()).hexdigest()
-for name in ['FMSettingsMigration.m','FMSettingsMigration.h']:
+for name in ['FMSettingsMigration.m','FMSettingsMigration.h','FMPlaybackSequence.m','FMPlaybackSequence.h','smoke/V8PlaybackSequenceTests.inc','smoke/V8SourceSelectionTests.inc']:
     manifest['source_sha256'][name]=hashlib.sha256((source/name).read_bytes()).hexdigest()
 (out/'build.json').write_text(json.dumps(manifest,indent=2)+'\n')
 PY

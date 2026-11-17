@@ -9,8 +9,15 @@
 #import <stdatomic.h>
 
 static NSUInteger failures;
+static NSMutableArray<NSDictionary *> *checkRows;
+static NSString *checkScope = @"legacy";
+static NSUInteger rankingLoopbackRequests, rankingQishuiCalls, rankingSessionCallbacks;
+static void SetCheckScope(NSString *scope) { @synchronized(checkRows) { checkScope = scope; } }
 static void Check(BOOL condition, NSString *name) {
-    if (!condition) { failures++; fprintf(stderr, "FAIL: %s\n", name.UTF8String); }
+    @synchronized(checkRows) {
+        [checkRows addObject:@{@"ordinal":@(checkRows.count + 1), @"name":name, @"scope":checkScope, @"passed":@(condition)}];
+        if (!condition) { failures++; fprintf(stderr, "FAIL: %s\n", name.UTF8String); }
+    }
 }
 
 static NSDictionary *SearchTrack(NSString *source, NSString *identifier, NSString *title, NSString *singer) {
@@ -26,6 +33,7 @@ static NSArray *SearchPairs(NSDictionary *response) {
 }
 
 static void RunSearchRankingTests(void) {
+    SetCheckScope(@"ranking.semantic");
     NSDictionary *wrongArtist = SearchTrack(@"kg", @"other", @"知足", @"另一位歌手");
     NSDictionary *duet = SearchTrack(@"qq", @"duet", @"知足", @"于文文 / 胡彦斌");
     NSDictionary *live = SearchTrack(@"wy", @"live", @"知足（Live版）", @"于文文 / 胡彦斌");
@@ -37,8 +45,10 @@ static void RunSearchRankingTests(void) {
     Check([FMXMergeSearchResponsesForKeyword(sources, 0, @"于文文 胡彦斌 知足")[@"data"][0] isEqual:duet],
           @"rank artist-before-title query as the same exact combination");
     NSDictionary *tokens = FMXMergeSearchResponsesForKeyword(sources, 0, @"胡彦斌 知足 于文文");
-    Check([tokens[@"data"][0] isEqual:live] && [tokens[@"data"][1] isEqual:duet],
-          @"all title and singer tokens match regardless of order, with stable ties");
+    Check([tokens[@"data"][0] isEqual:duet] && [tokens[@"data"][1] isEqual:live],
+          @"unordered title and singer tokens prefer the plain title slightly without removing its live version");
+    Check([FMXMergeSearchResponsesForKeyword(sources, 0, @"胡彦斌 知足 Live")[@"data"][0] isEqual:live],
+          @"explicit live token still takes precedence over the plain-title token bonus");
 
     NSDictionary *artistOnly = @{@"server":@"qq", @"id":@"artist", @"title":@"另一首", @"singer":NSNull.null, @"artist":@"胡彦斌"};
     NSDictionary *nameMention = SearchTrack(@"kg", @"mention", @"致胡彦斌", @"其他歌手");
@@ -102,6 +112,7 @@ static void RunSearchRankingTests(void) {
     NSDictionary *longTrack = SearchTrack(@"qq", @"long", longText, longText);
     Check([FMXMergeSearchResponsesForKeyword(@[SearchResponse(@[longTrack, near], 2)], 0, longText)[@"data"] count] == 2,
           @"large query and metadata remain safe and do not discard valid candidates");
+    SetCheckScope(@"legacy");
 }
 
 // Only authored data is used by the aggregate integration fixture. The Qishui
@@ -349,12 +360,14 @@ static NSMutableURLRequest *SearchFixtureRequest(NSString *keyword, NSInteger pa
 }
 
 static void RunSearchRankingIntegrationTests(void) {
+    SetCheckScope(@"ranking.integration");
     id previousAggregate = [NSUserDefaults.standardUserDefaults objectForKey:@"FMX.aggregateSearch"];
     [NSUserDefaults.standardUserDefaults setBool:YES forKey:@"FMX.aggregateSearch"];
     FMXSearchFixtureQishui *qishui = [[FMXSearchFixtureQishui alloc] initWithConfiguration:nil deviceID:@"authored-local-fixture"];
     [FMExtensionProtocol setQishuiSearchClient:qishui];
     unsigned before = atomic_load(&originRequests);
     NSDictionary *first = Fetch(SearchFixtureRequest(@"知足 于文文 胡彦斌", 4, NO));
+    if (first[@"error"]) rankingSessionCallbacks++;
     NSDictionary *firstJSON = [first[@"json"] isKindOfClass:NSDictionary.class] ? first[@"json"] : @{};
     Check([SearchPairs(firstJSON) isEqual:@[@[@"kg",@"p4-duet"],@[@"qs",@"p4-live"],@[@"qq",@"p4-other"]]],
           @"actual aggregate NSURLSession applies the request keyword after one source fails and retains Qishui versions");
@@ -362,17 +375,24 @@ static void RunSearchRankingIntegrationTests(void) {
           @"aggregate forwards the same keyword and native page to each source and preserves page metadata");
     Check(atomic_load(&originRequests) == before+3 && qishui.calls == 1, @"aggregate keeps three independent native requests and one isolated Qishui request");
     NSDictionary *second = Fetch(SearchFixtureRequest(@"另一位歌手", 1, NO));
+    if (second[@"error"]) rankingSessionCallbacks++;
     NSDictionary *secondJSON = [second[@"json"] isKindOfClass:NSDictionary.class] ? second[@"json"] : @{};
     Check([SearchPairs(secondJSON) firstObject] && [[SearchPairs(secondJSON) firstObject] isEqual:@[@"qq",@"p1-other"]] && [secondJSON[@"page"] isEqual:@1],
           @"next aggregate request uses its own singer query and page instead of stale ranking context");
     qishui.forceFailure = YES;
     NSDictionary *failed = Fetch(SearchFixtureRequest(@"知足", 0, YES));
+    if (failed[@"error"]) rankingSessionCallbacks++;
     NSDictionary *failedJSON = [failed[@"json"] isKindOfClass:NSDictionary.class] ? failed[@"json"] : nil;
     Check([failed[@"error"] isKindOfClass:NSError.class] || (failedJSON && [failedJSON[@"code"] integerValue] != 200),
           @"all-source failure remains an explicit failure rather than an empty successful ranking");
+    rankingLoopbackRequests = atomic_load(&originRequests) - before;
+    rankingQishuiCalls = qishui.calls;
+    Check(rankingLoopbackRequests == 9 && rankingQishuiCalls == 3 && rankingSessionCallbacks == 3,
+          @"ranking integration executes all three aggregate sessions, nine loopback HTTP requests and three isolated Qishui calls");
     [FMExtensionProtocol setQishuiSearchClient:nil];
     if (previousAggregate) [NSUserDefaults.standardUserDefaults setObject:previousAggregate forKey:@"FMX.aggregateSearch"];
     else [NSUserDefaults.standardUserDefaults removeObjectForKey:@"FMX.aggregateSearch"];
+    SetCheckScope(@"legacy");
 }
 
 // Native import integration, through actual NSURLSession body streams. The token
@@ -679,7 +699,8 @@ static void RunKugouTests(NSDictionary *fixtures, BOOL hasLoopback) {
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
-        if (argc != 2) { fprintf(stderr, "usage: protocol-tests intercept-contract-fixtures.json\n"); return 2; }
+        checkRows = NSMutableArray.array;
+        if (argc != 2 && argc != 3) { fprintf(stderr, "usage: protocol-tests intercept-contract-fixtures.json [report.json]\n"); return 2; }
         NSData *data = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:argv[1]]];
         NSDictionary *fixtures = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
         if (!fixtures) { fprintf(stderr, "fixture read failed\n"); return 2; }
@@ -832,7 +853,25 @@ int main(int argc, const char *argv[]) {
         if (listener >= 0) { shutdown(listener, SHUT_RDWR); close(listener); }
         if (priorAggregate) [NSUserDefaults.standardUserDefaults setObject:priorAggregate forKey:@"FMX.aggregateSearch"];
         else [NSUserDefaults.standardUserDefaults removeObjectForKey:@"FMX.aggregateSearch"];
-        printf("%s: protocol contract tests, %lu failures\n", failures ? "FAILED" : "DONE", (unsigned long)failures);
+        if (argc == 3) {
+            NSUInteger semanticChecks = 0, integrationChecks = 0;
+            for (NSDictionary *row in checkRows) {
+                if ([row[@"scope"] isEqual:@"ranking.semantic"]) semanticChecks++;
+                if ([row[@"scope"] isEqual:@"ranking.integration"]) integrationChecks++;
+            }
+            NSDictionary *report = @{@"passed":@(failures == 0), @"failures":@(failures), @"assertions":@(checkRows.count), @"cases":[checkRows copy],
+                @"evidence":@{@"external_network_used":@NO, @"original_app_runtime_verified":@NO,
+                    @"ranking_semantic_assertions":@(semanticChecks), @"ranking_integration_assertions":@(integrationChecks),
+                    @"ranking_actual_loopback_requests":@(rankingLoopbackRequests), @"ranking_actual_qishui_stub_calls":@(rankingQishuiCalls),
+                    @"ranking_actual_session_callbacks":@(rankingSessionCallbacks), @"ranking_integration_ran":@(rankingSessionCallbacks > 0)}};
+            NSError *reportError = nil;
+            NSData *reportData = [NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:&reportError];
+            if (!reportData || ![reportData writeToFile:[NSString stringWithUTF8String:argv[2]] options:NSDataWritingAtomic error:&reportError]) {
+                failures++;
+                fprintf(stderr, "FAIL: protocol JSON report could not be saved (%s)\n", reportError.domain.UTF8String ?: "unknown");
+            }
+        }
+        printf("%s: protocol contract tests, %lu assertions, %lu failures\n", failures ? "FAILED" : "DONE", (unsigned long)checkRows.count, (unsigned long)failures);
         return failures ? 1 : 0;
     }
 }

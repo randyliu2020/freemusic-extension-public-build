@@ -1,0 +1,33 @@
+        [self test:@"v8_source_selection_survives_failed_activation_and_restart" body:^NSDictionary *{
+            __block FMXManager *manager;__block NSURL *directory;
+            Main(^{manager=[(id)NSClassFromString(@"FMXManager") shared];[manager disable];directory=manager.directory;});
+            NSString *good=@"lx.on('request',()=>Promise.resolve('https://fixture.invalid/source'));lx.send('inited',{sources:{tx:{type:'music',actions:['musicUrl'],qualitys:['128k']}}});";
+            NSString *bad=@"throw new Error('authored initialization failure');";
+            Check([good writeToURL:[directory URLByAppendingPathComponent:@"V8Saved.js"] atomically:YES encoding:NSUTF8StringEncoding error:nil],@"Write authored working source");
+            Check([bad writeToURL:[directory URLByAppendingPathComponent:@"V8Failed.js"] atomically:YES encoding:NSUTF8StringEncoding error:nil],@"Write authored failing source");
+            Main(^{[manager activate:@{@"file":@"V8Saved.js",@"name":@"V8 saved fixture"}];});
+            Check(Until(^BOOL{return manager.runtime.manifest && [manager.selectedFile isEqual:@"V8Saved.js"];},5),@"Working source activates through production manager");
+            Main(^{Check([[NSUserDefaults.standardUserDefaults stringForKey:@"FMX.selectedSource"] isEqual:@"V8Saved.js"] && ![NSUserDefaults.standardUserDefaults boolForKey:@"FMX.sourceActivationPending"],@"Successful source commits choice and removes interruption marker");[manager activate:@{@"file":@"V8Failed.js",@"name":@"V8 failed fixture"}];});
+            Check(Until(^BOOL{return !manager.runtime && [manager.status containsString:@"初始化失败"];},5),@"Actual JavaScript initialization failure is reported");
+            Main(^{Check(!manager.selectedFile && [[NSUserDefaults.standardUserDefaults stringForKey:@"FMX.selectedSource"] isEqual:@"V8Saved.js"] && [NSUserDefaults.standardUserDefaults boolForKey:@"FMX.sourceActivationPending"],@"Failure preserves old saved source without a false active checkmark");[manager restoreSavedSource];Check(!manager.runtime && [manager.status containsString:@"上次音源启用未完成"],@"Restart path avoids automatically re-evaluating an interrupted source");[manager activate:@{@"file":@"V8Saved.js",@"name":@"V8 saved fixture"}];});
+            Check(Until(^BOOL{return manager.runtime.manifest && [manager.selectedFile isEqual:@"V8Saved.js"];},5),@"Explicit source selection recovers after failure");
+            Main(^{[manager retireRuntime];Check([[NSUserDefaults.standardUserDefaults stringForKey:@"FMX.selectedSource"] isEqual:@"V8Saved.js"],@"Internal runtime retirement does not mean user disabled it");[manager restoreSavedSource];});
+            Check(Until(^BOOL{return manager.runtime.manifest && [manager.selectedFile isEqual:@"V8Saved.js"];},5),@"Normal restart path restores the durable source choice");
+            Main(^{[manager retireRuntime];});
+            Check([NSFileManager.defaultManager removeItemAtURL:[directory URLByAppendingPathComponent:@"V8Saved.js"] error:nil],@"Simulate missing source file");
+            Main(^{[manager restoreSavedSource];Check(!manager.runtime && [[NSUserDefaults.standardUserDefaults stringForKey:@"FMX.selectedSource"] isEqual:@"V8Saved.js"] && [manager.status containsString:@"文件暂不可用"],@"Missing file does not silently erase saved preference");[manager disable];Check(![NSUserDefaults.standardUserDefaults objectForKey:@"FMX.selectedSource"] && ![NSUserDefaults.standardUserDefaults objectForKey:@"FMX.sourceActivationPending"],@"Only explicit disable forgets choice and pending marker");});
+            return @{@"production_manager":@YES,@"actual_javascript_failure":@YES,@"saved_source_preserved":@YES,@"interrupted_auto_retry_blocked":@YES,@"normal_restart_restored":@YES,@"missing_file_preserved":@YES,@"explicit_disable_clears":@YES};
+        }];
+        [self test:@"v8_rapid_source_switch_commits_only_last_successful_runtime" body:^NSDictionary *{
+            __block FMXManager *manager;__block NSURL *directory;
+            Main(^{manager=[(id)NSClassFromString(@"FMXManager") shared];[manager disable];directory=manager.directory;});
+            NSString *inited=@"lx.send('inited',{sources:{tx:{type:'music',actions:['musicUrl'],qualitys:['128k']}}});";
+            NSString *slow=[@"lx.on('request',()=>Promise.resolve('https://fixture.invalid/slow'));setTimeout(()=>{" stringByAppendingFormat:@"%@},300);",inited];
+            NSString *fast=[@"lx.on('request',()=>Promise.resolve('https://fixture.invalid/fast'));" stringByAppendingString:inited];
+            Check([slow writeToURL:[directory URLByAppendingPathComponent:@"V8Slow.js"] atomically:YES encoding:NSUTF8StringEncoding error:nil] && [fast writeToURL:[directory URLByAppendingPathComponent:@"V8Fast.js"] atomically:YES encoding:NSUTF8StringEncoding error:nil],@"Write delayed and immediate authored fixtures");
+            Main(^{[manager activate:@{@"file":@"V8Slow.js",@"name":@"Slow fixture"}];[manager activate:@{@"file":@"V8Fast.js",@"name":@"Fast fixture"}];});
+            Check(Until(^BOOL{return manager.runtime.manifest && [manager.selectedFile isEqual:@"V8Fast.js"];},5),@"Last source initialization wins");
+            [NSThread sleepForTimeInterval:0.5];
+            Main(^{Check([manager.selectedFile isEqual:@"V8Fast.js"] && [[NSUserDefaults.standardUserDefaults stringForKey:@"FMX.selectedSource"] isEqual:@"V8Fast.js"] && ![NSUserDefaults.standardUserDefaults boolForKey:@"FMX.sourceActivationPending"],@"Late retired runtime cannot overwrite persisted last selection");[manager disable];});
+            return @{@"real_runtime_retirement":@YES,@"late_initialization_cannot_commit":@YES};
+        }];

@@ -15,9 +15,12 @@
 #import "FMAdaptivePlayback.h"
 #import "FMTrackMetadata.h"
 #import "FMDownloadIntegration.h"
+#import "FMPlaybackSequence.h"
+#import "FMSettingsMigration.h"
 
 static NSString *const FMXChanged = @"FMX.changed";
 static NSString *const FMXSelected = @"FMX.selectedSource";
+static NSString *const FMXActivationPending = @"FMX.sourceActivationPending";
 
 // Keep activation, UI and route selection aligned with metadata this host can supply.
 static NSArray<NSString *> *FMXRoutableQualities(NSDictionary *manifest, NSString *source) {
@@ -60,6 +63,8 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
 - (void)refreshFiles;
 - (void)activate:(NSDictionary *)file;
 - (void)disable;
+- (void)retireRuntime;
+- (void)restoreSavedSource;
 @end
 
 @implementation FMXManager
@@ -80,33 +85,58 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
     self.files = [files sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) { return [a[@"name"] localizedStandardCompare:b[@"name"]]; }];
 }
 - (void)changed { [[NSNotificationCenter defaultCenter] postNotificationName:FMXChanged object:nil]; }
-- (void)disable {
+- (void)retireRuntime {
     // Advance the native cache namespace before retiring requests. A completed
     // old request may still run its host callback after this transition.
     FMPlaybackCacheSourceTransition(FMXCacheServers(self.runtime.manifest));
     FMAdaptivePlaybackSourceTransition();
+    FMPlaybackSequenceSourceTransition();
     FMDownloadIntegrationSourceTransition();
     self.generation++;
     LXSourceRuntime *old = self.runtime; self.runtime = nil; [old invalidate];
     self.selectedFile = nil;
     self.playbackRequest = nil; self.playbackStatus = nil;
-    [[NSUserDefaults standardUserDefaults] removeObjectForKey:FMXSelected];
+}
+- (void)disable {
+    [self retireRuntime];
+    [NSUserDefaults.standardUserDefaults removeObjectForKey:FMXSelected];
+    [NSUserDefaults.standardUserDefaults removeObjectForKey:FMXActivationPending];
+    [NSUserDefaults.standardUserDefaults synchronize];
     self.status = @"未启用 JS 音源"; [self changed];
 }
+- (void)restoreSavedSource {
+    [self refreshFiles];
+    if ([NSUserDefaults.standardUserDefaults boolForKey:FMXActivationPending]) {
+        self.status = @"上次音源启用未完成，原选择已保留；请点选音源重试";
+        [self changed]; return;
+    }
+    NSString *selected = [NSUserDefaults.standardUserDefaults stringForKey:FMXSelected];
+    if (!selected.length) return;
+    for (NSDictionary *file in self.files) if ([file[@"file"] isEqual:selected]) { [self activate:file]; return; }
+    self.status = @"已保存的音源文件暂不可用，原选择已保留；请重新导入"; [self changed];
+}
 - (void)activate:(NSDictionary *)file {
-    [self disable];
     NSString *filename = file[@"file"];
-    if (![filename isKindOfClass:NSString.class] || ![filename.lastPathComponent isEqual:filename]) return;
+    if (![filename isKindOfClass:NSString.class] || !filename.length ||
+        ![filename.lastPathComponent isEqual:filename] || [filename containsString:@"\\"] ||
+        ![filename.pathExtension.lowercaseString isEqual:@"js"]) return;
     NSURL *url = [self.directory URLByAppendingPathComponent:filename];
     NSNumber *size; [url getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
     if (size.unsignedLongLongValue > 2*1024*1024) { self.status = @"文件超过 2 MB"; [self changed]; return; }
     NSString *script = [NSString stringWithContentsOfURL:url encoding:NSUTF8StringEncoding error:nil];
     NSString *bootstrap = [NSString stringWithContentsOfFile:[[NSBundle mainBundle] pathForResource:@"LXBootstrap" ofType:@"js"] encoding:NSUTF8StringEncoding error:nil];
     if (!script || !bootstrap) { self.status = @"无法读取音源文件"; [self changed]; return; }
+    // Retiring a runtime is not a user decision to forget the saved source.
+    // Persist the interruption marker before evaluating user JavaScript. A crash
+    // or timeout cannot cause the same script to loop automatically at startup.
+    [NSUserDefaults.standardUserDefaults setBool:YES forKey:FMXActivationPending];
+    if (![NSUserDefaults.standardUserDefaults synchronize]) {
+        self.status = @"无法保存音源启用状态，原选择已保留"; [self changed]; return;
+    }
+    [self retireRuntime];
     NSUInteger generation = self.generation;
     LXSourceRuntime *runtime = [[LXSourceRuntime alloc] initWithBootstrapScript:bootstrap];
     self.runtime = runtime;
-    self.selectedFile = filename;
     __weak FMXManager *weakManager = self;
     __weak LXSourceRuntime *weakRuntime = runtime;
     runtime.updateAlertHandler = ^(NSDictionary *alert) {
@@ -116,8 +146,8 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
         [manager changed];
     };
     self.status = @"正在初始化音源…"; [self changed];
-    // Clear the saved selection until initialization succeeds, so a failed import
-    // cannot repeatedly auto-run on subsequent launches.
+    // Commit selection only after initialization, without erasing the last
+    // working selection while this one is being evaluated.
     [runtime loadSource:script name:file[@"name"] timeout:12 completion:^(NSDictionary *manifest, NSError *error) {
         if (self.generation != generation || self.runtime != runtime) return;
         NSArray *sources = FMXRoutableSourceNames(manifest);
@@ -132,6 +162,10 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
             // initializing. Establish its own generation only once usable.
             FMPlaybackCacheSourceTransition(FMXCacheServers(manifest));
             [[NSUserDefaults standardUserDefaults] setObject:filename forKey:FMXSelected];
+            [NSUserDefaults.standardUserDefaults synchronize];
+            [NSUserDefaults.standardUserDefaults removeObjectForKey:FMXActivationPending];
+            [NSUserDefaults.standardUserDefaults synchronize];
+            self.selectedFile = filename;
             self.status = [NSString stringWithFormat:@"已启用 %@ · %@", file[@"name"], [sources componentsJoinedByString:@" / "]];
         }
         [self changed];
@@ -163,7 +197,7 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
     if (section == 1) return @"支持网易云、QQ 和酷狗的基础洛雪音源。酷狗 JS 使用标准音质；部分脚本需要额外歌曲信息或尚未支持的功能。仅启用你信任的脚本。";
     if (section == 2) return @"用当前封面在手机上生成轻微缩放的循环动画。系统需要时才生成；低电量或减少动态效果开启时显示静态封面。需要 iOS 26 或更高版本。";
     if (section == 4) return @"按实际听歌记录查看月度、年度偏好，只保存在本机。";
-    return @"扩展 v7。启用 JS 后，播放和下载优先尝试支持的最高音质；解析、播放或下载失败会继续尝试剩余档位。播放页的小音质标识以音频实际信息为准。换源后重新解析，已下载文件保留。";
+    return @"扩展 v8。启用 JS 后，播放和下载优先尝试支持的最高音质；失败继续尝试剩余档位。播放页的小音质标识以音频实际信息为准。换源后重新解析，已下载文件保留。";
 }
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)path {
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
@@ -182,7 +216,7 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
         if (path.row == 0) { cell.textLabel.text = @"停用 JS，使用原播放方式"; if (![FMXManager shared].runtime) cell.accessoryType = UITableViewCellAccessoryCheckmark; }
         else {
             NSDictionary *file = [FMXManager shared].files[path.row - 1]; cell.textLabel.text = file[@"name"];
-            if ([file[@"file"] isEqual:[[NSUserDefaults standardUserDefaults] stringForKey:FMXSelected]]) cell.accessoryType = UITableViewCellAccessoryCheckmark;
+            if ([file[@"file"] isEqual:[FMXManager shared].selectedFile] && [FMXManager shared].runtime.manifest) cell.accessoryType = UITableViewCellAccessoryCheckmark;
         }
     } else if (path.section == 2 && path.row == 0) {
         cell.textLabel.text = @"动态锁屏封面"; UISwitch *toggle = [UISwitch new];
@@ -210,9 +244,9 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
     if (style != UITableViewCellEditingStyleDelete || path.section != 1 || path.row < 1) return;
     FMXManager *manager = [FMXManager shared];
     NSDictionary *file = manager.files[path.row - 1]; NSString *name = file[@"file"];
-    if ([manager.selectedFile isEqual:name]) [manager disable];
     NSError *error;
     if ([[NSFileManager defaultManager] removeItemAtURL:[manager.directory URLByAppendingPathComponent:name] error:&error]) {
+        if ([manager.selectedFile isEqual:name] || [[NSUserDefaults.standardUserDefaults stringForKey:FMXSelected] isEqual:name]) [manager disable];
         [[NSUserDefaults standardUserDefaults] removeObjectForKey:[@"FMX.name." stringByAppendingString:name]];
         [self reload];
     } else [self showError:error.localizedDescription];
@@ -283,8 +317,11 @@ static void FMXPlaybackStatus(LXSourceRuntime *runtime, NSString *identifier, NS
 __attribute__((constructor)) static void FMXInitialize(void) {
     @autoreleasepool {
         if (![[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] isEqual:@"4.2.7"] || ![NSBundle.mainBundle.executablePath.lastPathComponent isEqual:@"FreeMusic"]) return;
+        NSError *settingsError=nil;
+        BOOL settingsReady=FMSettingsPrepareStandard(&settingsError);
         FMPlaybackCacheInstall();
         FMAdaptivePlaybackInstall();
+        FMPlaybackSequenceInstall();
         FMDownloadIntegrationInstall();
         [FMExtensionProtocol setTrackMetadataObserver:^(id payload){FMTrackMetadataObserveResponse(payload);}];
         // Capture must install before the host registers its original AVPlayer
@@ -328,8 +365,10 @@ __attribute__((constructor)) static void FMXInitialize(void) {
                         FMXPlaybackStatus(runtime, diagnosticID, source, @"JS 可用音质均未取得播放地址", NO);
                         FMXManager *manager = [FMXManager shared];
                         if (manager.runtime == runtime && !runtime.manifest) {
-                            [manager disable];
-                            manager.status = @"JS 音源无响应，已停用；请重新启用或更换音源";
+                            [NSUserDefaults.standardUserDefaults setBool:YES forKey:FMXActivationPending];
+                            [NSUserDefaults.standardUserDefaults synchronize];
+                            [manager retireRuntime];
+                            manager.status = @"JS 音源无响应，已暂停；原选择已保留，请重新启用或更换音源";
                             [manager changed];
                         }
                         completion(directKugou ? @{@"url":@""} : @{@"code":@502, @"msg":@"JS 音源未取得可播放地址"}, nil);
@@ -388,8 +427,12 @@ __attribute__((constructor)) static void FMXInitialize(void) {
                     [settingsController presentViewController:[[UINavigationController alloc] initWithRootViewController:panel] animated:YES completion:nil];
             });
             FMXManager *manager = [FMXManager shared]; [manager refreshFiles];
-            NSString *selected = [[NSUserDefaults standardUserDefaults] stringForKey:FMXSelected];
-            for (NSDictionary *file in manager.files) if ([file[@"file"] isEqual:selected]) { [manager activate:file]; break; }
+            if(!settingsReady) {
+                manager.status=@"设置迁移未完成，原设置已保留";
+                [manager changed];
+                return;
+            }
+            [manager restoreSavedSource];
         });
     }
 }

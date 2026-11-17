@@ -21,7 +21,7 @@ static void Check(BOOL value,NSString *name){[rows addObject:@{@"name":name,@"pa
 @end
 static NSDictionary *Read(NSUserDefaults *d,NSString *domain){return [d persistentDomainForName:domain]?:@{};}
 static NSDictionary *Legacy(void){return @{@"FMX.aggregateSearch":@NO,@"FMX.dynamicArtwork":@NO,@"FMX.listeningInsightsEnabled":@NO,
-    @"FMX.selectedSource":@"Authored-source.js",@"FMX.name.Authored-source.js":@"Authored source",
+    @"FMX.selectedSource":@"Authored-source.js",@"FMX.name.Authored-source.js":@"Authored source",@"FMX.sourceActivationPending":@NO,
     @"FMX.singleSearchPlatform":@4,@"FMX.managesSearchPlatform":@NO,
     @"searchPlatform":@4,@"playQuality":@9,@"volume":@0.45,@"accountCookie":@"AUTHORED_PRIVATE_VALUE"};}
 static NSDictionary *Journal(NSDictionary *before){
