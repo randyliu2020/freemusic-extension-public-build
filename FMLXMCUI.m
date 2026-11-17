@@ -19,7 +19,10 @@ static void FMShowImportResult(void) {
     if((FMCurrentImportResult.presentingViewController||FMCurrentImportResult.view.window)||!FMImportResults.count||UIApplication.sharedApplication.applicationState!=UIApplicationStateActive)return;
     UIWindow *window=nil;for(UIScene *scene in UIApplication.sharedApplication.connectedScenes)if(scene.activationState==UISceneActivationStateForegroundActive&&[scene isKindOfClass:UIWindowScene.class])for(UIWindow *candidate in ((UIWindowScene *)scene).windows)if(candidate.isKeyWindow)window=candidate;
     UIViewController *front=window.rootViewController;while(front.presentedViewController)front=front.presentedViewController;
-    if(!front.view.window||front.transitionCoordinator||front.isBeingDismissed){dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC/3),dispatch_get_main_queue(),^{FMShowImportResult();});return;}
+    // A local commit can finish before SwiftUI's Import alert has completed its
+    // dismissal. Never stack the result onto an alert that is about to leave,
+    // or onto another user decision. Retry from the settled library controller.
+    if(!front.view.window||front.transitionCoordinator||front.isBeingPresented||front.isBeingDismissed||[front isKindOfClass:UIAlertController.class]){dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC/3),dispatch_get_main_queue(),^{FMShowImportResult();});return;}
     NSDictionary *result=FMImportResults.firstObject;[FMImportResults removeObjectAtIndex:0];
     NSString *title=[result[@"success"] boolValue]?([result[@"replaced"] boolValue]?@"歌单已覆盖":@"歌单导入成功"):@"导入未完成";
     UIAlertController *alert=[UIAlertController alertControllerWithTitle:title message:result[@"message"] preferredStyle:UIAlertControllerStyleAlert];

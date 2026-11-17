@@ -67,7 +67,9 @@ private struct LXOriginalImportFixture: View {
                 Button("导入", action: originalImport)
             }
             .onReceive(NotificationCenter.default.publisher(for: Notification.Name("LXSmoke.import-current"))) { _ in originalImport() }
-            .onReceive(NotificationCenter.default.publisher(for: Notification.Name("LXSmoke.reopen-original"))) { _ in showImport = true }
+            .onReceive(NotificationCenter.default.publisher(for: Notification.Name("LXSmoke.reopen-original"))) { _ in
+                if generation == LXSmokeState.shared.generation { showImport = true }
+            }
             .onChange(of: importURL) { _, value in
                 // Do not persist tokens in UserDefaults or put them in diagnostics.
                 LXSmokeState.shared.snapshot["binding_nonempty"] = !value.isEmpty
@@ -77,6 +79,7 @@ private struct LXOriginalImportFixture: View {
     }
     private func originalImport() {
         let state = LXSmokeState.shared
+        guard generation == state.generation else { return }
         state.snapshot["original_import_callback_count"] = (state.snapshot["original_import_callback_count"] as? Int ?? 0) + 1
         state.snapshot["submitted_nonempty"] = !importURL.isEmpty
         state.snapshot["submitted_is_local_bridge"] = importURL.hasPrefix("https://fmx-lxmc.invalid/import/")
@@ -141,6 +144,17 @@ public func lxSmokeMakeImportFixture() -> UnsafeMutableRawPointer {
 @_cdecl("LXSmokeImportCurrent")
 @MainActor
 public func lxSmokeImportCurrent() {
+    // Invoking the shared callback through a Publisher does not invoke the
+    // system alert button's automatic UIKit dismissal. Reproduce that public
+    // transition explicitly; this remains a component command, not a tap test.
+    if let window = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
+        .flatMap(\.windows).first(where: \.isKeyWindow) {
+        var front = window.rootViewController
+        while let presented = front?.presentedViewController { front = presented }
+        if let alert = front as? UIAlertController, alert.title == "导入外部歌单" {
+            alert.dismiss(animated: true)
+        }
+    }
     NotificationCenter.default.post(name: Notification.Name("LXSmoke.import-current"), object: nil)
 }
 @_cdecl("LXSmokeReopenOriginal")
