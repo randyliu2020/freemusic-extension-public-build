@@ -161,12 +161,11 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
             // Native parsing may have filled caches while the new JS was still
             // initializing. Establish its own generation only once usable.
             FMPlaybackCacheSourceTransition(FMXCacheServers(manifest));
-            [[NSUserDefaults standardUserDefaults] setObject:filename forKey:FMXSelected];
-            [NSUserDefaults.standardUserDefaults synchronize];
-            [NSUserDefaults.standardUserDefaults removeObjectForKey:FMXActivationPending];
-            [NSUserDefaults.standardUserDefaults synchronize];
+            NSError *saveError=nil;
+            BOOL saved=FMSettingsCommitSourceSelection(NSUserDefaults.standardUserDefaults,filename,&saveError);
             self.selectedFile = filename;
-            self.status = [NSString stringWithFormat:@"已启用 %@ · %@", file[@"name"], [sources componentsJoinedByString:@" / "]];
+            self.status = saved ? [NSString stringWithFormat:@"已启用 %@ · %@", file[@"name"], [sources componentsJoinedByString:@" / "]]
+                                : saveError.localizedDescription;
         }
         [self changed];
     }];

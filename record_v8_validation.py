@@ -8,8 +8,11 @@ import sys
 SOURCES = ["FMSettingsMigration.h", "FMSettingsMigration.m", "FMSettingsMigrationTests.m",
            "FMSearchPreferences.h", "FMSearchPreferences.m", "FMSearchPreferencesTests.m",
            "FMExtensionProtocol.h", "FMExtensionProtocol.m", "FMExtensionProtocolTests.m", "intercept-contract-fixtures.json",
+           "FMPlaybackSequence.h", "FMPlaybackSequence.m", "playback_sequence_patch.py", "test_playback_sequence_patch.py",
+           "FMArtworkSelection.h", "FMArtworkSelection.m", "FMArtworkSelectionTests.m", "FMArtworkSelectionFixture.swift",
+           "artwork_selection_patch.py", "test_artwork_selection_patch.py", "test_artwork_selection_macos.sh",
            "record_v8_validation.py"]
-REPORTS = ["settings-migration-tests.json", "search-ranking-tests.json"]
+REPORTS = ["settings-migration-tests.json", "search-ranking-tests.json", "artwork-selection-tests.json"]
 
 def main():
     source = Path(__file__).resolve().parent

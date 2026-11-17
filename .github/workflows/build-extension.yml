@@ -31,6 +31,7 @@ jobs:
           python test_adaptive_playback_patch.py -v
           python test_native_format_patch.py -v
           python test_playback_sequence_patch.py -v
+          python test_artwork_selection_patch.py -v
 
   build:
     needs: instruction-tests
@@ -147,6 +148,11 @@ jobs:
           xcrun clang -fobjc-arc -fblocks -framework Foundation \
             FMListeningHistory.m FMListeningHistoryTests.m -o insights-tests
           ./insights-tests
+
+      - name: Test late artwork completion and real Swift ownership
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: bash test_artwork_selection_macos.sh "$PWD/v8-validation/artwork-selection-tests.json"
 
       - name: Test LXMC playlists and single-use local import bridge
         if: ${{ !cancelled() }}

@@ -103,6 +103,14 @@ int main(int argc,const char *argv[]) {@autoreleasepool{
 
     NSUserDefaults *reopened=[[NSUserDefaults alloc] initWithSuiteName:domain];
     Check([Read(reopened,domain)[@"FMX.selectedSource"] isEqual:@"Authored-source.js"]&&[Read(reopened,domain)[@"FMX.aggregateSearch"] isEqual:@NO]&&[Read(reopened,domain)[@"FMX.settings.schemaVersion"] isEqual:@1],@"new_defaults_instance_reads_durable_source_and_preferences");
+    [d setPersistentDomain:Legacy() forName:domain];[d setBool:YES forKey:@"FMX.sourceActivationPending"];d.syncCalls=0;d.failSyncAt=1;error=nil;
+    Check(!FMSettingsCommitSourceSelection(d,@"New-source.js",&error)&&error&&[Read(d,domain)[@"FMX.selectedSource"] isEqual:@"Authored-source.js"]&&[Read(d,domain)[@"FMX.sourceActivationPending"] boolValue],@"source_selection_sync_failure_restores_old_choice_and_retains_pending_guard");
+    d.failSyncAt=0;error=nil;
+    Check(FMSettingsCommitSourceSelection(d,@"New-source.js",&error)&&!error&&[Read(d,domain)[@"FMX.selectedSource"] isEqual:@"New-source.js"]&&!Read(d,domain)[@"FMX.sourceActivationPending"],@"successful_source_selection_commits_before_removing_pending_guard");
+    [d setPersistentDomain:Legacy() forName:domain];[d setBool:YES forKey:@"FMX.sourceActivationPending"];d.syncCalls=0;d.failSyncAt=2;error=nil;
+    Check(!FMSettingsCommitSourceSelection(d,@"New-source.js",&error)&&error&&[Read(d,domain)[@"FMX.selectedSource"] isEqual:@"New-source.js"]&&[Read(d,domain)[@"FMX.sourceActivationPending"] boolValue],@"pending_marker_sync_failure_is_reported_and_keeps_auto_launch_guard");d.failSyncAt=0;
+    [d setPersistentDomain:Legacy() forName:domain];d.failSetKey=@"FMX.selectedSource";d.failuresLeft=1;d.throwInstead=YES;error=nil;
+    Check(!FMSettingsCommitSourceSelection(d,@"New-source.js",&error)&&error&&[Read(d,domain)[@"FMX.selectedSource"] isEqual:@"Authored-source.js"]&&[Read(d,domain)[@"FMX.sourceActivationPending"] boolValue],@"source_selection_setter_exception_preserves_saved_choice");d.failSetKey=nil;d.throwInstead=NO;
     NSDictionary *report=@{@"passed":@(failures==0),@"failures":@(failures),@"cases":rows,@"evidence":@{@"real_defaults_suite":@YES,@"external_network_used":@NO,@"original_app_runtime_verified":@NO,@"injected_write_failures":@YES}};
     if(argc>1)[[NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingPrettyPrinted error:nil] writeToFile:[NSString stringWithUTF8String:argv[1]] atomically:YES];
     [d removePersistentDomainForName:domain];[d synchronize];printf("%s settings migration (%lu checks)\n",failures?"FAILED":"DONE",(unsigned long)rows.count);return failures?1:0;

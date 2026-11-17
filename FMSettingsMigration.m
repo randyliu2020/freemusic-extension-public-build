@@ -122,3 +122,33 @@ BOOL FMSettingsPrepareStandard(NSError **error){
     NSString *domain=NSBundle.mainBundle.bundleIdentifier?:NSProcessInfo.processInfo.processName;
     return FMSettingsMigrate(NSUserDefaults.standardUserDefaults,domain,error);
 }
+
+BOOL FMSettingsCommitSourceSelection(NSUserDefaults *defaults,NSString *filename,NSError **error){
+    if(error)*error=nil;
+    if(!defaults||!FMFileName(filename))return FMFail(error,12,@"音源选择格式无效，未修改保存的选择。");
+    @synchronized(defaults){
+        NSString *selected=@"FMX.selectedSource",*pending=@"FMX.sourceActivationPending";
+        id previous=[defaults objectForKey:selected];BOOL committed=NO;
+        @try {
+            [defaults setObject:filename forKey:selected];
+            if(![[defaults objectForKey:selected] isEqual:filename]||![defaults synchronize]){
+                if(previous)[defaults setObject:previous forKey:selected];else[defaults removeObjectForKey:selected];
+                [defaults setBool:YES forKey:pending];[defaults synchronize];
+                return FMFail(error,13,@"音源已启用，但选择未能保存；原选择已保留，下次请重新启用。");
+            }
+            committed=YES;
+            [defaults removeObjectForKey:pending];
+            if([defaults objectForKey:pending]||![defaults synchronize]){
+                [defaults setBool:YES forKey:pending];[defaults synchronize];
+                return FMFail(error,14,@"音源已启用，但启用状态未能保存；下次请重新启用。");
+            }
+            return YES;
+        } @catch(NSException *exception){
+            @try {
+                if(!committed){if(previous)[defaults setObject:previous forKey:selected];else[defaults removeObjectForKey:selected];}
+                [defaults setBool:YES forKey:pending];[defaults synchronize];
+            } @catch(NSException *ignored) {}
+            return FMFail(error,15,@"音源已启用，但选择保存遇到错误；下次请重新启用。");
+        }
+    }
+}
