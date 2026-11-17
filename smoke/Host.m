@@ -217,13 +217,16 @@ static UIViewController *FindVisibleController(UIViewController *root,BOOL(^pred
 }
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {self.originalRowActivations++;[tableView deselectRowAtIndexPath:indexPath animated:NO];}
 @end
-@interface SmokeSearchViewController : UIViewController @end
+@interface SmokeSearchViewController : UIViewController
+@property(nonatomic) NSUInteger didAppearCount;
+@end
 @implementation SmokeSearchViewController
 - (void)viewDidLoad {
     [super viewDidLoad];self.title=@"搜索";self.view.backgroundColor=UIColor.systemBackgroundColor;
     UILabel *label=[UILabel new];label.text=@"搜索结果：设置 / 自定义音源";label.translatesAutoresizingMaskIntoConstraints=NO;[self.view addSubview:label];
     [NSLayoutConstraint activateConstraints:@[[label.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],[label.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor]]];
 }
+- (void)viewDidAppear:(BOOL)animated {[super viewDidAppear:animated];self.didAppearCount++;}
 @end
 @interface SmokeHomeViewController : UIViewController
 @property(nonatomic,strong) UIButton *settingsButton;
@@ -231,6 +234,7 @@ static UIViewController *FindVisibleController(UIViewController *root,BOOL(^pred
 @property(nonatomic,strong) UILabel *progressLabel;
 @property(nonatomic) NSUInteger settingsActivations;
 @property(nonatomic) NSUInteger searchActivations;
+@property(nonatomic) NSUInteger didAppearCount;
 @end
 @implementation SmokeHomeViewController
 - (void)viewDidLoad {
@@ -244,7 +248,29 @@ static UIViewController *FindVisibleController(UIViewController *root,BOOL(^pred
 }
 - (void)openSettings:(id)sender {self.settingsActivations++;[self.navigationController pushViewController:[[SmokeSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped] animated:YES];}
 - (void)openSearch:(id)sender {self.searchActivations++;[self.navigationController pushViewController:[SmokeSearchViewController new] animated:YES];}
+- (void)viewDidAppear:(BOOL)animated {[super viewDidAppear:animated];self.didAppearCount++;}
 @end
+static NSDictionary *HomeSearchNavigationSnapshot(SmokeHomeViewController *home,UIWindow *window) {
+    NSCAssert(NSThread.isMainThread,@"Navigation fixture observations require main");
+    UINavigationController *navigation=home.navigationController;UIViewController *top=navigation.topViewController;
+    id<UIViewControllerTransitionCoordinator> transition=navigation.transitionCoordinator;
+    NSMutableArray *stack=NSMutableArray.array;for(UIViewController *controller in navigation.viewControllers)[stack addObject:NSStringFromClass(controller.class)];
+    return @{@"uptime":@(NSProcessInfo.processInfo.systemUptime),@"application_state":@(UIApplication.sharedApplication.applicationState),
+        @"scene_activation_state":window.windowScene?@(window.windowScene.activationState):(id)NSNull.null,@"key_window":@(window.isKeyWindow),
+        @"home_visible":@(VisibleInWindow(home.viewIfLoaded)),@"home_did_appear_count":@(home.didAppearCount),
+        @"home_moving_to_parent":@(home.isMovingToParentViewController),@"home_moving_from_parent":@(home.isMovingFromParentViewController),
+        @"search_button_hittable":@(ButtonReceivesHit(home.searchButton)),@"search_activations":@(home.searchActivations),
+        @"navigation_stack":stack,@"top_class":top?NSStringFromClass(top.class):@"",@"top_visible":@(VisibleInWindow(top.viewIfLoaded)),
+        @"search_did_appear_count":[top isKindOfClass:SmokeSearchViewController.class]?@(((SmokeSearchViewController*)top).didAppearCount):@0,
+        @"top_being_presented":@(top.isBeingPresented),@"top_being_dismissed":@(top.isBeingDismissed),
+        @"transition_present":@(transition!=nil),@"transition_animated":@(transition.isAnimated),
+        @"transition_interactive":@(transition.isInteractive),@"transition_cancelled":@(transition.isCancelled),
+        @"transition_duration":@(transition.transitionDuration),@"transition_percent_complete":@(transition.percentComplete)};
+}
+static void SaveHomeSearchNavigationEvidence(NSURL *output,NSDictionary *evidence) {
+    [[NSJSONSerialization dataWithJSONObject:evidence options:NSJSONWritingPrettyPrinted error:nil]
+        writeToURL:[output URLByAppendingPathComponent:@"home-search-navigation.json"] atomically:YES];
+}
 static NSIndexPath *FindRow(UITableViewController *panel, NSString *title) {
     for (NSInteger section=0; section<[panel numberOfSectionsInTableView:panel.tableView]; section++) {
         for (NSInteger row=0; row<[panel tableView:panel.tableView numberOfRowsInSection:section]; row++) {
@@ -841,10 +867,29 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
             return @{@"migrated_from_native_platform":@4,@"aggregate_native_decoder_platform":@3,@"original_source_restored_on_disable":@YES,@"repeat_install_preserves_opt_out":@YES,@"other_suite_untouched":@YES};
         }];
         [self test:@"home_search_and_unrelated_modal_have_no_extension_overlay" body:^NSDictionary *{
+            // Cold Simulator startup can expose a hittable view before its scene
+            // and first navigation presentation have settled. Wait for the actual
+            // foreground/lifecycle state, retaining the normal animated push.
+            NSMutableDictionary *navigationEvidence=NSMutableDictionary.dictionary;__block NSUInteger readySamples=0;
+            BOOL ready=Until(^BOOL{
+                BOOL settled=self.window.isKeyWindow && self.window.windowScene.activationState==UISceneActivationStateForegroundActive &&
+                    UIApplication.sharedApplication.applicationState==UIApplicationStateActive && self.home.didAppearCount>0 &&
+                    self.home.navigationController.topViewController==self.home && self.home.navigationController.transitionCoordinator==nil &&
+                    VisibleInWindow(self.home.viewIfLoaded) && ButtonReceivesHit(self.home.searchButton);
+                readySamples=settled?readySamples+1:0;return readySamples>=4;
+            },8);
+            Main(^{navigationEvidence[@"before_search"]=HomeSearchNavigationSnapshot(self.home,self.window);});
+            navigationEvidence[@"initial_ready"]=@(ready);navigationEvidence[@"consecutive_ready_samples"]=@(readySamples);
+            SaveHomeSearchNavigationEvidence(self.output,navigationEvidence);
+            Check(ready,@"Foreground home completes its first appearance and navigation before the search tap");
             AssertNoEntryFor(self.window,1);[self screenshot:@"home-no-overlay.png"];
-            __block BOOL tapped=NO;Main(^{tapped=TapVisibleButton(self.home.searchButton);});
+            __block BOOL tapped=NO;Main(^{tapped=TapVisibleButton(self.home.searchButton);navigationEvidence[@"after_button_action"]=HomeSearchNavigationSnapshot(self.home,self.window);});
+            navigationEvidence[@"button_received_hit"]=@(tapped);SaveHomeSearchNavigationEvidence(self.output,navigationEvidence);
             Check(tapped,@"Original home search button receives its hit without extension obstruction");
-            Check(Until(^BOOL{return [self.home.navigationController.topViewController isKindOfClass:SmokeSearchViewController.class] && self.home.searchActivations==1 && self.home.navigationController.transitionCoordinator==nil;},5),@"Original search navigation remains functional");
+            BOOL searchReady=Until(^BOOL{return [self.home.navigationController.topViewController isKindOfClass:SmokeSearchViewController.class] && self.home.searchActivations==1 && self.home.navigationController.transitionCoordinator==nil;},5);
+            Main(^{navigationEvidence[@"after_navigation_wait"]=HomeSearchNavigationSnapshot(self.home,self.window);});
+            navigationEvidence[@"search_ready"]=@(searchReady);SaveHomeSearchNavigationEvidence(self.output,navigationEvidence);
+            Check(searchReady,@"Original search navigation remains functional");
             AssertNoEntryFor(self.window,0.8);[self screenshot:@"search-no-entry.png"];
             Main(^{[self.home.navigationController popToRootViewControllerAnimated:NO];
                 UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"设置" message:@"自定义音源和音质只是提示文字，并非原设置页。" preferredStyle:UIAlertControllerStyleAlert];
@@ -852,7 +897,7 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
             Check(Until(^BOOL{return [FrontController(self.window.rootViewController) isKindOfClass:UIAlertController.class];},3),@"Unrelated modal is presented");
             AssertNoEntryFor(self.window,0.8);Main(^{[self.home dismissViewControllerAnimated:NO completion:nil];});
             Check(Until(^BOOL{return self.home.presentedViewController==nil;},3),@"Unrelated modal closes");
-            return @{@"legacy_floating_button_absent":@YES,@"original_search_callback_count":@1,@"modal_with_settings_words_rejected":@YES};
+            return @{@"legacy_floating_button_absent":@YES,@"original_search_callback_count":@1,@"modal_with_settings_words_rejected":@YES,@"navigation_evidence":navigationEvidence};
         }];
         [self test:@"settings_title_without_settings_sections_is_rejected" body:^NSDictionary *{
             Main(^{SmokeSearchViewController *impostor=[SmokeSearchViewController new];[impostor loadViewIfNeeded];impostor.title=@"设置";[self.home.navigationController pushViewController:impostor animated:NO];});
