@@ -147,12 +147,12 @@ jobs:
           python3 test_verify_interaction_result.py
 
       - name: Compile iOS device extension
-        if: ${{ !cancelled() }}
+        if: ${{ success() }}
         shell: bash
         run: bash build_extension.sh . dist
 
       - name: Test extension UI and artwork on iPhone Simulator
-        if: ${{ !cancelled() }}
+        if: ${{ success() }}
         shell: bash
         run: bash test_ios_smoke.sh . smoke-artifact
 
