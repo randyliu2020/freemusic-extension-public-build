@@ -163,6 +163,11 @@ jobs:
             FMLXMC.m FMLXMCTests.m -lz -o lxmc-tests
           ./lxmc-tests
 
+      - name: Test atomic local playlists through native request contracts
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: bash test_lxmc_local_macos.sh "$PWD/v8-validation/local-playlist-tests.json"
+
       - name: Test Mach-O packaging structure without a user IPA
         if: ${{ !cancelled() }}
         shell: bash

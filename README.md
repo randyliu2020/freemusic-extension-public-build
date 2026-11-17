@@ -1,4 +1,4 @@
-# FreeMusic 4.2.7 extension — v7 JS compatibility and adaptive downloads
+# FreeMusic 4.2.7 extension — v8 search, playback and local playlist reliability
 
 Source-only build for a user-authorized modification of FreeMusic-Folia 4.2.7.
 This repository does not contain the original application, signing identities,
@@ -7,7 +7,7 @@ provisioning profiles, cookies, third-party music scripts, or music files.
 The extension places 音源与扩展 inside the verified original Settings page and
 removes the global floating source button. Home search aggregation combines
 NetEase, Kugou, QQ and Qishui, retaining each result's real platform and ID.
-The v2 migration enables aggregation once and preserves subsequent opt-out.
+The versioned migration initializes missing preferences and preserves explicit opt-out.
 Turning aggregation off restores the saved native platform selection.
 Settings identification requires the original title and independent source and
 preference/storage section evidence. If SwiftUI does not expose those labels,
@@ -88,8 +88,41 @@ the cloud receives only extension and anonymous test source.
   as unknown. A user can disable or clear these local records.
 - The native external-playlist alert accepts gzip/plain LX .lxmc playlists through
   a file picker and a process-local, single-use parser bridge. Supported platform
-  identities are preserved. The original app still creates the playlist through
-  its normal authenticated backend; unsupported entries are disclosed before import.
+  identities are preserved. V3–V7 used the original authenticated backend;
+  V8 newly imported LXMC playlists are device-local, as described below.
+  Unsupported entries are disclosed before import.
+
+## V8 reliability additions
+
+- Aggregate Home search ranks each fetched page by title and artist relevance.
+  Exact combinations come first; live, cover and other versions retain their
+  original names and platform IDs. Pagination and per-source failure isolation
+  remain native. It does not claim to rank results which were never fetched.
+- The verified native selection-UUID commit retires old adaptive playback and
+  actual-quality probes immediately, including while the next URL is pending.
+  Existing native audio and lyric UUID guards remain. The narrow missing-cover
+  bridge clears the old URL identity and retained image using the native Swift
+  and Objective-C ownership rules, so late artwork cannot fill a coverless track.
+- Original early preload, shuffled queue and cached-player adoption remain.
+  A ready, playing current item with at most ten seconds left reconciles missing
+  next-track preload once. Successful entries are retained; an already failed
+  candidate can retry. The next button and preload use the same queue candidate.
+- New LXMC imports use device-local transactional storage and the original
+  Library playlist screens. A duplicate source offers explicit replace, copy or
+  cancel. A complete validated snapshot is committed atomically; failed writes
+  preserve the old playlist. Existing cloud playlists are not migrated, deleted
+  or automatically replaced. Local imports are not synced to other devices.
+- Extension preferences use a versioned migration with a recovery journal.
+  Explicit opt-outs, saved JS choice and unrelated native preferences survive.
+  Runtime retirement no longer erases the saved choice; only explicit disable
+  or deletion does. Failed/interrupted initialization pauses automatic retry,
+  retaining the previous choice for a deliberate retry.
+
+V8 packaging adds `--playback-sequence --artwork-selection` to the cumulative
+V7 flags. Exact-build checks, actual ARM64 instruction execution, macOS fixtures
+and an independent iPhone Simulator host verify the authored changes. Original
+IPA execution, signing validity and physical-device behavior remain separate
+checks; a successful cloud build is not reported as an iPhone test.
 
 Package v3 with `--v3-changes`. The original IPA must remain local. Local original
 binary tests check the patch sites, register/stack behavior and non-overlap;

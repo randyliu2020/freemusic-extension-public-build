@@ -1,5 +1,6 @@
 #import "FMLXMCUI.h"
 #import "FMLXMC.h"
+#import "FMLXMCLocalStore.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <objc/runtime.h>
 
@@ -10,6 +11,46 @@ static NSUInteger FMAlertsObserved, FMAlertsMatched, FMFieldsAttached, FMPickers
 // native import alert, so each list can be selected without losing the others.
 static FMLXMCImportDocument *FMRecentDocument;
 static NSTimeInterval FMRecentDocumentTime;
+static NSString *FMActiveImportSelection;
+static NSMutableArray<NSDictionary *> *FMImportResults;
+static __weak UIAlertController *FMCurrentImportResult;
+
+static void FMShowImportResult(void) {
+    if((FMCurrentImportResult.presentingViewController||FMCurrentImportResult.view.window)||!FMImportResults.count||UIApplication.sharedApplication.applicationState!=UIApplicationStateActive)return;
+    UIWindow *window=nil;for(UIScene *scene in UIApplication.sharedApplication.connectedScenes)if(scene.activationState==UISceneActivationStateForegroundActive&&[scene isKindOfClass:UIWindowScene.class])for(UIWindow *candidate in ((UIWindowScene *)scene).windows)if(candidate.isKeyWindow)window=candidate;
+    UIViewController *front=window.rootViewController;while(front.presentedViewController)front=front.presentedViewController;
+    if(!front.view.window||front.transitionCoordinator||front.isBeingDismissed){dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC/3),dispatch_get_main_queue(),^{FMShowImportResult();});return;}
+    NSDictionary *result=FMImportResults.firstObject;[FMImportResults removeObjectAtIndex:0];
+    NSString *title=[result[@"success"] boolValue]?([result[@"replaced"] boolValue]?@"歌单已覆盖":@"歌单导入成功"):@"导入未完成";
+    UIAlertController *alert=[UIAlertController alertControllerWithTitle:title message:result[@"message"] preferredStyle:UIAlertControllerStyleAlert];
+    alert.view.accessibilityIdentifier=@"FMX.LXMC.Result";
+    FMCurrentImportResult=alert;
+    [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action){FMCurrentImportResult=nil;dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC/3),dispatch_get_main_queue(),^{FMShowImportResult();});}]];
+    [front presentViewController:alert animated:YES completion:nil];
+}
+
+@interface FMLXMCDuplicateChooser : UITableViewController
+@property(nonatomic,copy) NSArray<NSDictionary *> *targets;
+@property(nonatomic) BOOL manual;
+@property(nonatomic,copy) void (^onDecision)(NSNumber *identifier,BOOL cancel);
+@end
+@implementation FMLXMCDuplicateChooser
+- (void)viewDidLoad{[super viewDidLoad];self.title=self.manual?@"选择导入方式":@"歌单已存在";self.tableView.accessibilityIdentifier=@"FMX.LXMC.DuplicateChoices";self.navigationItem.leftBarButtonItem=[[UIBarButtonItem alloc]initWithBarButtonSystemItem:UIBarButtonSystemItemCancel target:self action:@selector(cancel)];}
+- (void)cancel{void(^decision)(NSNumber *,BOOL)=self.onDecision;[self dismissViewControllerAnimated:YES completion:^{if(decision)decision(nil,YES);}];}
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView{return 2;}
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section{return section?2:self.targets.count;}
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section{return section?nil:@"覆盖所选本机歌单";}
+- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section{return section?@"仅在这部手机保存。已有云端歌单不改变，也不会自动迁移。":(self.manual?@"文件没有可靠来源标识，无法自动确认同一歌单。只有你明确选择的本机歌单才会覆盖。":@"检测到相同来源或相同内容。覆盖会替换歌曲列表；保存失败时保留原歌单。");}
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)path{
+    UITableViewCell *cell=[[UITableViewCell alloc]initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];cell.textLabel.numberOfLines=2;
+    if(!path.section){NSDictionary *target=self.targets[path.row];cell.textLabel.text=[NSString stringWithFormat:@"覆盖“%@”",target[@"title"]];cell.detailTextLabel.text=[NSString stringWithFormat:@"%@ 首 · 本机歌单",target[@"count"]];cell.accessibilityIdentifier=[NSString stringWithFormat:@"FMX.LXMC.Replace.%ld",(long)path.row];}
+    else{cell.textLabel.text=path.row?@"取消":@"另存为新歌单";cell.accessibilityIdentifier=path.row?@"FMX.LXMC.Cancel":@"FMX.LXMC.SaveCopy";}return cell;
+}
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)path{
+    [tableView deselectRowAtIndexPath:path animated:YES];NSNumber *identifier=path.section?nil:self.targets[path.row][@"id"];BOOL cancelled=path.section&&path.row==1;void(^decision)(NSNumber *,BOOL)=self.onDecision;
+    [self dismissViewControllerAnimated:YES completion:^{if(decision)decision(identifier,cancelled);}];
+}
+@end
 
 @interface FMLXMCChooser : UITableViewController
 @property(nonatomic, strong) FMLXMCImportDocument *document;
@@ -26,7 +67,7 @@ static NSTimeInterval FMRecentDocumentTime;
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 2; }
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return section == 0 ? self.document.playlists.count : 1; }
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    return section == 0 ? @"一次新建一个歌单，不覆盖已有收藏。多个歌单可再次打开原导入入口逐一选择；保存仍使用原 App 的登录状态。" : nil;
+    return section == 0 ? @"一次导入一个歌单，保存在这部手机。重复导入可选择覆盖、另存或取消；云端歌单不改变。多个歌单可再次打开此入口逐一选择。" : nil;
 }
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
@@ -123,7 +164,8 @@ static NSTimeInterval FMRecentDocumentTime;
 }
 - (void)clearSelectionForEditing {
     if (!self.bridgeURL) return;
-    FMLXMCRevokeURL(self.bridgeURL); self.bridgeURL = nil;
+    if([FMActiveImportSelection isEqual:self.bridgeURL])FMActiveImportSelection=nil;
+    [FMLXMCLocalStore.sharedStore revokeImportURL:self.bridgeURL]; self.bridgeURL = nil;
     self.field.textColor = self.originalTextColor; self.field.tintColor = self.originalTintColor;
     [self.displayLabel removeFromSuperview]; self.displayLabel = nil;
     self.field.accessibilityValue = nil; self.field.text = @"";
@@ -132,10 +174,22 @@ static NSTimeInterval FMRecentDocumentTime;
 }
 - (void)fillPlaylist:(FMLXMCPlaylist *)playlist {
     if (!self.alert.view.window || self.alert.presentedViewController) return;
+    NSArray *targets=[FMLXMCLocalStore.sharedStore matchesForPlaylist:playlist];
+    BOOL manual=!playlist.sourceIdentity&&!targets.count;
+    if(manual)targets=FMLXMCLocalStore.sharedStore.nativePlaylists;
+    if(!targets.count){[self preparePlaylist:playlist replacing:nil];return;}
+    FMLXMCDuplicateChooser *chooser=[[FMLXMCDuplicateChooser alloc]initWithStyle:UITableViewStyleInsetGrouped];chooser.targets=targets;chooser.manual=manual;
+    __weak typeof(self) weak=self;chooser.onDecision=^(NSNumber *identifier,BOOL cancel){if(cancel){[weak clearSelectionForEditing];return;}[weak preparePlaylist:playlist replacing:identifier];};
+    UINavigationController *navigation=[[UINavigationController alloc]initWithRootViewController:chooser];navigation.modalPresentationStyle=UIModalPresentationFullScreen;[self.alert presentViewController:navigation animated:YES completion:nil];
+}
+- (void)preparePlaylist:(FMLXMCPlaylist *)playlist replacing:(NSNumber *)identifier {
+    if (!self.alert.view.window || self.alert.presentedViewController) return;
+    [FMLXMCLocalStore.sharedStore revokeImportURL:self.bridgeURL];self.bridgeURL=nil;
     NSError *error = nil;
-    NSString *bridge = FMLXMCRegisterPlaylist(playlist, &error);
+    NSString *bridge = [FMLXMCLocalStore.sharedStore preparePlaylist:playlist replacing:identifier error:&error];
     if (!bridge) { [self showError:error]; return; }
-    FMLXMCRevokeURL(self.bridgeURL); self.bridgeURL = bridge;
+    self.bridgeURL = bridge;
+    FMActiveImportSelection=bridge;
     UITextField *field = self.field;
     [field resignFirstResponder];
     field.text = bridge;
@@ -162,7 +216,7 @@ static NSTimeInterval FMRecentDocumentTime;
         [details addObject:[NSString stringWithFormat:@"%@暂不支持 %@ 首", names[source] ?: source, playlist.unsupportedSources[source]]];
     }
     NSString *skipped = details.count ? [@"\n跳过：" stringByAppendingString:[details componentsJoinedByString:@"；"]] : @"";
-    self.alert.message = [NSString stringWithFormat:@"%@\n准备导入 %lu 首%@\n点击原“导入”按钮新建歌单，不覆盖已有收藏。", playlist.title, (unsigned long)playlist.tracks.count, skipped];
+    self.alert.message = [NSString stringWithFormat:@"%@\n准备导入 %lu 首%@\n%@\n仅保存在这部手机，已有云端歌单不改变。", playlist.title, (unsigned long)playlist.tracks.count, skipped,identifier?@"点击“导入”覆盖所选本机歌单；失败时保留原内容。":@"点击“导入”另存为本机歌单。"];
     [field sendActionsForControlEvents:UIControlEventEditingChanged];
     FMSelectionsFilled++;
 }
@@ -174,6 +228,10 @@ static void FMAttach(UIAlertController *alert) {
         ![alert.title isEqualToString:@"导入外部歌单"] || alert.textFields.count != 1) return;
     UITextField *field = alert.textFields.firstObject;
     if (![field.placeholder isEqualToString:@"支持QQ音乐/网易云/酷狗歌单的URL"]) return;
+    // The original Cancel action must remain intact. When its alert is reopened,
+    // retire a selection that was never submitted; an in-flight native import is
+    // not revoked when SwiftUI destroys the old alert after pressing Import.
+    [FMLXMCLocalStore.sharedStore revokeImportURL:FMActiveImportSelection];FMActiveImportSelection=nil;
     FMAlertsMatched++;
     if (field.rightView) return; // Do not replace original controls.
     FMLXMCAlertSession *session = [FMLXMCAlertSession new];
@@ -199,6 +257,9 @@ void FMLXMCUIInstall(void) {
     NSCAssert(NSThread.isMainThread, @"Install LXMC UI on main thread");
     static dispatch_once_t once;
     dispatch_once(&once, ^{
+        FMImportResults=[NSMutableArray array];
+        [NSNotificationCenter.defaultCenter addObserverForName:FMLXMCLocalImportDidFinish object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note){if(FMImportResults.count<16)[FMImportResults addObject:note.userInfo];dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC/3),dispatch_get_main_queue(),^{FMShowImportResult();});}];
+        [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note){FMShowImportResult();}];
         SEL selector = @selector(viewWillAppear:);
         Method original = class_getInstanceMethod(UIAlertController.class, selector);
         FMOriginalAlertWillAppear = method_getImplementation(original);

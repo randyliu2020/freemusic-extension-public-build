@@ -28,6 +28,18 @@
             Main(^{[manager activate:@{@"file":@"V8Slow.js",@"name":@"Slow fixture"}];[manager activate:@{@"file":@"V8Fast.js",@"name":@"Fast fixture"}];});
             Check(Until(^BOOL{return manager.runtime.manifest && [manager.selectedFile isEqual:@"V8Fast.js"];},5),@"Last source initialization wins");
             [NSThread sleepForTimeInterval:0.5];
-            Main(^{Check([manager.selectedFile isEqual:@"V8Fast.js"] && [[NSUserDefaults.standardUserDefaults stringForKey:@"FMX.selectedSource"] isEqual:@"V8Fast.js"] && ![NSUserDefaults.standardUserDefaults boolForKey:@"FMX.sourceActivationPending"],@"Late retired runtime cannot overwrite persisted last selection");[manager disable];});
-            return @{@"real_runtime_retirement":@YES,@"late_initialization_cannot_commit":@YES};
+            Main(^{
+                Check([manager.selectedFile isEqual:@"V8Fast.js"] && [[NSUserDefaults.standardUserDefaults stringForKey:@"FMX.selectedSource"] isEqual:@"V8Fast.js"] && ![NSUserDefaults.standardUserDefaults boolForKey:@"FMX.sourceActivationPending"],@"Late retired runtime cannot overwrite persisted last selection");
+                [manager activate:@{@"file":@"V8Slow.js",@"name":@"Slow fixture"}];
+                Check([manager.loadingFile isEqual:@"V8Slow.js"] && !manager.selectedFile,@"Initializing source is tracked separately from active checkmark");
+                [manager refreshFiles];
+                NSUInteger index=[manager.files indexOfObjectPassingTest:^BOOL(NSDictionary *file,NSUInteger idx,BOOL *stop){return [file[@"file"] isEqual:@"V8Slow.js"];}];
+                Check(index!=NSNotFound,@"Pending source exists in production source list");
+                UITableViewController *panel=[[(id)NSClassFromString(@"FMXPanel") alloc] initWithStyle:UITableViewStyleInsetGrouped];
+                [(id)panel tableView:panel.tableView commitEditingStyle:UITableViewCellEditingStyleDelete forRowAtIndexPath:[NSIndexPath indexPathForRow:index+1 inSection:1]];
+                Check(!manager.runtime&&!manager.loadingFile&&!manager.selectedFile,@"Deleting an initializing source retires it immediately");
+            });
+            [NSThread sleepForTimeInterval:0.5];
+            Main(^{Check(!manager.runtime && [[NSUserDefaults.standardUserDefaults stringForKey:@"FMX.selectedSource"] isEqual:@"V8Fast.js"] && [NSUserDefaults.standardUserDefaults boolForKey:@"FMX.sourceActivationPending"] && ![NSFileManager.defaultManager fileExistsAtPath:[directory URLByAppendingPathComponent:@"V8Slow.js"].path],@"Deleting pending source prevents late activation and preserves the different last working choice");[manager disable];});
+            return @{@"real_runtime_retirement":@YES,@"late_initialization_cannot_commit":@YES,@"deleting_initializing_source_cancels_runtime":@YES,@"deleting_pending_preserves_previous_choice":@YES};
         }];

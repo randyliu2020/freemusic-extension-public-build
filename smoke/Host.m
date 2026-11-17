@@ -18,8 +18,11 @@
 @property(atomic,copy) NSString *playbackStatus;
 @property(nonatomic,copy) NSString *playbackRequest;
 @property(nonatomic,copy) NSString *selectedFile;
+@property(nonatomic,copy) NSString *loadingFile;
+@property(nonatomic,copy) NSArray<NSDictionary *> *files;
 + (instancetype)shared;
 - (NSURL *)directory;
+- (void)refreshFiles;
 - (void)activate:(NSDictionary *)file;
 - (void)disable;
 - (void)retireRuntime;
@@ -1036,7 +1039,11 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
             void (*submit)(void)=(void(*)(void))dlsym(self.swiftUIFixtureHandle,"LXSmokeImportCurrent");
             Check(factory&&copyState&&submit,@"Authored SwiftUI LXMC fixture exports");
             __block UIViewController *oldRoot,*host;__block UIAlertController *alert;__block UIDocumentPickerViewController *picker;__block NSDictionary *state;
-            InstallSearchFixtureTransport();SmokeSearchResponse=nil;
+            InstallSearchFixtureTransport();SmokeSearchResponse=^NSDictionary *(NSURLRequest *request){
+                NSDictionary *query=SmokeQuery(request);
+                if([request.URL.host isEqual:@"aacert.com"] && [request.URL.path isEqual:@"/ms/api.php"] && [query[@"action"] isEqual:@"playlist_list"])return @{@"code":@200,@"data":@[]};
+                return nil;
+            };
             @try {
                 Main(^{oldRoot=self.window.rootViewController;host=CFBridgingRelease(factory());self.window.rootViewController=host;[self.window makeKeyAndVisible];});
                 Check(Until(^BOOL{UIViewController *front=FrontController(host);if([front isKindOfClass:UIAlertController.class])alert=(id)front;return alert && [alert.textFields.firstObject.rightView.accessibilityIdentifier isEqual:@"FMX.LXMC.SelectFile"];},8),@"Real SwiftUI alert exposes native LXMC accessory");
@@ -1055,11 +1062,20 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
                 Main(^{submit();});
                 Check(Until(^BOOL{state=CFBridgingRelease(copyState());return [state[@"completed"] boolValue];},8),@"Original import View callback submits through NSURLSession");
                 Check([state[@"response_code"] integerValue]==200&&[state[@"native_tracks_count"] integerValue]==2&&[state[@"expected_fixture_title"] boolValue]&&[state[@"native_servers"] isEqual:@[@"wy",@"qq"]],@"Production bridge returns native title and track identity contract");
-                Check(SmokeSearchRequests.count==0,@"No token or fixture import reaches any remote transport");
+                Check([state[@"swift_codable_native_chain"] boolValue] && [state[@"native_record_ids_valid"] boolValue] && [state[@"negative_id_swiftui_list"] boolValue] && [state[@"library_contains_saved_id"] boolValue],@"Native Swift Codable import/create/bulk/list/get chain persists a playlist visible to its SwiftUI list");
+                @synchronized(SmokeSearchTransport.class){
+                    Check(SmokeSearchRequests.count==1,@"Only the cloud library list reaches the authored transport");
+                    NSURLRequest *listed=[NSURLRequest requestWithURL:[NSURL URLWithString:SmokeSearchRequests.firstObject[@"url"]]];
+                    Check([SmokeQuery(listed)[@"action"] isEqual:@"playlist_list"],@"Import, create, bulk and local tracks never reach remote transport");
+                }
+                __block UIAlertController *resultAlert;
+                Check(Until(^BOOL{UIViewController *front=FrontController(host);if([front isKindOfClass:UIAlertController.class] && [front.view.accessibilityIdentifier isEqual:@"FMX.LXMC.Result"])resultAlert=(id)front;return resultAlert && resultAlert.transitionCoordinator==nil;},5),@"Successful atomic import presents its production result notice");
+                Main(^{[resultAlert dismissViewControllerAnimated:NO completion:nil];});
                 [[NSJSONSerialization dataWithJSONObject:state options:NSJSONWritingPrettyPrinted error:nil] writeToURL:[self.output URLByAppendingPathComponent:@"lxmc-import.json"] atomically:YES];
             } @finally {RestoreSearchFixtureTransport();Main(^{if(host.presentedViewController)[host dismissViewControllerAnimated:NO completion:nil];self.window.rootViewController=oldRoot;[self.window makeKeyAndVisible];});}
-            return @{@"real_swiftui_alert":@YES,@"file_choice_simulated_through_public_delegate":@YES,@"swiftui_binding_observed":@YES,@"native_response_contract":@YES,@"external_network_used":@NO,@"backend_playlist_created":@NO,@"ui_tap_validated":@NO};
+            return @{@"real_swiftui_alert":@YES,@"file_choice_simulated_through_public_delegate":@YES,@"swiftui_binding_observed":@YES,@"native_response_contract":@YES,@"swift_codable_native_chain":@YES,@"persisted_playlist_visible":@YES,@"negative_playlist_and_record_ids":@YES,@"production_result_notice":@YES,@"external_network_used":@NO,@"backend_playlist_created":@NO,@"ui_tap_validated":@NO};
         }];
+#include "V8LXMCImportTests.inc"
         [self test:@"manager_loads_self_authored_LX_fixture" body:^NSDictionary *{
             __block FMXManager *manager; __block NSURL *directory;Main(^{manager=[(id)NSClassFromString(@"FMXManager") shared];directory=[manager directory];});
             NSString *source=@"/* @name Smoke fixture */\nconst {on,send,EVENT_NAMES}=lx;on(EVENT_NAMES.request,({source,action,info})=>{if(action!=='musicUrl'||info.musicInfo.src_cookie||info.musicInfo.cookie)return Promise.reject(Error('fixture contract'));const id=source==='kg'?info.musicInfo.hash:info.musicInfo.songmid;if(id==='fixture-pending'){setTimeout(()=>{},60000);return new Promise(()=>{});}return Promise.resolve('https://fixture.invalid/'+source+'/'+id+'/'+info.type)});send(EVENT_NAMES.inited,{sources:{wy:{type:'music',actions:['musicUrl'],qualitys:['128k']},tx:{type:'music',actions:['musicUrl'],qualitys:['128k']},kg:{type:'music',actions:['musicUrl'],qualitys:['128k']}}});";

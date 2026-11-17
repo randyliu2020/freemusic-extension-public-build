@@ -275,9 +275,14 @@ static NSArray *FMXProtocolClasses(id self, SEL selector) {
         @try { classes = ((NSArray *(*)(id, SEL))original)(self, selector) ?: @[]; }
         @finally { FMXActiveGetterObject = savedObject; FMXActiveGetterClass = savedClass; }
     }
-    if ([classes containsObject:FMExtensionProtocol.class]) return classes;
     NSMutableArray *result = [classes mutableCopy];
+    [result removeObject:FMExtensionProtocol.class];
     [result insertObject:FMExtensionProtocol.class atIndex:0];
+    Class localPlaylists = NSClassFromString(@"FMLXMCLocalProtocol");
+    if (localPlaylists) {
+        [result removeObject:localPlaylists];
+        [result insertObject:localPlaylists atIndex:0];
+    }
     return result;
 }
 

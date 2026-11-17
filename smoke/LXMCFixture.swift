@@ -3,6 +3,22 @@
 import SwiftUI
 import UIKit
 
+// Field types verified against the host's Codable metadata. These declarations
+// are authored fixtures, not copied original source or original-app execution.
+private struct LXEnvelope<T: Decodable>: Decodable { let code: Int; let data: T? }
+private struct LXNativeTrack: Decodable {
+    let id: String; let title: String; let server: String
+    let singer: String?; let artist: String?; let cover: String?; let album: String?
+    let duration: Double?; let song_id: String?; let platform: Int?; let record_id: Int?
+    let singer_ids: [String]?
+    var bulkFields: [String: String] { ["id": id, "title": title, "server": server, "singer": singer ?? artist ?? "Unknown Artist", "cover": cover ?? ""] }
+}
+private struct LXImported: Decodable { let title: String; let tracks: [LXNativeTrack] }
+private struct LXCreated: Decodable { let id: Int }
+private struct LXNativePlaylist: Decodable, Identifiable {
+    let id: Int; let title: String; let user_id: Int; let count: Int?
+}
+
 private final class LXSmokeState {
     static let shared = LXSmokeState()
     var snapshot: [String: Any] = [:]
@@ -12,11 +28,18 @@ private final class LXSmokeState {
 private struct LXOriginalImportFixture: View {
     @State private var showImport = true
     @State private var importURL = ""
+    @State private var playlists: [LXNativePlaylist] = []
     var body: some View {
         NavigationStack {
             VStack(spacing: 18) {
                 Text("Independent playlist import fixture")
                 Button("导入外部歌单") { showImport = true }
+                List(playlists) { playlist in
+                    NavigationLink(playlist.title) {
+                        Text("Native playlist \(playlist.id): \(playlist.count ?? 0) tracks")
+                    }
+                    .accessibilityIdentifier("LXFixture.Library.\(playlist.id)")
+                }
             }
             .navigationTitle("资料库")
             .alert("导入外部歌单", isPresented: $showImport) {
@@ -39,28 +62,53 @@ private struct LXOriginalImportFixture: View {
         state.snapshot["submitted_nonempty"] = !importURL.isEmpty
         state.snapshot["submitted_is_local_bridge"] = importURL.hasPrefix("https://fmx-lxmc.invalid/import/")
         showImport = false
-        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")
-        var request = URLRequest(url: URL(string: "https://aacert.com/ms/api.php?action=import_playlist&_t=123")!, timeoutInterval: 6)
-        request.httpMethod = "POST"
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.httpBody = "url=\(importURL.addingPercentEncoding(withAllowedCharacters: allowed) ?? "")".data(using: .utf8)
+        let selectedURL = importURL
         let session = URLSession(configuration: .default)
-        session.dataTask(with: request) { data, _, error in
-            let value = data.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
-            DispatchQueue.main.async {
-                state.snapshot["completed"] = true
-                state.snapshot["error_code"] = (error as NSError?)?.code ?? 0
-                state.snapshot["response_code"] = value?["code"] as? Int ?? 0
-                let payload = value?["data"] as? [String: Any]
-                let tracks = payload?["tracks"] as? [[String: Any]] ?? []
-                state.snapshot["native_tracks_count"] = tracks.count
-                state.snapshot["native_servers"] = tracks.compactMap { $0["server"] as? String }
-                // Fixture title is authored, but output only equality to avoid
-                // making this helper accidentally log a selected real file.
-                state.snapshot["expected_fixture_title"] = payload?["title"] as? String == "LX Smoke Playlist"
+        state.snapshot["completed"] = false
+        Task { @MainActor in
+            defer { state.snapshot["completed"] = true; session.finishTasksAndInvalidate() }
+            do {
+                let parsed: LXImported = try await nativeRequest(session, action: "import_playlist", fields: ["url": selectedURL])
+                state.snapshot["native_tracks_count"] = parsed.tracks.count
+                state.snapshot["native_servers"] = parsed.tracks.map(\.server)
+                if parsed.title.hasPrefix("FMX-LXMC-LOCAL:") {
+                    // The same native save chain, with no replacement UI model:
+                    // imported payload -> create ID -> bulk songs -> published list.
+                    let created: LXCreated = try await nativeRequest(session, action: "playlist_create", fields: ["token": "authored-fixture", "title": parsed.title])
+                    let bulk = try JSONSerialization.data(withJSONObject: parsed.tracks.map(\.bulkFields))
+                    let _: Bool = try await nativeRequest(session, action: "playlist_add_tracks_bulk", fields: ["token": "authored-fixture", "playlist_id": String(created.id), "tracks": String(decoding: bulk, as: UTF8.self)])
+                    let listed: [LXNativePlaylist] = try await nativeRequest(session, action: "playlist_list", fields: ["token": "authored-fixture"], get: true)
+                    playlists = listed
+                    let saved: [LXNativeTrack] = try await nativeRequest(session, action: "playlist_get_tracks", fields: ["token": "authored-fixture", "playlist_id": String(created.id)], get: true)
+                    state.snapshot["native_playlist_id"] = created.id
+                    state.snapshot["library_playlist_count"] = listed.count
+                    state.snapshot["library_contains_saved_id"] = listed.contains { $0.id == created.id }
+                    state.snapshot["expected_fixture_title"] = listed.contains { $0.id == created.id && $0.title == "LX Smoke Playlist" }
+                    state.snapshot["native_record_ids_valid"] = !saved.isEmpty && saved.allSatisfy { ($0.record_id ?? 0) <= -1_000_000_000 }
+                    state.snapshot["saved_track_ids"] = saved.map(\.id)
+                    state.snapshot["swift_codable_native_chain"] = true
+                    state.snapshot["negative_id_swiftui_list"] = created.id < 0 && listed.contains { $0.id == created.id }
+                    state.snapshot["native_tracks_count"] = saved.count
+                } else { state.snapshot["expected_fixture_title"] = parsed.title == "LX Smoke Playlist" }
+                state.snapshot["response_code"] = 200
+                state.snapshot["error_code"] = 0
+                importURL = ""
+            } catch {
+                state.snapshot["error_code"] = (error as NSError).code
+                state.snapshot["response_code"] = 500
             }
-            session.finishTasksAndInvalidate()
-        }.resume()
+        }
+    }
+    private func nativeRequest<T: Decodable>(_ session: URLSession, action: String, fields: [String: String], get: Bool = false) async throws -> T {
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")
+        let form = fields.keys.sorted().map { "\($0.addingPercentEncoding(withAllowedCharacters: allowed)!)=\(fields[$0]!.addingPercentEncoding(withAllowedCharacters: allowed)!)" }.joined(separator: "&")
+        var request = URLRequest(url: URL(string: "https://aacert.com/ms/api.php?action=\(action)" + (get ? "&\(form)" : ""))!, timeoutInterval: 6)
+        request.httpMethod = get ? "GET" : "POST"
+        if !get { request.httpBody = form.data(using: .utf8); request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type") }
+        let (data, _) = try await session.data(for: request)
+        let envelope = try JSONDecoder().decode(LXEnvelope<T>.self, from: data)
+        guard envelope.code == 200, let result = envelope.data else { throw NSError(domain: "Authored.NativePlaylist", code: envelope.code) }
+        return result
     }
 }
 

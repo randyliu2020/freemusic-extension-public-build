@@ -13,6 +13,7 @@ mkdir -p "$output_dir"
 output_dir="$(cd "$output_dir" && pwd -P)"
 sources=("$source_dir/FMExtension.m" "$source_dir/LXSourceRuntime.m" "$source_dir/FMExtensionProtocol.m" "$source_dir/FMLockScreen.m" "$source_dir/FMSettingsEntry.m" "$source_dir/FMSearchPreferences.m" "$source_dir/FMQishuiSearch.m" "$source_dir/FMListeningHistory.m" "$source_dir/FMInsights.m" "$source_dir/FMInteraction.m" "$source_dir/FMLXMC.m")
 sources+=("$source_dir/FMLXMCUI.m" "$source_dir/FMNavigation.m" "$source_dir/FMListeningCapture.m")
+sources+=("$source_dir/FMLXMCLocalStore.m" "$source_dir/FMLXMCLocalProtocol.m")
 sources+=("$source_dir/FMPlaybackCache.m")
 for source_file in "${sources[@]}" "$source_dir/LXBootstrap.js"; do
   if [[ ! -f "$source_file" ]]; then
@@ -67,7 +68,7 @@ for name in ["FMNavigation.m", "FMNavigation.h", "FMListeningCapture.m", "FMList
     manifest["source_sha256"][name] = hashlib.sha256((source_dir / name).read_bytes()).hexdigest()
 for name in ["FMTrackMetadata.m", "FMTrackMetadata.h", "FMJSDownloadCoordinator.m", "FMJSDownloadCoordinator.h", "FMDownloadIntegration.m", "FMDownloadIntegration.h"]:
     manifest["source_sha256"][name] = hashlib.sha256((source_dir / name).read_bytes()).hexdigest()
-for name in ["FMSettingsMigration.m", "FMSettingsMigration.h", "FMPlaybackSequence.m", "FMPlaybackSequence.h", "FMArtworkSelection.h", "FMArtworkSelection.m"]:
+for name in ["FMSettingsMigration.m", "FMSettingsMigration.h", "FMPlaybackSequence.m", "FMPlaybackSequence.h", "FMArtworkSelection.h", "FMArtworkSelection.m", "FMLXMCLocalStore.h", "FMLXMCLocalStore.m", "FMLXMCLocalProtocol.h", "FMLXMCLocalProtocol.m"]:
     manifest["source_sha256"][name] = hashlib.sha256((source_dir / name).read_bytes()).hexdigest()
 (output_dir / "build-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 print("DONE " + str(output_dir / "FMExtension.dylib"))

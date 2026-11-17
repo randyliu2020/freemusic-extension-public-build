@@ -11,8 +11,11 @@ SOURCES = ["FMSettingsMigration.h", "FMSettingsMigration.m", "FMSettingsMigratio
            "FMPlaybackSequence.h", "FMPlaybackSequence.m", "playback_sequence_patch.py", "test_playback_sequence_patch.py",
            "FMArtworkSelection.h", "FMArtworkSelection.m", "FMArtworkSelectionTests.m", "FMArtworkSelectionFixture.swift",
            "artwork_selection_patch.py", "test_artwork_selection_patch.py", "test_artwork_selection_macos.sh",
+           "FMLXMC.h", "FMLXMC.m", "FMLXMCUI.h", "FMLXMCUI.m", "FMLXMCTests.m",
+           "FMLXMCLocalStore.h", "FMLXMCLocalStore.m", "FMLXMCLocalProtocol.h", "FMLXMCLocalProtocol.m",
+           "FMLXMCLocalTests.m", "test_lxmc_local_macos.sh", "smoke/LXMCFixture.swift", "smoke/V8LXMCImportTests.inc",
            "record_v8_validation.py"]
-REPORTS = ["settings-migration-tests.json", "search-ranking-tests.json", "artwork-selection-tests.json"]
+REPORTS = ["settings-migration-tests.json", "search-ranking-tests.json", "artwork-selection-tests.json", "local-playlist-tests.json"]
 
 def main():
     source = Path(__file__).resolve().parent

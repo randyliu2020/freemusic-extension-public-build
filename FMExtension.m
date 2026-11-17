@@ -57,6 +57,7 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
 @property (nonatomic, copy) NSString *playbackRequest;
 @property (nonatomic, copy) NSArray<NSDictionary *> *files;
 @property (nonatomic, copy) NSString *selectedFile;
+@property (nonatomic, copy) NSString *loadingFile;
 @property (nonatomic) NSUInteger generation;
 + (instancetype)shared;
 - (NSURL *)directory;
@@ -95,6 +96,7 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
     self.generation++;
     LXSourceRuntime *old = self.runtime; self.runtime = nil; [old invalidate];
     self.selectedFile = nil;
+    self.loadingFile = nil;
     self.playbackRequest = nil; self.playbackStatus = nil;
 }
 - (void)disable {
@@ -137,6 +139,7 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
     NSUInteger generation = self.generation;
     LXSourceRuntime *runtime = [[LXSourceRuntime alloc] initWithBootstrapScript:bootstrap];
     self.runtime = runtime;
+    self.loadingFile = filename;
     __weak FMXManager *weakManager = self;
     __weak LXSourceRuntime *weakRuntime = runtime;
     runtime.updateAlertHandler = ^(NSDictionary *alert) {
@@ -150,6 +153,7 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
     // working selection while this one is being evaluated.
     [runtime loadSource:script name:file[@"name"] timeout:12 completion:^(NSDictionary *manifest, NSError *error) {
         if (self.generation != generation || self.runtime != runtime) return;
+        self.loadingFile = nil;
         NSArray *sources = FMXRoutableSourceNames(manifest);
         if (error || !sources.count) {
             self.runtime = nil; self.selectedFile = nil; [runtime invalidate];
@@ -245,7 +249,21 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
     NSDictionary *file = manager.files[path.row - 1]; NSString *name = file[@"file"];
     NSError *error;
     if ([[NSFileManager defaultManager] removeItemAtURL:[manager.directory URLByAppendingPathComponent:name] error:&error]) {
-        if ([manager.selectedFile isEqual:name] || [[NSUserDefaults.standardUserDefaults stringForKey:FMXSelected] isEqual:name]) [manager disable];
+        BOOL retired=[manager.selectedFile isEqual:name] || [manager.loadingFile isEqual:name];
+        if (retired) [manager retireRuntime];
+        if ([[NSUserDefaults.standardUserDefaults stringForKey:FMXSelected] isEqual:name]) {
+            [NSUserDefaults.standardUserDefaults removeObjectForKey:FMXSelected];
+            if (!manager.runtime) [NSUserDefaults.standardUserDefaults removeObjectForKey:FMXActivationPending];
+            [NSUserDefaults.standardUserDefaults synchronize];
+        }
+        if (retired) {
+            // Deleting an uncommitted source must not forget a different last
+            // working choice. Keep its interruption guard for deliberate retry.
+            BOOL saved=[NSUserDefaults.standardUserDefaults stringForKey:FMXSelected].length>0;
+            if (!saved) { [NSUserDefaults.standardUserDefaults removeObjectForKey:FMXActivationPending]; [NSUserDefaults.standardUserDefaults synchronize]; }
+            manager.status=saved?@"音源已删除，原选择已保留；请重新选择音源":@"未启用 JS 音源";
+            [manager changed];
+        }
         [[NSUserDefaults standardUserDefaults] removeObjectForKey:[@"FMX.name." stringByAppendingString:name]];
         [self reload];
     } else [self showError:error.localizedDescription];
