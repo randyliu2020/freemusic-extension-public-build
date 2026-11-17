@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+dist/
+*.ipa
+*.dylib
+smoke-artifact/
+v7-validation/
+v8-validation/

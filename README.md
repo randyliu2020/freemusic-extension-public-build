@@ -124,6 +124,33 @@ and an independent iPhone Simulator host verify the authored changes. Original
 IPA execution, signing validity and physical-device behavior remain separate
 checks; a successful cloud build is not reported as an iPhone test.
 
+### Upgrading the supplied V7 IPA
+
+For `FreeMusic_4.2.7_v7_JS-download_20261117.unsigned.needs-resigning.ipa`,
+use `upgrade_v7_ipa.py` with a successful V8 GitHub Actions artifact:
+
+```bash
+python3 upgrade_v7_ipa.py /path/to/FreeMusic_4.2.7_v7_JS-download_20261117.unsigned.needs-resigning.ipa \
+  --dylib /path/to/artifact/FMExtension.dylib \
+  --bootstrap /path/to/artifact/LXBootstrap.js \
+  --build-manifest /path/to/artifact/build-manifest.json \
+  --output /path/to/FreeMusic_4.2.7_v8.unsigned.needs-resigning.ipa
+```
+
+The upgrade locks the uploaded V7 archive, executable, old extension and
+bootstrap by SHA-256. It checks the downloaded build's hashes, source provenance
+and V8 exports, then adds only the selection/artwork bridges and replaces the
+extension. Existing V7 download, cache, navigation and swipe patches remain.
+All other archive resources, including the bundle identifier, stay byte-identical.
+It refuses modified input, a second upgrade, a mismatched artifact or an existing
+output. GitHub compiles and tests the extension; IPA assembly runs locally.
+
+`python3 test_v7_upgrade.py --ipa /path/to/the/V7.ipa -v` verifies the real input
+locally, including all unchanged resources and preservation of earlier patches.
+Without `--ipa`, CI uses authored structural fixtures only. Temporary test
+libraries are never delivered. Fully re-sign the result before installation;
+use the same app identity and update in place to retain on-device preferences.
+
 Package v3 with `--v3-changes`. The original IPA must remain local. Local original
 binary tests check the patch sites, register/stack behavior and non-overlap;
 Foundation tests and the self-authored Simulator fixtures check the new modules.
