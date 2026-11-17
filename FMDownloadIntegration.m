@@ -9,6 +9,8 @@
 #import <float.h>
 #import <stdio.h>
 #import <stdlib.h>
+#import <sys/stat.h>
+#import <errno.h>
 #if __has_feature(ptrauth_calls)
 #import <ptrauth.h>
 #endif
@@ -23,6 +25,7 @@ static const void *FMBindingKey=&FMBindingKey;
 static NSRecursiveLock *FMLock;
 static NSMutableDictionary *FMRegistrations,*FMHookedMethods,*FMCounters;
 static NSMutableSet *FMActiveBindings;
+static NSMutableDictionary *FMFileTickets;
 static Class FMNativeDelegateClass;
 static FMDownloadProgressIMP FMOriginalProgress;
 static FMDownloadFinishIMP FMOriginalFinish;
@@ -40,6 +43,49 @@ static _Thread_local uintptr_t FMCarrierCleanupTask;
 @property(nonatomic) BOOL ambiguous;
 @end
 @implementation FMDownloadRegistration @end
+
+@interface FMDownloadFileTicket : NSObject
+@property(nonatomic,copy) NSString *basename,*extension;
+@property(nonatomic) NSUInteger generation;
+@property(nonatomic) NSTimeInterval created;
+@end
+@implementation FMDownloadFileTicket @end
+static NSError *FMFormatError(NSInteger code,NSString *message) {
+    return [NSError errorWithDomain:@"FMDownloadNativeFormat" code:code userInfo:@{NSLocalizedDescriptionKey:message}];
+}
+static NSArray *FMNativeAudioExtensions(void) {
+    // Exact original MusicFileStorage lookup/delete list, verified at 0x554c58.
+    return @[@"mp3",@"flac",@"m4a",@"wav",@"ogg",@"opus",@"aac",@"aif",@"aiff",@"aifc",@"caf",@"mp4",@"ape",@"wv",@"mpc",@"tta",@"spx",@"dsf",@"dff"];
+}
+static NSString *FMFileIdentity(NSURL *URL) {
+    if(!URL.isFileURL)return nil;struct stat attributes;
+    if(lstat(URL.fileSystemRepresentation,&attributes)!=0 || !S_ISREG(attributes.st_mode) || attributes.st_size<=0)return nil;
+    // Rename keeps inode/birth time/length; a new file reusing an inode does not
+    // inherit the ticket. Do not key ownership by an arbitrary URL or extension.
+    return [NSString stringWithFormat:@"%llu:%llu:%lld:%lld:%ld",(unsigned long long)attributes.st_dev,
+        (unsigned long long)attributes.st_ino,(long long)attributes.st_size,
+        (long long)attributes.st_birthtimespec.tv_sec,attributes.st_birthtimespec.tv_nsec];
+}
+static NSString *FMNativeBasename(NSString *trackKey) {
+    NSRange separator=[trackKey rangeOfString:@":"];
+    if(separator.location==NSNotFound || !separator.location)return nil;
+    NSString *source=[trackKey substringToIndex:separator.location],*identifier=[trackKey substringFromIndex:separator.location+1];
+    NSString *native=@{@"tx":@"qq",@"wy":@"wy",@"kg":@"kg"}[source];
+    if(!native || !identifier.length || identifier.length>256 || [identifier containsString:@"/"] || [identifier containsString:@"\\"] || [identifier containsString:@"\0"])return nil;
+    return [NSString stringWithFormat:@"%@_%@",native,identifier];
+}
+static BOOL FMRegisterFile(NSURL *file,NSString *trackKey,NSString *extension,NSUInteger generation,NSError **error) {
+    NSString *identity=FMFileIdentity(file),*basename=FMNativeBasename(trackKey);
+    if(!identity || !basename || ![@[@"mp3",@"flac",@"m4a",@"wav",@"aac",@"aiff",@"caf"] containsObject:extension]){
+        if(error)*error=FMFormatError(1,@"Validated download identity or container format is missing");return NO;
+    }
+    [FMLock lock];NSTimeInterval now=NSDate.timeIntervalSinceReferenceDate;
+    for(NSString *key in FMFileTickets.allKeys)if(now-[FMFileTickets[key] created]>3600)[FMFileTickets removeObjectForKey:key];
+    if(FMFileTickets.count>=256 || FMFileTickets[identity]){[FMLock unlock];if(error)*error=FMFormatError(2,@"Too many pending native saves or duplicate file identity");return NO;}
+    FMDownloadFileTicket *ticket=FMDownloadFileTicket.new;ticket.basename=basename;ticket.extension=extension;ticket.generation=generation;ticket.created=now;
+    FMFileTickets[identity]=ticket;[FMLock unlock];return YES;
+}
+static void FMForgetFile(NSURL *file) {NSString *identity=FMFileIdentity(file);if(identity){[FMLock lock];[FMFileTickets removeObjectForKey:identity];[FMLock unlock];}}
 
 @interface FMDownloadBinding : NSObject
 @property(nonatomic,strong) NSURLSessionDownloadTask *task;
@@ -64,7 +110,7 @@ static _Thread_local uintptr_t FMCarrierCleanupTask;
 static void FMState(void) {
     static dispatch_once_t once;
     dispatch_once(&once,^{FMLock=NSRecursiveLock.new;FMRegistrations=NSMutableDictionary.new;
-        FMHookedMethods=NSMutableDictionary.new;FMActiveBindings=NSMutableSet.new;FMCounters=NSMutableDictionary.new;});
+        FMHookedMethods=NSMutableDictionary.new;FMActiveBindings=NSMutableSet.new;FMCounters=NSMutableDictionary.new;FMFileTickets=NSMutableDictionary.new;});
 }
 static void FMCount(NSString *key) { [FMLock lock];FMCounters[key]=@([FMCounters[key] unsignedIntegerValue]+1);[FMLock unlock]; }
 static void FMMain(dispatch_block_t block) { if(NSThread.isMainThread)block();else dispatch_async(dispatch_get_main_queue(),block); }
@@ -124,8 +170,11 @@ static void FMEnqueue(FMDownloadBinding *binding,dispatch_block_t block) {
         if(response.expectedContentLength>0)self.expected=response.expectedContentLength;
         NSURL *directory=[NSFileManager.defaultManager.temporaryDirectory URLByAppendingPathComponent:@"FMJSNativeHandoff" isDirectory:YES];
         if([NSFileManager.defaultManager createDirectoryAtURL:directory withIntermediateDirectories:YES attributes:nil error:&error]){
-            handoff=[directory URLByAppendingPathComponent:NSUUID.UUID.UUIDString];
+            handoff=[directory URLByAppendingPathComponent:[NSUUID.UUID.UUIDString stringByAppendingPathExtension:file.pathExtension]];
             if(![NSFileManager.defaultManager moveItemAtURL:file toURL:handoff error:&error])handoff=nil;
+            else if(!FMRegisterFile(handoff,self.registration.trackKey,file.pathExtension,self.registration.generation,&error)){
+                [NSFileManager.defaultManager removeItemAtURL:handoff error:nil];handoff=nil;
+            }
         }
     }
     if(!handoff && !error)error=[NSError errorWithDomain:FMJSDownloadErrorDomain code:FMJSDownloadInvalidAudio userInfo:nil];
@@ -143,7 +192,7 @@ static void FMEnqueue(FMDownloadBinding *binding,dispatch_block_t block) {
         if(handoff && !deliveredError){FMOriginalFinish(session.delegate,FMFinishSEL(),session,task,handoff);FMCount(@"filesDelivered");}
         FMOriginalComplete(session.delegate,FMCompleteSEL(),session,task,deliveredError);
         FMCount(deliveredError ? @"failed" : @"completed");
-        if(handoff)[NSFileManager.defaultManager removeItemAtURL:handoff error:nil];
+        if(handoff){FMForgetFile(handoff);[NSFileManager.defaultManager removeItemAtURL:handoff error:nil];}
         // Release Foundation's suspended carrier. Its automatic cancellation callback is suppressed.
         uintptr_t previousCleanup=FMCarrierCleanupTask;FMCarrierCleanupTask=(uintptr_t)(__bridge void *)task;
         cancelCarrier(task,@selector(cancel));FMCarrierCleanupTask=previousCleanup;
@@ -238,7 +287,7 @@ static BOOL FMVerify(void) {
         if(command->cmd==LC_UUID && command->cmdsize==sizeof(struct uuid_command))uuid=!memcmp(((const struct uuid_command *)command)->uuid,expected,16);
         if(command->cmd==LC_SEGMENT_64 && command->cmdsize>=sizeof(struct segment_command_64)){
             const struct segment_command_64 *segment=(const void *)command;
-            if(!strncmp(segment->segname,"__TEXT",16) && segment->fileoff==0 && segment->vmaddr==0x100000000ull && segment->filesize>=0x81900 && segment->vmsize>=0x81900 && (segment->initprot&5)==5)range=YES;
+            if(!strncmp(segment->segname,"__TEXT",16) && segment->fileoff==0 && segment->vmaddr==0x100000000ull && segment->filesize>=0x509e40 && segment->vmsize>=0x509e40 && (segment->initprot&5)==5)range=YES;
         }cursor+=command->cmdsize;
     }
     if(!uuid || !range)return NO;
@@ -247,7 +296,10 @@ static BOOL FMVerify(void) {
     Class cls=NSClassFromString(@"_TtC9FreeMusic12CacheManager");if(!cls)return NO;
     for(NSUInteger i=0;i<3;i++){Method method=FMOwnMethod(cls,selectors[i]);const uint8_t *code=(const uint8_t *)header+offsets[i];
         if(!method || FMImpAddress(method_getImplementation(method))!=(uintptr_t)code || !FMDigest(code,64,hashes[i]))return NO;}
-    return FMDigest((const uint8_t *)header+0x780e4,64,"35efab6f7fbf04e02029fe13a93bb92f2b28f04a0be6496738cf5b3829089b53");
+    const uint8_t formatBranch[]={0x19,0x3c,0x12,0x14};
+    return FMDigest((const uint8_t *)header+0x780e4,64,"35efab6f7fbf04e02029fe13a93bb92f2b28f04a0be6496738cf5b3829089b53") &&
+        !memcmp((const uint8_t *)header+0x7acdc,formatBranch,sizeof(formatBranch)) &&
+        FMDigest((const uint8_t *)header+0x509d40,0x100,"8a301f4c5b6667c0e5fd3e6d00771a86c57da5cf3c72eaeae795205072b730b5");
 }
 static BOOL FMInstallClass(Class cls) {
     FMState();[FMLock lock];
@@ -289,12 +341,99 @@ void FMDownloadIntegrationSourceTransition(void) { FMState();[FMLock lock];FMGen
     for(FMDownloadBinding *binding in bindings)[binding cancel];
 }
 NSDictionary *FMDownloadIntegrationDiagnostics(void) { FMState();[FMLock lock];NSMutableDictionary *result=[FMCounters mutableCopy];
-    result[@"installed"]=@(FMInstalled);result[@"hostVerified"]=@(FMHostAllowed);result[@"active"]=@(FMActiveBindings.count);result[@"registrations"]=@(FMRegistrations.count);[FMLock unlock];return result;
+    result[@"installed"]=@(FMInstalled);result[@"hostVerified"]=@(FMHostAllowed);result[@"active"]=@(FMActiveBindings.count);result[@"registrations"]=@(FMRegistrations.count);result[@"pendingFormatSaves"]=@(FMFileTickets.count);[FMLock unlock];return result;
+}
+
+static BOOL FMMoveManagedNativeFile(NSFileManager *manager,NSURL *source,NSURL *destination,NSError **error) {
+    FMState();NSString *identity=FMFileIdentity(source);[FMLock lock];FMDownloadFileTicket *ticket=identity?FMFileTickets[identity]:nil;
+    if(!ticket){[FMLock unlock];return [manager moveItemAtURL:source toURL:destination error:error];}
+    // Keep source transitions and same-key replacement serialized. Only bounded
+    // local filesystem work occurs here; no decoder/network request holds this lock.
+    @try {
+    NSError *failure=nil;BOOL success=NO;NSMutableArray<NSURL *> *backedUp=NSMutableArray.array;NSURL *backup=nil;
+    NSURL *parent=destination.URLByDeletingLastPathComponent;
+    struct stat parentStat;
+    if(ticket.generation!=FMGeneration)failure=FMCanceled();
+    else if(!destination.isFileURL || ![destination.pathExtension isEqual:@"mp3"] ||
+            ![destination.lastPathComponent.stringByDeletingPathExtension isEqual:ticket.basename] ||
+            lstat(parent.fileSystemRepresentation,&parentStat)!=0 || !S_ISDIR(parentStat.st_mode))
+        failure=FMFormatError(3,@"Native save destination does not match this verified track");
+    NSURL *target=[parent URLByAppendingPathComponent:[ticket.basename stringByAppendingPathExtension:ticket.extension]];
+    NSMutableArray<NSURL *> *siblings=NSMutableArray.array;
+    @try {
+    if(!failure){
+        NSMutableArray<NSURL *> *candidates=NSMutableArray.array;
+        for(NSString *extension in FMNativeAudioExtensions())
+            [candidates addObject:[parent URLByAppendingPathComponent:[ticket.basename stringByAppendingPathExtension:extension]]];
+        // Original MusicFileStorage initializes downloads under Documents/Downloads
+        // (0x72bcc), but its higher-priority decoded CAF is under Application
+        // Support/DownloadAssets (0x72bf4, read at 0x173128). These are different
+        // directories. Resolve the exact original root, never scan arbitrary paths.
+        NSURL *support=[[manager URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask] firstObject];
+        NSURL *assets=[support URLByAppendingPathComponent:@"DownloadAssets" isDirectory:YES];
+        struct stat assetsStat;
+        if(!assets.isFileURL)failure=FMFormatError(3,@"Native download assets directory is unavailable");
+        else if(lstat(assets.fileSystemRepresentation,&assetsStat)==0){
+            if(!S_ISDIR(assetsStat.st_mode))failure=FMFormatError(4,@"Native download assets path is not a directory");
+            else [candidates addObject:[assets URLByAppendingPathComponent:[ticket.basename stringByAppendingString:@"_playback.caf"]]];
+        }else if(errno!=ENOENT)failure=[NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil];
+        for(NSURL *candidate in candidates){
+            if(failure)break;struct stat item;
+            if(lstat(candidate.fileSystemRepresentation,&item)==0){
+                if(!S_ISREG(item.st_mode)){failure=FMFormatError(4,@"An existing track path is not a regular file");break;}
+                [siblings addObject:candidate];
+            }else if(errno!=ENOENT){failure=[NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil];break;}
+        }
+    }
+    if(!failure){
+        backup=[parent URLByAppendingPathComponent:[@".FMJSReplacement-" stringByAppendingString:NSUUID.UUID.UUIDString] isDirectory:YES];
+        if(![manager createDirectoryAtURL:backup withIntermediateDirectories:NO attributes:nil error:&failure])backup=nil;
+    }
+    if(!failure)for(NSURL *existing in siblings){
+        if(![manager moveItemAtURL:existing toURL:[backup URLByAppendingPathComponent:existing.lastPathComponent] error:&failure])break;
+        [backedUp addObject:existing];
+    }
+    if(!failure)success=[manager moveItemAtURL:source toURL:target error:&failure];
+    } @catch(__unused NSException *exception) {failure=FMFormatError(6,@"Native file operation raised an exception");success=NO;}
+    if(success){
+        [FMFileTickets removeObjectForKey:identity];FMCount(@"nativeFormatSaves");
+        @try {if(![manager removeItemAtURL:backup error:nil])FMCount(@"nativeFormatBackupCleanupFailures");}
+        @catch(__unused NSException *exception){FMCount(@"nativeFormatBackupCleanupFailures");}
+    }else{
+        BOOL restored=YES;
+        for(NSURL *existing in backedUp.reverseObjectEnumerator){
+            NSError *restoreError=nil;
+            @try {if(![manager moveItemAtURL:[backup URLByAppendingPathComponent:existing.lastPathComponent] toURL:existing error:&restoreError])restored=NO;}
+            @catch(__unused NSException *exception){restored=NO;}
+        }
+        // If restoration fails, leave the exact bounded backup intact for recovery.
+        @try {if(backup && restored)[manager removeItemAtURL:backup error:nil];}
+        @catch(__unused NSException *exception){FMCount(@"nativeFormatBackupCleanupFailures");}
+        FMCount(restored?@"nativeFormatRejectedOrRolledBack":@"nativeFormatRollbackFailures");
+        if(!failure)failure=FMFormatError(5,@"Native media replacement failed");
+    }
+    if(!success && error)*error=failure;return success;
+    } @finally {[FMLock unlock];}
+}
+BOOL FMDownloadNativeMove(NSFileManager *manager,NSURL *source,NSURL *destination,NSError **error) {
+    @try {return FMMoveManagedNativeFile(manager,source,destination,error);}
+    @catch(__unused NSException *exception){
+        // The authored ARM64 call-site bridge deliberately has no Objective-C
+        // exception unwind information. Never unwind through it into Swift.
+        if(error)*error=FMFormatError(6,@"Native file operation raised an exception");return NO;
+    }
 }
 #if defined(FMX_DOWNLOAD_INTEGRATION_TESTING)
 BOOL FMDownloadIntegrationInstallForTesting(Class cls) {
 #if TARGET_OS_SIMULATOR || TARGET_OS_OSX
     return cls && FMInstallClass(cls);
+#else
+    return NO;
+#endif
+}
+BOOL FMDownloadIntegrationRegisterFileForTesting(NSURL *file,NSString *trackKey,NSString *extension,NSError **error) {
+#if TARGET_OS_SIMULATOR || TARGET_OS_OSX
+    FMState();return FMRegisterFile(file,trackKey,extension,FMGeneration,error);
 #else
     return NO;
 #endif

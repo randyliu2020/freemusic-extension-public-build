@@ -42,6 +42,7 @@ network interception works on an iPhone. Device validation is required.
 - Each production musicUrl attempt owns an isolated JS runtime. Completion, timeout, cancellation and source changes retire its network tasks and timers without cancelling another playback/download attempt. This does not preempt synchronous JavaScript loops.
 - Native manual download integration is restricted to the exact verified CacheManager and JS-owned URLs. Existing task identities, original download UI and original completion/save/list-registration callbacks are retained. Unowned downloads remain native.
 - Real downloaded files are checked before success; unsuccessful candidates proceed to lower supported qualities. Cancellation/source changes retire temporary data and stale callbacks. Already saved files are preserved.
+- The verified native download-save boundary preserves the actual audio container extension. It does not transcode media or disguise M4A/FLAC as MP3. The original offline lookup and library registration must remain consistent with the saved filename.
 - Synthetic loopback and independent host tests never use third-party sources, credentials or original IPA code in CI. Packaging still requires full signing and testing on the user's device.
 
 ## V6 additions
@@ -52,7 +53,7 @@ network interception works on an iPhone. Device validation is required.
 - The existing small player quality badge uses measured AVAsset format information. Requested quality and filename extensions are not treated as measured quality; unavailable information is shown as unknown. This does not verify the provenance of a supposedly lossless master.
 - A metadata deadline cancels that request without automatically disabling a responsive JS source. A blocked JavaScript queue is still discarded; public JavaScriptCore APIs cannot forcibly kill an infinite loop.
 
-Package v6/v7 with `--v3-changes --player-left-swipe --playback-cache --adaptive-playback`. Cloud builds contain only the extension and authored fixtures. Simulator fixtures and instruction emulation do not constitute an on-device test of the original FreeMusic IPA.
+Package v7 with `--v3-changes --player-left-swipe --playback-cache --adaptive-playback --native-download-format` (v6 omits the final flag). Cloud builds contain only the extension and authored fixtures. Simulator fixtures and instruction emulation do not constitute an on-device test of the original FreeMusic IPA.
 
 ## V4 additions
 

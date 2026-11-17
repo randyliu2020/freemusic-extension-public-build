@@ -15,8 +15,10 @@ SOURCES = [
     "FMJSDownloadCoordinator.h", "FMJSDownloadCoordinator.m", "FMJSDownloadTests.m",
     "FMDownloadIntegration.h", "FMDownloadIntegration.m", "FMDownloadIntegrationTests.m",
     "FMDownloadTestFixtures.inc", "test_native_download_macos.sh", "record_v7_validation.py",
+    "native_format_patch.py", "test_native_format_patch.py",
+    "FMNativeDownloadFormatTests.m", "test_native_download_format_macos.sh",
 ]
-REPORTS = ["download-coordinator-tests.json", "native-download-tests.json"]
+REPORTS = ["download-coordinator-tests.json", "native-download-tests.json", "download-format-tests.json"]
 
 def main():
     source = Path(__file__).resolve().parent

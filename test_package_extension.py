@@ -284,6 +284,37 @@ class ActualIPATests(unittest.TestCase):
             self.assertTrue(report["playback_cache_enabled"])
             self.assertEqual(len(report["v3_report"]["playback_cache_changes"]), len(cache))
 
+    def test_v7_format_plan_preserves_every_unrelated_archive_entry(self):
+        import interaction_patch, navigation_patch, player_swipe_patch
+        import playback_cache_patch, adaptive_playback_patch, native_format_patch
+        output = self.directory / "v7.unsigned.needs-resigning.ipa"
+        report = package.package_ipa(self.original, self.dylib, self.bootstrap, output,
+            v3_changes=True, player_left_swipe=True, playback_cache=True,
+            adaptive_playback=True, native_download_format=True)
+        with zipfile.ZipFile(self.original) as before, zipfile.ZipFile(output) as after:
+            original = before.read(package.MAIN)
+            expected, _ = package.rewrite_macho(original, inject=True, expected_type=2)
+            expected, _ = navigation_patch.patch_binary(expected, original)
+            changes = []
+            for module in (interaction_patch, player_swipe_patch, playback_cache_patch,
+                           adaptive_playback_patch, native_format_patch):
+                changes.extend(module.patch_plan(original))
+            occupied = set()
+            for change in changes:
+                span = set(range(change.offset, change.offset + len(change.after)))
+                self.assertFalse(occupied & span, change.reason)
+                occupied.update(span)
+            expected = interaction_patch.apply_verified_plan(expected, changes)
+            self.assertEqual(after.read(package.MAIN), expected)
+            self.assertEqual(len(expected), len(original))
+            self.assertEqual(package.parse_macho(expected).segments, package.parse_macho(original).segments)
+            for name in before.namelist():
+                if name != package.MAIN and not package.is_obsolete_app_signature(name):
+                    self.assertEqual(before.read(name), after.read(name), name)
+            self.assertTrue(report["native_download_format_enabled"])
+            self.assertEqual(len(report["v3_report"]["native_download_format_changes"]),
+                             len(native_format_patch.patch_plan(original)))
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(add_help=False)

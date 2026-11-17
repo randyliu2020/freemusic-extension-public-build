@@ -59,6 +59,31 @@ static BOOL Until(BOOL (^condition)(void), NSTimeInterval timeout) {
     }
     return NO;
 }
+// Test-only observations of production runtime state. No production observer,
+// update-alert forwarding or exported debug hook is installed for these checks.
+static NSDictionary *SmokeRuntimeResources(LXSourceRuntime *runtime) {
+    if(!runtime)return @{};
+    // KVC resolves isInvalidated, which locks internally: read it before taking
+    // the private lock used for the mutable collection snapshots below.
+    BOOL invalidated=[[runtime valueForKey:@"invalidated"] boolValue];
+    NSLock *lock=[runtime valueForKey:@"_lock"];
+    [lock lock];
+    @try {
+        return @{@"invalidated":@(invalidated),@"timers":@([[runtime valueForKey:@"_timers"] count]),
+            @"http":@([[runtime valueForKey:@"_HTTPTasks"] count]),@"pending":@([[runtime valueForKey:@"_pending"] count]),
+            @"workers":@([[runtime valueForKey:@"_isolatedResolutions"] count])};
+    } @finally {[lock unlock];}
+}
+static NSArray<LXSourceRuntime *> *SmokeIsolatedWorkers(LXSourceRuntime *runtime) {
+    NSLock *lock=[runtime valueForKey:@"_lock"];NSMutableArray *workers=NSMutableArray.array;
+    [lock lock];
+    @try {
+        for(id attempt in [[runtime valueForKey:@"_isolatedResolutions"] allValues]){
+            LXSourceRuntime *worker=[attempt valueForKey:@"worker"];if(worker)[workers addObject:worker];
+        }
+    } @finally {[lock unlock];}
+    return workers;
+}
 static UIButton *FindLauncher(UIView *view) {
     if ([view isKindOfClass:UIButton.class] && [view.accessibilityLabel isEqual:@"打开音源扩展"]) return (UIButton *)view;
     for (UIView *child in view.subviews) { UIButton *button=FindLauncher(child); if (button) return button; }
@@ -456,9 +481,19 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
     __block NSError *failure=nil;__block NSUInteger callbacks=0;
     NSURLSessionDataTask *task=[session dataTaskWithRequest:request completionHandler:^(NSData *data,NSURLResponse *response,NSError *error){failure=error;callbacks++;dispatch_semaphore_signal(done);}];
     NSTimeInterval start=NSProcessInfo.processInfo.systemUptime;[task resume];
-    BOOL started=YES;
+    BOOL started=YES;__block LXSourceRuntime *pendingWorker=nil;__block NSDictionary *workerBefore=nil,*workerAfter=nil;
     if(cancel) {
-        started=Until(^BOOL{return [manager.status containsString:@"SMOKE_PENDING_STARTED"];},3);
+        started=Until(^BOOL{
+            for(LXSourceRuntime *worker in SmokeIsolatedWorkers(runtime)){
+                NSDictionary *resources=SmokeRuntimeResources(worker);
+                // Only the fixture-pending JS branch creates this long timer.
+                // A timer plus a pending musicUrl call proves real JS execution.
+                if([resources[@"timers"] unsignedIntegerValue]==1 && [resources[@"pending"] unsignedIntegerValue]==1 && ![resources[@"invalidated"] boolValue]){
+                    pendingWorker=worker;workerBefore=resources;return YES;
+                }
+            }
+            return NO;
+        },3);
         [task cancel];
     }
     BOOL completed=dispatch_semaphore_wait(done,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC))==0;
@@ -469,6 +504,13 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
     Check(recognizedDomain && failure.code==(cancel?NSURLErrorCancelled:NSURLErrorTimedOut),[NSString stringWithFormat:@"Expected native cancellation/timeout NSError, got %@",failure]);
     NSTimeInterval elapsed=NSProcessInfo.processInfo.systemUptime-start;
     if(cancel) {
+        Check(pendingWorker!=nil,@"Observe the distinct worker after its actual pending Promise branch started");
+        Check(Until(^BOOL{
+            workerAfter=SmokeRuntimeResources(pendingWorker);
+            return [workerAfter[@"invalidated"] boolValue] && [workerAfter[@"timers"] unsignedIntegerValue]==0
+                && [workerAfter[@"http"] unsignedIntegerValue]==0 && [workerAfter[@"pending"] unsignedIntegerValue]==0
+                && [SmokeRuntimeResources(runtime)[@"workers"] unsignedIntegerValue]==0;
+        },3),@"Client cancellation drains the worker's timers, network tasks and pending callbacks without retiring its parent");
         Check(Until(^BOOL{return manager.runtime==runtime && runtime.manifest!=nil && [manager.selectedFile isEqual:@"SmokeFixture.js"] && [[NSUserDefaults.standardUserDefaults objectForKey:@"FMX.selectedSource"] isEqual:@"SmokeFixture.js"];},3),@"Ordinary cancellation keeps source enabled and selected");
         __block NSUInteger stable=0;
         Check(Until(^BOOL{stable=[manager.playbackStatus isEqual:@"网易云：本次 JS 解析已取消"]?stable+1:0;return stable>=4;},3),@"Client cancellation remains visible after the runtime cancellation completion");
@@ -480,7 +522,8 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
     }
     NSDictionary *recovery=[self parseServer:@"wy"];
     Check(Until(^BOOL{return manager.runtime==runtime && runtime.manifest!=nil;},2),@"Subsequent production parse succeeds through the same responsive runtime");
-    return @{@"request_timeout_seconds":@(budget),@"elapsed_seconds":@(elapsed),@"native_error_domain":failure.domain,@"native_error_code":@(failure.code),@"callback_count":@(callbacks),@"source_kept_enabled":@YES,@"subsequent_parse":recovery,@"real_network_used":@NO};
+    return @{@"request_timeout_seconds":@(budget),@"elapsed_seconds":@(elapsed),@"native_error_domain":failure.domain,@"native_error_code":@(failure.code),@"callback_count":@(callbacks),@"source_kept_enabled":@YES,@"subsequent_parse":recovery,@"real_network_used":@NO,
+        @"isolated_worker_observed":@(pendingWorker!=nil),@"worker_resources_before":workerBefore ?: @{},@"worker_resources_after":workerAfter ?: @{},@"production_update_alert_forwarding_added":@NO};
 }
 - (NSDictionary *)parseServer:(NSString *)server {
     BOOL kugou=[server isEqual:@"kg"];
@@ -971,7 +1014,7 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
         }];
         [self test:@"manager_loads_self_authored_LX_fixture" body:^NSDictionary *{
             __block FMXManager *manager; __block NSURL *directory;Main(^{manager=[(id)NSClassFromString(@"FMXManager") shared];directory=[manager directory];});
-            NSString *source=@"/* @name Smoke fixture */\nconst {on,send,EVENT_NAMES}=lx;on(EVENT_NAMES.request,({source,action,info})=>{if(action!=='musicUrl'||info.musicInfo.src_cookie||info.musicInfo.cookie)return Promise.reject(Error('fixture contract'));const id=source==='kg'?info.musicInfo.hash:info.musicInfo.songmid;if(id==='fixture-pending'){send(EVENT_NAMES.updateAlert,{log:'SMOKE_PENDING_STARTED'});return new Promise(()=>{});}return Promise.resolve('https://fixture.invalid/'+source+'/'+id+'/'+info.type)});send(EVENT_NAMES.inited,{sources:{wy:{type:'music',actions:['musicUrl'],qualitys:['128k']},tx:{type:'music',actions:['musicUrl'],qualitys:['128k']},kg:{type:'music',actions:['musicUrl'],qualitys:['128k']}}});";
+            NSString *source=@"/* @name Smoke fixture */\nconst {on,send,EVENT_NAMES}=lx;on(EVENT_NAMES.request,({source,action,info})=>{if(action!=='musicUrl'||info.musicInfo.src_cookie||info.musicInfo.cookie)return Promise.reject(Error('fixture contract'));const id=source==='kg'?info.musicInfo.hash:info.musicInfo.songmid;if(id==='fixture-pending'){setTimeout(()=>{},60000);return new Promise(()=>{});}return Promise.resolve('https://fixture.invalid/'+source+'/'+id+'/'+info.type)});send(EVENT_NAMES.inited,{sources:{wy:{type:'music',actions:['musicUrl'],qualitys:['128k']},tx:{type:'music',actions:['musicUrl'],qualitys:['128k']},kg:{type:'music',actions:['musicUrl'],qualitys:['128k']}}});";
             NSError *error=nil;Check([source writeToURL:[directory URLByAppendingPathComponent:@"SmokeFixture.js"] atomically:YES encoding:NSUTF8StringEncoding error:&error],error.localizedDescription);
             Main(^{[manager activate:@{@"file":@"SmokeFixture.js",@"name":@"Self-authored smoke fixture"}];});
             Check(Until(^BOOL{return manager.runtime.manifest[@"sources"][@"wy"] && manager.runtime.manifest[@"sources"][@"tx"];},15),manager.status);

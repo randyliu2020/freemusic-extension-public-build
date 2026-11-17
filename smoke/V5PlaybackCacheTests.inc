@@ -94,7 +94,7 @@
         Main(^{checkAudio();});
 
         NSString *(^sourceScript)(NSString *) = ^NSString *(NSString *label) {
-            return [NSString stringWithFormat:@"lx.on('request',({info})=>{if(info.musicInfo.songmid==='cache-pending'){lx.send('updateAlert',{log:'CACHE_PENDING_STARTED'});return new Promise(r=>setTimeout(()=>r('https://fixture.invalid/late-old-source'),1200));}return Promise.resolve('https://fixture.invalid/%@/'+info.musicInfo.songmid)});setTimeout(()=>lx.send('inited',{sources:{tx:{type:'music',actions:['musicUrl'],qualitys:['128k']}}}),200);",label];
+            return [NSString stringWithFormat:@"lx.on('request',({info})=>{if(info.musicInfo.songmid==='cache-pending'){setTimeout(()=>{},60000);return new Promise(r=>setTimeout(()=>r('https://fixture.invalid/late-old-source'),1200));}return Promise.resolve('https://fixture.invalid/%@/'+info.musicInfo.songmid)});setTimeout(()=>lx.send('inited',{sources:{tx:{type:'music',actions:['musicUrl'],qualitys:['128k']}}}),200);",label];
         };
         NSArray<NSString *> *scripts = @[sourceScript(@"cache-a"), sourceScript(@"cache-b"), @"lx.on('request',()=>Promise.resolve('https://fixture.invalid/unused'));setTimeout(()=>lx.send('inited',{sources:{kw:{type:'music',actions:['musicUrl'],qualitys:['128k']}}}),200);"];
         for(NSUInteger index=0;index<fixtureFiles.count;index++)
@@ -141,10 +141,23 @@
         dispatch_semaphore_t pendingDone=dispatch_semaphore_create(0);
         __block NSData *pendingData=nil; __block NSError *pendingError=nil; __block NSUInteger pendingCallbacks=0;
         [[pendingSession dataTaskWithRequest:request completionHandler:^(NSData *data,NSURLResponse *response,NSError *error){pendingData=data;pendingError=error;pendingCallbacks++;dispatch_semaphore_signal(pendingDone);}] resume];
-        Check(Until(^BOOL{return [manager.status containsString:@"CACHE_PENDING_STARTED"];},3), @"Old source Promise is in flight before switching");
-        __block LXSourceRuntime *runtimeA=nil;
+        __block LXSourceRuntime *runtimeA=nil,*oldWorker=nil;
+        __block NSDictionary *oldWorkerBefore=nil,*oldWorkerAfter=nil;
+        Check(Until(^BOOL{
+            for(LXSourceRuntime *worker in SmokeIsolatedWorkers(manager.runtime)){
+                NSDictionary *resources=SmokeRuntimeResources(worker);
+                // Only the real pending branch creates both a dedicated long
+                // marker timer and the original 1200ms delayed result. The lone
+                // initialization timer cannot satisfy this observation.
+                if([resources[@"pending"] unsignedIntegerValue]==1 && [resources[@"timers"] unsignedIntegerValue]==2 && ![resources[@"invalidated"] boolValue]){
+                    oldWorker=worker;oldWorkerBefore=resources;return YES;
+                }
+            }
+            return NO;
+        },3), @"Old source Promise is in flight before switching");
         Main(^{
             runtimeA=manager.runtime;
+            Check([SmokeIsolatedWorkers(runtimeA) containsObject:oldWorker],@"Observed delayed Promise belongs to source A's isolated worker");
             [manager activate:@{@"file":fixtureFiles[1], @"name":@"Authored cache B"}];
             seedFixture((__bridge void *)fixture, activeAKey.UTF8String);
         });
@@ -152,6 +165,12 @@
         Check(dispatch_semaphore_wait(pendingDone,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC))==0, @"Retired source's pending request completes promptly");
         NSDictionary *pendingJSON=pendingData ? [NSJSONSerialization JSONObjectWithData:pendingData options:0 error:nil] : nil;
         Check(pendingCallbacks==1 && (pendingError || [pendingJSON[@"code"] integerValue]==502) && !pendingJSON[@"data"][@"url"], @"Retired JS runtime cannot publish a successful old playback URL");
+        Check(Until(^BOOL{
+            oldWorkerAfter=SmokeRuntimeResources(oldWorker);
+            return [oldWorkerAfter[@"invalidated"] boolValue] && [oldWorkerAfter[@"timers"] unsignedIntegerValue]==0
+                && [oldWorkerAfter[@"http"] unsignedIntegerValue]==0 && [oldWorkerAfter[@"pending"] unsignedIntegerValue]==0
+                && [SmokeRuntimeResources(runtimeA)[@"workers"] unsignedIntegerValue]==0;
+        },3),@"Source switching drains the old delayed worker and its timers, HTTP tasks and pending callbacks");
         Main(^{
             activeBKey=currentKey();
             Check(![activeBKey isEqual:activeAKey] && !runtimeA.manifest, @"B has a new epoch and A runtime is invalidated");
@@ -200,6 +219,7 @@
         // duplicate native completion (the retired runtime cancelled its timer).
         [NSThread sleepForTimeInterval:1.3];
         Check(pendingCallbacks==1, @"Retired delayed Promise never delivers a second native completion");
+        Check([SmokeRuntimeResources(oldWorker)[@"timers"] unsignedIntegerValue]==0 && [SmokeRuntimeResources(oldWorker)[@"pending"] unsignedIntegerValue]==0,@"Old worker remains drained after its original delayed callback deadline");
         Main(^{checkAudio();});
         return @{@"source_transitions":@[@"activate",@"switch",@"failed_activate",@"disable"],
                  @"real_swift_instance_abi":@YES,@"late_old_cache_writes_exercised":@YES,@"new_epoch_rejects_old_keys":@YES,
@@ -207,6 +227,7 @@
                  @"current_player_adopted_out_of_pending_preloads":@YES,
                  @"automatic_mp3_does_not_mask_manual_flac_model":@YES,@"sibling_directory_prefix_preserved":@YES,
                  @"wrong_image_guard_preserves_native_state":@YES,@"retired_request_callback_count":@(pendingCallbacks),
+                 @"old_worker_resources_before":oldWorkerBefore,@"old_worker_resources_after":oldWorkerAfter,@"production_update_alert_forwarding_added":@NO,
                  @"external_network_used":@NO,@"original_native_method_executed":@NO};
     } @finally {
         [pendingSession invalidateAndCancel];
