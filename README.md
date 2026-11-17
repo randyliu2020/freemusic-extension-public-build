@@ -1,4 +1,4 @@
-# FreeMusic 4.2.7 extension — v5 incremental update
+# FreeMusic 4.2.7 extension — v6 adaptive JS quality update
 
 Source-only build for a user-authorized modification of FreeMusic-Folia 4.2.7.
 This repository does not contain the original application, signing identities,
@@ -24,13 +24,22 @@ Qishui playback retains the host's own track-detail and playback flow.
 The JavaScriptCore adapter implements a documented subset of the LX custom-source
 API. NetEase and QQ ID-only musicUrl scripts can be selected.
 Kugou's exact native hash request can use scripts advertising standard 128k
-quality; failures retain the original fallback path. QQ encrypted playback
-remains original behavior.
+quality; failures retain the original fallback path. When JS is enabled for QQ, a premium/QMC request can receive a plain JS audio URL with null QMC metadata; the original response decoder passes the plain URL through without invoking its encrypted-media branch. No decryption or authorization checks are altered.
 No membership, authentication, DRM or account checks are modified.
 
 This is an experimental binary extension, not recovered original source code.
 Compilation/fixture success does not prove that a re-signed IPA launches or that
 network interception works on an iPhone. Device validation is required.
+
+## V6 additions
+
+- Enabled JS takes priority on the supported NetEase/QQ/Kugou parsing routes, including QQ quality selections that previously stayed native. The source and adapter's common quality list is tried highest first (24-bit FLAC, FLAC, 320k, 128k); Kugou remains 128k-only with the available hash contract.
+- Each candidate is attempted once. Parsing errors/timeouts advance to the next quality within a shared time budget. Source transitions, cancellation and stale callbacks cannot adopt a different song/source's result. A returned URL is a candidate, not evidence of complete playback or encoded quality.
+- Two exact-build native setup/failure bridges retain the same session after a URL is delivered. A current item's actual playback failure tries the remaining qualities and calls the original player setup to rebind native observers. Unmanaged items retain their original behavior.
+- The existing small player quality badge uses measured AVAsset format information. Requested quality and filename extensions are not treated as measured quality; unavailable information is shown as unknown. This does not verify the provenance of a supposedly lossless master.
+- A metadata deadline cancels that request without automatically disabling a responsive JS source. A blocked JavaScript queue is still discarded; public JavaScriptCore APIs cannot forcibly kill an infinite loop.
+
+Package v6 with `--v3-changes --player-left-swipe --playback-cache --adaptive-playback`. Cloud builds contain only the extension and authored fixtures. Simulator fixtures and instruction emulation do not constitute an on-device test of the original FreeMusic IPA.
 
 ## V4 additions
 

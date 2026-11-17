@@ -12,7 +12,9 @@ typedef void (^LXSourceURLCompletion)(NSURL * _Nullable URL, NSError * _Nullable
 /// IMPORTANT: This is API isolation, NOT a resource/security sandbox. Public
 /// JavaScriptCore APIs cannot interrupt an infinite loop or cap its heap. Only
 /// import trusted scripts. Timeouts finish native requests independently, but
-/// cannot stop executing JS; discard timed-out instances, never reuse them.
+/// cannot stop executing JS. Hard timeouts discard the instance. The optional
+/// per-attempt soft timeout retains a responsive context, but a stalled JS queue
+/// is still discarded after a bounded responsiveness check.
 @interface LXSourceRuntime : NSObject
 
 /// Read LXBootstrap.js from the containing app's resources and pass its contents.
@@ -38,6 +40,15 @@ typedef void (^LXSourceURLCompletion)(NSURL * _Nullable URL, NSError * _Nullable
                             musicInfo:(NSDictionary *)musicInfo
                               quality:(nullable NSString *)quality
                               timeout:(NSTimeInterval)timeout
+                           completion:(LXSourceURLCompletion)completion;
+/// Quality-ladder variant. NO cancels only this resolution on timeout and ignores
+/// its late URL; a responsive JS context remains usable for another quality.
+/// A nonresponsive JS queue is still invalidated. This cannot interrupt running JS.
+- (NSString *)resolveMusicURLForSource:(NSString *)source
+                            musicInfo:(NSDictionary *)musicInfo
+                              quality:(nullable NSString *)quality
+                              timeout:(NSTimeInterval)timeout
+                  invalidateOnTimeout:(BOOL)invalidateOnTimeout
                            completion:(LXSourceURLCompletion)completion;
 - (void)cancelRequestWithIdentifier:(NSString *)identifier;
 

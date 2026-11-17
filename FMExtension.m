@@ -11,6 +11,8 @@
 #import "FMLXMCUI.h"
 #import "FMNavigation.h"
 #import "FMPlaybackCache.h"
+#import "FMQualityResolver.h"
+#import "FMAdaptivePlayback.h"
 
 static NSString *const FMXChanged = @"FMX.changed";
 static NSString *const FMXSelected = @"FMX.selectedSource";
@@ -80,6 +82,7 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
     // Advance the native cache namespace before retiring requests. A completed
     // old request may still run its host callback after this transition.
     FMPlaybackCacheSourceTransition(FMXCacheServers(self.runtime.manifest));
+    FMAdaptivePlaybackSourceTransition();
     self.generation++;
     LXSourceRuntime *old = self.runtime; self.runtime = nil; [old invalidate];
     self.selectedFile = nil;
@@ -157,7 +160,7 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
     if (section == 1) return @"支持网易云、QQ 和酷狗的基础洛雪音源。酷狗 JS 使用标准音质；部分脚本需要额外歌曲信息或尚未支持的功能。仅启用你信任的脚本。";
     if (section == 2) return @"用当前封面在手机上生成轻微缩放的循环动画。系统需要时才生成；低电量或减少动态效果开启时显示静态封面。需要 iOS 26 或更高版本。";
     if (section == 4) return @"按实际听歌记录查看月度、年度偏好，只保存在本机。";
-    return @"扩展 v5。换源后重新获取播放地址；使用过 JS 的平台不复用自动音乐缓存，手动下载保留。歌曲和音质由对应音源服务决定。";
+    return @"扩展 v6。启用 JS 后优先尝试支持的最高音质，失败逐档降低；播放失败也会继续尝试剩余档位。播放页的小音质标识以音频实际信息为准，无法确认时显示未知。换源后重新解析，手动下载保留。";
 }
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)path {
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
@@ -193,7 +196,7 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
     else {
         FMXManager *manager = [FMXManager shared];
         cell.textLabel.text = manager.status;
-        cell.detailTextLabel.text = manager.playbackStatus ?: (manager.runtime ? @"本次启用后尚无 JS 解析记录。QQ 的臻品、母带、空间音质仍由原 App 处理，可切换标准音质检查。" : nil);
+        cell.detailTextLabel.text = manager.playbackStatus ?: (manager.runtime ? @"本次启用后尚无 JS 解析记录。已适配平台优先使用 JS 支持的最高音质，失败逐档降低。" : nil);
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
     }
     return cell;
@@ -274,73 +277,84 @@ static void FMXPlaybackStatus(LXSourceRuntime *runtime, NSString *identifier, NS
         [manager changed];
     });
 }
-static NSString *FMXQuality(NSString *level, NSArray *available) {
-    NSDictionary *mapping = @{@"standard":@"128k", @"qq_standard":@"128k", @"hq":@"320k", @"lossless":@"flac"};
-    NSString *quality = mapping[level] ?: level;
-    if ([available containsObject:quality]) return quality;
-    // Fall back explicitly to an advertised basic quality; never label it lossless.
-    for (NSString *fallback in @[@"128k", @"320k", @"flac", @"flac24bit"]) if ([available containsObject:fallback]) return fallback;
-    return available.firstObject;
-}
-
 __attribute__((constructor)) static void FMXInitialize(void) {
     @autoreleasepool {
         if (![[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] isEqual:@"4.2.7"] || ![NSBundle.mainBundle.executablePath.lastPathComponent isEqual:@"FreeMusic"]) return;
         FMPlaybackCacheInstall();
+        FMAdaptivePlaybackInstall();
         // Capture must install before the host registers its original AVPlayer
         // time observer. UI setup remains deferred to the main run loop below.
         FMInsightsInstall();
         [FMExtensionProtocol setParseHandler:^FMXParseCancellation(NSURLRequest *request, NSDictionary<NSString *,NSString *> *parameters, FMXProtocolCompletion completion) {
-            LXSourceRuntime *runtime = [FMXManager shared].runtime;
-            NSString *source = FMXLXSource(parameters[@"server"]);
-            BOOL directKugou = [request.URL.host.lowercaseString isEqual:@"m.kugou.com"];
-            if (!runtime || !source) { completion(@{@"code":@503, @"msg":@"JS 音源当前不可用"}, nil); return nil; }
-            NSArray *qualities = FMXRoutableQualities(runtime.manifest, source);
-            NSString *quality = directKugou ? @"128k" : FMXQuality(parameters[@"level"] ?: @"128k", qualities);
-            NSMutableDictionary *info = [@{@"name":parameters[@"title"] ?: @"", @"singer":parameters[@"singer"] ?: @"", @"source":source ?: @"", @"types":@[], @"_types":@{}} mutableCopy];
-            if ([source isEqual:@"wy"]) info[@"songmid"] = parameters[@"id"] ?: @"";
-            if ([source isEqual:@"tx"]) info[@"songmid"] = parameters[@"id"] ?: @"";
-            if ([source isEqual:@"kg"]) { info[@"hash"] = parameters[@"id"] ?: @""; info[@"songmid"] = parameters[@"id"] ?: @""; }
-            if (!runtime || !source || !quality) { completion(@{@"code":@503, @"msg":@"JS 音源当前不可用"}, nil); return nil; }
-            NSString *diagnosticID = NSUUID.UUID.UUIDString;
-            FMXPlaybackStatus(runtime, diagnosticID, source, @"正在通过 JS 解析", YES);
-            NSString *identifier = [runtime resolveMusicURLForSource:source musicInfo:info quality:quality timeout:35 completion:^(NSURL *url, NSError *error) {
-                if (error) {
-                    if (!(error.code == NSUserCancelledError && [error.domain isEqual:LXSourceRuntimeErrorDomain]))
-                        FMXPlaybackStatus(runtime, diagnosticID, source, @"JS 解析失败，未返回播放地址", NO);
-                    FMXManager *manager = [FMXManager shared];
-                    if (manager.runtime == runtime && !runtime.manifest) {
-                        [manager disable]; manager.status = @"音源已停止，请重新启用或更换音源"; [manager changed];
-                    }
-                    completion(directKugou ? @{@"url":@""} : @{@"code":@502, @"msg":[@"JS 音源：" stringByAppendingString:error.localizedDescription]}, nil);
+            // Keep source/generation, the quality session and its lifetime on main.
+            // A successful metadata request must retain the remaining candidates
+            // for a later *actual* player failure, not cancel them at URL delivery.
+            __block FMQualityResolver *session;
+            __block BOOL cancelled = NO;
+            __block LXSourceRuntime *selectedRuntime;
+            __block NSString *selectedSource, *diagnostic;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (cancelled) return;
+                LXSourceRuntime *runtime = [FMXManager shared].runtime;
+                NSString *source = FMXLXSource(parameters[@"server"]);
+                BOOL directKugou = [request.URL.host.lowercaseString isEqual:@"m.kugou.com"];
+                NSArray *qualities = FMXRoutableQualities(runtime.manifest, source);
+                if (!runtime || !source || !qualities.count) {
+                    completion(directKugou ? @{@"url":@""} : @{@"code":@503, @"msg":@"JS 音源当前不可用"}, nil);
+                    return;
                 }
-                else {
-                    FMXPlaybackStatus(runtime, diagnosticID, source, @"JS 已返回播放地址，时长由音源提供", NO);
-                    completion(directKugou ? @{@"url":url.absoluteString, @"bitRate":@128} : @{@"code":@200, @"data":@{@"url":url.absoluteString, @"quality":quality}}, nil);
-                }
-            }];
-            return ^(NSError *reason) {
-                if (reason.code == NSURLErrorTimedOut) {
-                    // A short outer request deadline can beat the runtime's own timer.
-                    // Discard it before cancellation removes the pending resolution.
-                    dispatch_async(dispatch_get_main_queue(), ^{
+                // Native auth, cookies, QMC keys and custom API settings are not
+                // passed to user scripts. Only the documented song metadata is.
+                NSMutableDictionary *info = [@{@"name":parameters[@"title"] ?: @"", @"singer":parameters[@"singer"] ?: @"", @"source":source, @"types":@[], @"_types":@{}} mutableCopy];
+                info[@"songmid"] = parameters[@"id"] ?: @"";
+                if ([source isEqual:@"kg"]) info[@"hash"] = parameters[@"id"] ?: @"";
+                NSString *diagnosticID = NSUUID.UUID.UUIDString;
+                selectedRuntime = runtime; selectedSource = source; diagnostic = diagnosticID;
+                FMXPlaybackStatus(runtime, diagnosticID, source, @"正在通过 JS 从最高支持音质解析", YES);
+                NSTimeInterval budget = MIN(35, request.timeoutInterval > 0 ? MAX(1, request.timeoutInterval - 1) : 35);
+                session = [[FMQualityResolver alloc] initWithPlatform:source supportedQualities:qualities timeout:budget
+                    isCurrent:^BOOL { return [FMXManager shared].runtime == runtime && runtime.manifest != nil; }
+                    resolve:^dispatch_block_t(NSString *quality, NSTimeInterval timeout, FMQualityAttemptCompletion resolved) {
+                        FMXPlaybackStatus(runtime, diagnosticID, source, [NSString stringWithFormat:@"正在尝试 JS 音质 %@", quality], NO);
+                        NSString *identifier = [runtime resolveMusicURLForSource:source musicInfo:info quality:quality timeout:timeout invalidateOnTimeout:NO completion:resolved];
+                        return ^{ [runtime cancelRequestWithIdentifier:identifier]; };
+                    }];
+                [session nextWithCompletion:^(NSURL *url, NSString *requestedQuality, NSError *error) {
+                    if (cancelled) return;
+                    if (error || !url) {
+                        FMXPlaybackStatus(runtime, diagnosticID, source, @"JS 可用音质均未取得播放地址", NO);
                         FMXManager *manager = [FMXManager shared];
-                        if (manager.runtime != runtime) return;
-                        [manager disable];
-                        manager.status = @"音源解析超时，已停用；请重新启用或更换音源";
-                        [manager changed];
-                    });
-                    [runtime invalidate];
-                } else {
-                    if (reason.code == NSURLErrorCancelled)
-                        FMXPlaybackStatus(runtime, diagnosticID, source, @"本次 JS 解析已取消", NO);
-                    [runtime cancelRequestWithIdentifier:identifier];
-                }
+                        if (manager.runtime == runtime && !runtime.manifest) {
+                            [manager disable];
+                            manager.status = @"JS 音源无响应，已停用；请重新启用或更换音源";
+                            [manager changed];
+                        }
+                        completion(directKugou ? @{@"url":@""} : @{@"code":@502, @"msg":@"JS 音源未取得可播放地址"}, nil);
+                        return;
+                    }
+                    FMAdaptivePlaybackRegisterURL(url, session, requestedQuality,
+                        [NSString stringWithFormat:@"%@:%@", source, parameters[@"id"] ?: @""]);
+                    FMXPlaybackStatus(runtime, diagnosticID, source, @"JS 已返回播放地址，实际音质将在播放后确认", NO);
+                    // Plain URL responses deliberately contain no QMC metadata.
+                    // The original decoder's nil-QMC branch passes them directly
+                    // to the player even when the user's selected level sent qmc=1.
+                    // Requested quality is not misrepresented as measured audio.
+                    completion(directKugou ? @{@"url":url.absoluteString} : @{@"code":@200, @"data":@{@"url":url.absoluteString, @"quality":@"未知", @"qmc":NSNull.null}}, nil);
+                }];
+            });
+            return ^(NSError *reason) {
+                if (!reason) return;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    cancelled = YES; [session cancel];
+                    if (selectedRuntime && selectedSource && diagnostic)
+                        FMXPlaybackStatus(selectedRuntime, diagnostic, selectedSource,
+                            reason.code == NSURLErrorTimedOut ? @"解析超时，本次已停止" : @"本次 JS 解析已取消", NO);
+                });
             };
         } canHandle:^BOOL(NSURLRequest *request, NSDictionary<NSString *,NSString *> *parameters) {
             NSString *source = FMXLXSource(parameters[@"server"]);
             NSDictionary *manifest = [FMXManager shared].runtime.manifest;
-            return source && ![parameters[@"qmc"] isEqual:@"1"] && [parameters[@"id"] length]
+            return source && [parameters[@"id"] length]
                 && FMXRoutableQualities(manifest, source).count > 0;
         }];
         [FMExtensionProtocol install];

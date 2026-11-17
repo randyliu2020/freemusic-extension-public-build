@@ -28,6 +28,7 @@ jobs:
           python -m pip install --quiet setuptools==80.9.0 capstone==5.0.6 unicorn==2.1.4 keystone-engine==0.9.2
           python test_player_swipe_patch.py -v
           python test_playback_cache_patch.py -v
+          python test_adaptive_playback_patch.py -v
 
   build:
     needs: instruction-tests
@@ -59,6 +60,18 @@ jobs:
       - name: Test JavaScript runtime on macOS
         shell: bash
         run: bash test_lx_runtime_macos.sh
+
+      - name: Test highest-first quality fallback and cancellation
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun clang -fobjc-arc -fblocks -framework Foundation \
+            FMQualityResolver.m FMQualityResolverTests.m -o quality-resolver-tests
+          ./quality-resolver-tests
+          xcrun clang -fobjc-arc -fblocks -framework Foundation \
+            -framework JavaScriptCore -framework Security \
+            LXSourceRuntime.m FMQualityResolver.m LXQualityRuntimeTests.m -o quality-runtime-tests
+          ./quality-runtime-tests LXBootstrap.js
 
       - name: Test request interception on macOS
         shell: bash

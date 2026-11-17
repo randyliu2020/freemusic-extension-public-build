@@ -198,6 +198,16 @@ NSDictionary *FMPlaybackCacheDiagnostics(void) {
                  @"persistentBypassServers":[FMCacheTaintedServers.allObjects sortedArrayUsingSelector:@selector(compare:)]};
     }
 }
+NSArray *FMPlaybackCacheNativeManagers(void) {
+    FMCachePrepareState();
+    if (!NSThread.isMainThread) return @[];
+    @synchronized(FMCacheLock) {
+        // Test-only receiver injection must never make a non-native object
+        // available to production ABI consumers.
+        if (!FMCacheImageMatched || !FMCacheInstalled) return @[];
+        return [FMCacheReceivers.allObjects copy];
+    }
+}
 #if defined(FMX_PLAYBACK_CACHE_TESTING) && FMX_PLAYBACK_CACHE_TESTING && TARGET_OS_SIMULATOR
 void FMPlaybackCacheTestConfigureReceiver(id receiver, void *swiftMethod, BOOL imageAllowed) {
     FMCachePrepareState();

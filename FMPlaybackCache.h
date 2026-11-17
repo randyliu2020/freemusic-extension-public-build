@@ -8,6 +8,9 @@ FOUNDATION_EXPORT void FMPlaybackCacheInstall(void);
 /// The set records affected disk namespaces; an empty set still advances RAM.
 FOUNDATION_EXPORT void FMPlaybackCacheSourceTransition(NSSet<NSString *> *affectedServers);
 FOUNDATION_EXPORT NSDictionary *FMPlaybackCacheDiagnostics(void);
+/// Read-only, main-thread snapshot of live receivers captured from the verified
+/// native manager initializer. Empty on an unrecognized image or other thread.
+FOUNDATION_EXPORT NSArray *FMPlaybackCacheNativeManagers(void);
 
 /// Called by verified main-image trampolines. +1 NSString ownership is explicit;
 /// caller bridges to native Swift String, appends, and balances both references.

@@ -138,6 +138,7 @@ static NSDictionary *LXCrypto(NSString *operation, NSDictionary *args) {
 - (void)handleEvent:(NSString *)event json:(NSString *)json;
 - (void)startHTTP:(NSString *)identifier URL:(NSString *)URL options:(NSDictionary *)options;
 - (void)cancelHTTP:(NSString *)identifier;
+- (void)cancelSoftResolutionOnJSQueue:(NSString *)identifier;
 - (void)startTimer:(NSString *)identifier milliseconds:(double)milliseconds repeat:(BOOL)repeat;
 - (void)cancelTimer:(NSString *)identifier;
 - (BOOL)finishLoad:(NSError *)error;
@@ -178,6 +179,7 @@ static NSDictionary *LXCrypto(NSString *operation, NSDictionary *args) {
     NSMutableDictionary<NSNumber *,LXHTTPState *> *_HTTPTasks; // lock protected.
     NSMutableDictionary<NSString *,dispatch_source_t> *_timers; // lock protected.
     NSMutableDictionary<NSString *,LXSourceURLCompletion> *_pending; // lock protected.
+    NSMutableSet<NSString *> *_softResolutions; // lock protected; opt-in quality attempts only.
     LXSourceLoadCompletion _loadCompletion; // lock protected.
     NSDictionary *_proposedManifest; // JS queue only.
     BOOL _started, _invalidated; // lock protected.
@@ -189,7 +191,7 @@ static NSDictionary *LXCrypto(NSString *operation, NSDictionary *args) {
         _jsQueue = dispatch_queue_create("app.freemusic.lx.javascript", DISPATCH_QUEUE_SERIAL);
         _timerQueue = dispatch_queue_create("app.freemusic.lx.timers", DISPATCH_QUEUE_SERIAL);
         _lock = [NSLock new];
-        _HTTPTasks = [NSMutableDictionary dictionary]; _timers = [NSMutableDictionary dictionary]; _pending = [NSMutableDictionary dictionary];
+        _HTTPTasks = [NSMutableDictionary dictionary]; _timers = [NSMutableDictionary dictionary]; _pending = [NSMutableDictionary dictionary]; _softResolutions = NSMutableSet.set;
         NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
         configuration.HTTPCookieStorage = nil; configuration.HTTPCookieAcceptPolicy = NSHTTPCookieAcceptPolicyNever;
         configuration.HTTPShouldSetCookies = NO; configuration.URLCredentialStorage = nil; configuration.URLCache = nil;
@@ -294,6 +296,9 @@ static NSDictionary *LXCrypto(NSString *operation, NSDictionary *args) {
     }
 }
 - (NSString *)resolveMusicURLForSource:(NSString *)source musicInfo:(NSDictionary *)musicInfo quality:(NSString *)quality timeout:(NSTimeInterval)timeout completion:(LXSourceURLCompletion)completion {
+    return [self resolveMusicURLForSource:source musicInfo:musicInfo quality:quality timeout:timeout invalidateOnTimeout:YES completion:completion];
+}
+- (NSString *)resolveMusicURLForSource:(NSString *)source musicInfo:(NSDictionary *)musicInfo quality:(NSString *)quality timeout:(NSTimeInterval)timeout invalidateOnTimeout:(BOOL)invalidateOnTimeout completion:(LXSourceURLCompletion)completion {
     NSString *identifier = NSUUID.UUID.UUIDString;
     NSDictionary *sourceInfo = self.manifest[@"sources"][source];
     NSDictionary *payload = @{@"source":source ?: @"", @"action":@"musicUrl", @"info":@{@"type":quality ?: NSNull.null, @"musicInfo":musicInfo ?: @{}}};
@@ -301,35 +306,55 @@ static NSDictionary *LXCrypto(NSString *operation, NSDictionary *args) {
     BOOL validQuality = [source isEqualToString:@"local"] ? quality == nil : [sourceInfo[@"qualitys"] containsObject:quality ?: @""];
     [_lock lock];
     BOOL unavailable = _invalidated || !sourceInfo || !validQuality || !json || _pending.count >= 16;
-    if (!unavailable) _pending[identifier] = [completion copy];
+    if (!unavailable) {
+        _pending[identifier] = [completion copy];
+        if (!invalidateOnTimeout) [_softResolutions addObject:identifier];
+    }
     [_lock unlock];
     if (unavailable) { dispatch_async(dispatch_get_main_queue(), ^{ completion(nil,LXError(6,@"Source unavailable, unsupported quality, invalid metadata, or too many requests")); }); return identifier; }
-    timeout = isfinite(timeout) ? MAX(1,MIN(60,timeout)) : 25;
+    timeout = isfinite(timeout) ? MAX(invalidateOnTimeout ? 1 : 0.01,MIN(60,timeout)) : 25;
     __weak typeof(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(timeout*NSEC_PER_SEC)), dispatch_get_global_queue(QOS_CLASS_UTILITY,0), ^{
         typeof(self) self = weakSelf; if (!self) return;
         [self->_lock lock];
         LXSourceURLCompletion timedOut = self->_pending[identifier];
         [self->_pending removeObjectForKey:identifier];
+        [self->_softResolutions removeObject:identifier];
         [self->_lock unlock];
         if (timedOut) {
-            // Clear the public manifest before notifying the UI, so callers can
-            // reliably recognize the discarded runtime in their error handler.
-            [self invalidate];
-            dispatch_async(dispatch_get_main_queue(), ^{ timedOut(nil,LXError(7,@"Music URL resolution timed out; runtime discarded")); });
+            if (invalidateOnTimeout) {
+                // Preserve the original hard-timeout contract.
+                [self invalidate];
+            } else [self cancelSoftResolutionOnJSQueue:identifier];
+            dispatch_async(dispatch_get_main_queue(), ^{ timedOut(nil,LXError(7,invalidateOnTimeout ? @"Music URL resolution timed out; runtime discarded" : @"Quality attempt timed out")); });
         }
     });
     dispatch_async(_jsQueue, ^{ if (![self isInvalidated]) [self->_context[@"__LXResolve"] callWithArguments:@[identifier,json]]; });
     return identifier;
 }
 - (BOOL)finishResolve:(NSString *)identifier URL:(NSURL *)URL error:(NSError *)error {
-    [_lock lock]; LXSourceURLCompletion completion = _pending[identifier]; [_pending removeObjectForKey:identifier]; [_lock unlock];
+    [_lock lock]; LXSourceURLCompletion completion = _pending[identifier]; [_pending removeObjectForKey:identifier]; [_softResolutions removeObject:identifier]; [_lock unlock];
     if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(URL,error); });
     return completion != nil;
 }
+- (void)cancelSoftResolutionOnJSQueue:(NSString *)identifier {
+    // Native completion is independent of JavaScript. A cooperative script loses
+    // its late result; an unresponsive context is discarded, never force-stopped.
+    __block BOOL acknowledged = NO;
+    dispatch_async(_jsQueue, ^{
+        [self->_context[@"__LXCancelResolve"] callWithArguments:@[identifier]];
+        [self->_lock lock]; acknowledged = YES; [self->_lock unlock];
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_global_queue(QOS_CLASS_UTILITY,0), ^{
+        [self->_lock lock]; BOOL responsive = acknowledged || self->_invalidated; [self->_lock unlock];
+        if (!responsive) [self invalidate];
+    });
+}
 - (void)cancelRequestWithIdentifier:(NSString *)identifier {
+    [_lock lock]; BOOL soft = [_softResolutions containsObject:identifier]; [_lock unlock];
     [self finishResolve:identifier URL:nil error:LXError(NSUserCancelledError,@"Request cancelled")];
-    dispatch_async(_jsQueue, ^{ [self->_context[@"__LXCancelResolve"] callWithArguments:@[identifier]]; });
+    if (soft) [self cancelSoftResolutionOnJSQueue:identifier];
+    else dispatch_async(_jsQueue, ^{ [self->_context[@"__LXCancelResolve"] callWithArguments:@[identifier]]; });
 }
 - (void)startTimer:(NSString *)identifier milliseconds:(double)milliseconds repeat:(BOOL)repeat {
     [_lock lock];
@@ -454,7 +479,7 @@ static NSDictionary *LXCrypto(NSString *operation, NSDictionary *args) {
     _invalidated = YES;
     NSArray *tasks = _HTTPTasks.allValues; [_HTTPTasks removeAllObjects];
     NSArray *timers = _timers.allValues; [_timers removeAllObjects];
-    NSDictionary *pending = [_pending copy]; [_pending removeAllObjects];
+    NSDictionary *pending = [_pending copy]; [_pending removeAllObjects]; [_softResolutions removeAllObjects];
     LXSourceLoadCompletion load = _loadCompletion; _loadCompletion = nil;
     [_lock unlock];
     for (LXHTTPState *state in tasks) [state.task cancel];

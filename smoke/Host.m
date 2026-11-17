@@ -10,6 +10,7 @@
 #import "FMQishuiSearch.h"
 #import "FMExtensionProtocol.h"
 #import "FMListeningHistory.h"
+#import "FMQualityResolver.h"
 
 @interface FMXManager : NSObject
 @property(atomic,strong) LXSourceRuntime *runtime;
@@ -472,11 +473,14 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
         __block NSUInteger stable=0;
         Check(Until(^BOOL{stable=[manager.playbackStatus isEqual:@"网易云：本次 JS 解析已取消"]?stable+1:0;return stable>=4;},3),@"Client cancellation remains visible after the runtime cancellation completion");
     } else {
-        Check(Until(^BOOL{return manager.runtime==nil && runtime.manifest==nil && manager.selectedFile==nil && manager.playbackStatus==nil && manager.playbackRequest==nil && [NSUserDefaults.standardUserDefaults objectForKey:@"FMX.selectedSource"]==nil;},3),@"Short request timeout discards runtime and clears selection and playback diagnostics");
-        Check(elapsed<3,@"Short request timeout must not wait for the inner 35-second runtime deadline");
-        __block BOOL explained=NO;Main(^{explained=[manager.status containsString:@"超时"] && [manager.status containsString:@"停用"];});Check(explained,@"Manager explains why timeout disabled the source");
+        Check(Until(^BOOL{return manager.runtime==runtime && runtime.manifest!=nil && [manager.selectedFile isEqual:@"SmokeFixture.js"] && [[NSUserDefaults.standardUserDefaults objectForKey:@"FMX.selectedSource"] isEqual:@"SmokeFixture.js"];},3),@"Short outer timeout stops only this session and keeps the responsive source selected");
+        Check(elapsed<3,@"Short request timeout must not wait for the inner total resolution budget");
+        __block NSUInteger stable=0;
+        Check(Until(^BOOL{stable=[manager.playbackStatus isEqual:@"网易云：解析超时，本次已停止"]?stable+1:0;return stable>=4;},3),@"Timeout remains visible after cancellation completion without disabling source");
     }
-    return @{@"request_timeout_seconds":@(budget),@"elapsed_seconds":@(elapsed),@"native_error_domain":failure.domain,@"native_error_code":@(failure.code),@"callback_count":@(callbacks),@"source_kept_enabled":@(cancel),@"real_network_used":@NO};
+    NSDictionary *recovery=[self parseServer:@"wy"];
+    Check(Until(^BOOL{return manager.runtime==runtime && runtime.manifest!=nil;},2),@"Subsequent production parse succeeds through the same responsive runtime");
+    return @{@"request_timeout_seconds":@(budget),@"elapsed_seconds":@(elapsed),@"native_error_domain":failure.domain,@"native_error_code":@(failure.code),@"callback_count":@(callbacks),@"source_kept_enabled":@YES,@"subsequent_parse":recovery,@"real_network_used":@NO};
 }
 - (NSDictionary *)parseServer:(NSString *)server {
     BOOL kugou=[server isEqual:@"kg"];
@@ -510,18 +514,19 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
     BOOL finished=dispatch_semaphore_wait(done,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC))==0;
     [session invalidateAndCancel];
     Check(finished,@"Native parse callback deadline"); Check(!failure,failure.localizedDescription);
-    Check([payload isKindOfClass:NSDictionary.class] && (kugou ? [payload[@"bitRate"] integerValue]==128 : [payload[@"code"] integerValue]==200),[payload description]);
+    Check([payload isKindOfClass:NSDictionary.class] && (kugou ? payload[@"bitRate"]==nil : [payload[@"code"] integerValue]==200),[payload description]);
+    if(!kugou)Check([payload[@"data"][@"quality"] isEqual:@"未知"] && payload[@"data"][@"qmc"]==NSNull.null,@"JS URL is plain and requested quality is not presented as measured audio quality");
     NSString *source=[server isEqual:@"qq"] ? @"tx" : server;
     NSString *expected=[NSString stringWithFormat:@"https://fixture.invalid/%@/%@/128k",source,identifier];
     NSString *actual=kugou ? payload[@"url"] : payload[@"data"][@"url"];
     Check([actual isEqual:expected],@"LX source/id/quality mapping");
     NSString *label=@{@"wy":@"网易云",@"qq":@"QQ",@"kg":@"酷狗"}[server];
-    NSString *expectedStatus=[label stringByAppendingString:@"：JS 已返回播放地址，时长由音源提供"];
+    NSString *expectedStatus=[label stringByAppendingString:@"：JS 已返回播放地址，实际音质将在播放后确认"];
     __block NSUInteger stable=0;
     Check(Until(^BOOL{stable=[manager.playbackStatus isEqual:expectedStatus]?stable+1:0;return stable>=4;},3),@"Successful JS parsing remains reported as returned URL after protocol cleanup");
     __block NSArray<NSString *> *statuses;__block NSString *status;
     Main(^{statuses=observedStatuses.copy;status=manager.playbackStatus;});
-    Check([statuses containsObject:[label stringByAppendingString:@"：正在通过 JS 解析"]],@"Actual handler invocation produces the parsing state");
+    Check([statuses containsObject:[label stringByAppendingString:@"：正在通过 JS 从最高支持音质解析"]],@"Actual handler invocation produces the parsing state");
     Check([statuses containsObject:expectedStatus],@"Actual returned URL produces a platform-specific result state");
     for(NSString *entry in statuses) for(NSString *privateValue in @[identifier,expected,@"fixture.invalid",@"http://",@"https://",@"FIXTURE_NOT_FOR_SCRIPT"])
         Check(![entry containsString:privateValue],@"Playback diagnostics must not disclose fixture identifiers, URLs, or credentials");
@@ -978,7 +983,7 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
         [self test:@"native_protocol_to_LX_qq_to_tx" body:^NSDictionary *{return [self parseServer:@"qq"];}];
         [self test:@"native_protocol_to_LX_kg_standard_hash" body:^NSDictionary *{return [self parseServer:@"kg"];}];
         [self test:@"ordinary_client_cancellation_keeps_manager_source_enabled" body:^NSDictionary *{return [self pendingParseCancelled:YES];}];
-        [self test:@"short_outer_timeout_discards_runtime_and_manager_selection" body:^NSDictionary *{return [self pendingParseCancelled:NO];}];
+        [self test:@"short_outer_timeout_keeps_responsive_runtime_and_recovers" body:^NSDictionary *{return [self pendingParseCancelled:NO];}];
         [self test:@"manager_rejects_sources_without_a_routable_quality_intersection" body:^NSDictionary *{
             __block FMXManager *manager;__block NSURL *directory;Main(^{manager=[(id)NSClassFromString(@"FMXManager") shared];directory=[manager directory];});
             NSArray *manifests=@[@{@"kw":@{@"type":@"music",@"actions":@[@"musicUrl"],@"qualitys":@[@"128k"]}},@{@"wy":@{@"type":@"music",@"actions":@[@"musicUrl"],@"qualitys":@[]}},@{@"kg":@{@"type":@"music",@"actions":@[@"musicUrl"],@"qualitys":@[@"flac"]}}];
@@ -1008,6 +1013,9 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
             Check(clean,@"Manager disable must clear runtime, remembered source, and playback diagnostics");return nil;
         }];
 #include "V5PlaybackCacheTests.inc"
+#include "V6QualityRoutingTests.inc"
+#include "V6AdaptivePlaybackTests.inc"
+#include "V6PlaybackQualityTests.inc"
         [self test:@"square_and_portrait_previews" body:^NSDictionary *{
             CheckUpright(cover.CGImage);
             for(NSNumber *portrait in @[@NO,@YES]){UIImage *preview=PreviewArtwork(cover,portrait.boolValue);Check(preview.CGImage && CGImageGetWidth(preview.CGImage)==720 && CGImageGetHeight(preview.CGImage)==(portrait.boolValue?960:720),@"Preview pixel dimensions");CheckUpright(preview.CGImage);[UIImagePNGRepresentation(preview) writeToURL:[self.output URLByAppendingPathComponent:portrait.boolValue?@"portrait-preview.png":@"square-preview.png"] atomically:YES];}return @{@"red_top_blue_bottom_verified":@YES};

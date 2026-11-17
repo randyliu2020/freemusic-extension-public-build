@@ -155,20 +155,7 @@ arch="$(uname -m)"
 [[ "$arch" == arm64 || "$arch" == x86_64 ]] || { echo "Unsupported runner architecture: $arch" >&2; exit 2; }
 
 stage="compile_simulator_dylib"
-xcrun --sdk iphonesimulator clang \
-  -target "${arch}-apple-ios26.0-simulator" -isysroot "$sdk_path" \
-  -dynamiclib -fobjc-arc -fblocks -O1 -g -Wall -Wextra -Wno-unused-parameter \
-  -Werror=implicit-function-declaration -DFMX_LOCKSCREEN_TESTING=1 -DFMX_LISTENING_CAPTURE_TESTING=1 -DFMX_PLAYBACK_CACHE_TESTING=1 -I "$source_dir" \
-  -install_name '@executable_path/Frameworks/FMExtension.dylib' \
-  -framework Foundation -framework UIKit -framework JavaScriptCore \
-  -framework UniformTypeIdentifiers -framework Security -framework MediaPlayer \
-  -framework AVFoundation -framework CoreVideo -framework CoreMedia \
-  -framework CoreGraphics -framework Vision \
-  "$source_dir/FMExtension.m" "$source_dir/FMExtensionProtocol.m" "$source_dir/FMQishuiSearch.m" \
-  "$source_dir/LXSourceRuntime.m" "$source_dir/FMLockScreen.m" "$source_dir/FMSettingsEntry.m" "$source_dir/FMSearchPreferences.m" \
-  "$source_dir/FMListeningHistory.m" "$source_dir/FMInsights.m" "$source_dir/FMInteraction.m" "$source_dir/FMLXMC.m" "$source_dir/FMLXMCUI.m" "$source_dir/FMNavigation.m" -lz \
-  "$source_dir/FMListeningCapture.m" "$source_dir/FMPlaybackCache.m" \
-  -o "$app_dir/Frameworks/FMExtension.dylib" 2>&1 | tee "$output_dir/compile-dylib.log"
+bash "$source_dir/compile_extension.sh" "$source_dir" iphonesimulator "${arch}-apple-ios26.0-simulator" "$app_dir/Frameworks/FMExtension.dylib" simulator 2>&1 | tee "$output_dir/compile-dylib.log"
 
 stage="compile_self_authored_host"
 xcrun --sdk iphonesimulator clang \
@@ -186,13 +173,15 @@ xcrun --sdk iphonesimulator swiftc \
   -framework SwiftUI -framework UIKit -framework Foundation \
   -Xlinker -install_name -Xlinker '@executable_path/Frameworks/SmokeSettingsFixture.dylib' \
   "$source_dir/smoke/SettingsFixture.swift" "$source_dir/smoke/LXMCFixture.swift" "$source_dir/smoke/InteractionFixture.swift" "$source_dir/smoke/NavigationFixture.swift" \
-  "$source_dir/smoke/PlaybackCacheFixture.swift" \
+  "$source_dir/smoke/PlaybackCacheFixture.swift" "$source_dir/smoke/AdaptivePlaybackFixture.swift" "$source_dir/smoke/PlaybackQualityFixture.swift" \
   -o "$app_dir/Frameworks/SmokeSettingsFixture.dylib" 2>&1 | tee "$output_dir/compile-swiftui-fixture.log"
 cp "$source_dir/LXBootstrap.js" "$app_dir/LXBootstrap.js"
 python3 - "$app_dir" "$sdk_version" "$source_dir" "$output_dir" <<'PY'
 import hashlib,json,pathlib,plistlib,sys
 app=pathlib.Path(sys.argv[1]); source=pathlib.Path(sys.argv[3]); out=pathlib.Path(sys.argv[4])
 info={'CFBundleIdentifier':'org.codex.fmx.smoke','CFBundleExecutable':'FreeMusic','CFBundleName':'LX Extension Smoke','CFBundleDisplayName':'LX Extension Smoke','CFBundlePackageType':'APPL','CFBundleShortVersionString':'4.2.7','CFBundleVersion':'1','MinimumOSVersion':'26.0','UIDeviceFamily':[1],'LSRequiresIPhoneOS':True,'UILaunchScreen':{},'UISupportedInterfaceOrientations':['UIInterfaceOrientationPortrait'],'UIApplicationSceneManifest':{'UIApplicationSupportsMultipleScenes':False,'UISceneConfigurations':{'UIWindowSceneSessionRoleApplication':[{'UISceneConfigurationName':'Smoke','UISceneDelegateClassName':'SmokeSceneDelegate'}]}}}
+# Permit only the authored loopback HTTP media fixture; production Info.plist is untouched.
+info['NSAppTransportSecurity']={'NSAllowsLocalNetworking':True}
 with (app/'Info.plist').open('wb') as f: plistlib.dump(info,f)
 manifest={'sdk':sys.argv[2],'developer_dir':__import__('os').environ['DEVELOPER_DIR'],'original_ipa_used':False,'test_macro':'FMX_LOCKSCREEN_TESTING','source_sha256':{name:hashlib.sha256((source/name).read_bytes()).hexdigest() for name in ['FMExtension.m','FMExtensionProtocol.m','FMQishuiSearch.m','FMQishuiSearch.h','FMSettingsEntry.m','FMSettingsEntry.h','FMSearchPreferences.m','FMSearchPreferences.h','LXSourceRuntime.m','LXBootstrap.js','FMLockScreen.m','smoke/Host.m','smoke/SettingsFixture.swift','FMListeningHistory.m','FMListeningHistory.h','FMInsights.m','FMInsights.h','FMInteraction.m','FMInteraction.h','FMLXMC.m','FMLXMC.h']}}
 for name in ['FMLXMCUI.m','FMLXMCUI.h','smoke/LXMCFixture.swift','FMNavigation.m','FMNavigation.h','smoke/NavigationFixture.swift','smoke/InteractionFixture.swift','smoke/V3NavigationTests.inc','FMListeningCapture.m','FMListeningCapture.h']:
@@ -203,7 +192,9 @@ for name in ['smoke/V3ListeningCaptureTests.inc','verify_interaction_result.py',
     manifest['source_sha256'][name]=hashlib.sha256((source/name).read_bytes()).hexdigest()
 for name in ['FMPlaybackCache.m','FMPlaybackCache.h','smoke/PlaybackCacheFixture.swift','smoke/V5PlaybackCacheTests.inc']:
     manifest['source_sha256'][name]=hashlib.sha256((source/name).read_bytes()).hexdigest()
-manifest['test_macros']=['FMX_LOCKSCREEN_TESTING','FMX_LISTENING_CAPTURE_TESTING','FMX_PLAYBACK_CACHE_TESTING']
+for name in ['FMQualityResolver.m','FMQualityResolver.h','FMAdaptivePlayback.m','FMAdaptivePlayback.h','FMAdaptivePlaybackBridge.swift','FMPlaybackQualityDisplay.m','FMPlaybackQualityDisplay.h','FMPlaybackQualityBridge.swift','compile_extension.sh','smoke/AdaptivePlaybackFixture.swift','smoke/V6AdaptivePlaybackTests.inc','smoke/V6QualityRoutingTests.inc','smoke/PlaybackQualityFixture.swift','smoke/V6PlaybackQualityTests.inc']:
+    manifest['source_sha256'][name]=hashlib.sha256((source/name).read_bytes()).hexdigest()
+manifest['test_macros']=['FMX_LOCKSCREEN_TESTING','FMX_LISTENING_CAPTURE_TESTING','FMX_PLAYBACK_CACHE_TESTING','FMX_ADAPTIVE_PLAYBACK_TESTING','FMX_PLAYBACK_QUALITY_TESTING']
 (out/'build.json').write_text(json.dumps(manifest,indent=2)+'\n')
 PY
 codesign --force --sign - "$app_dir/Frameworks/FMExtension.dylib" >"$output_dir/sign.log" 2>&1
