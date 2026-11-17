@@ -183,6 +183,7 @@ static NSMutableURLRequest *StreamRequest(NSString *query, NSString *body) {
 
 static NSDictionary *FetchWithConfigurationAndWait(NSURLRequest *request, NSURLSessionConfiguration *configuration, NSTimeInterval wait) {
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    NSTimeInterval began=NSProcessInfo.processInfo.systemUptime;
     __block NSDictionary *result;
     NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration];
     NSURLSessionDataTask *task = [session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
@@ -194,6 +195,8 @@ static NSDictionary *FetchWithConfigurationAndWait(NSURLRequest *request, NSURLS
     [task resume];
     BOOL completed = dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(wait*NSEC_PER_SEC))) == 0;
     [session invalidateAndCancel];
+    NSError *fetchError=[result[@"error"] isKindOfClass:NSError.class]?result[@"error"]:nil;
+    if(!completed||fetchError)fprintf(stderr,"FETCH diagnostic: completed=%d elapsed=%.3f wait=%.3f request_timeout=%.3f status=%ld error_domain=%s error_code=%ld\n",completed,NSProcessInfo.processInfo.systemUptime-began,wait,request.timeoutInterval,(long)[result[@"status"] integerValue],fetchError.domain.UTF8String?:"none",(long)fetchError.code);
     Check(completed, @"NSURLSession loopback completes without external network");
     return result ?: @{};
 }
@@ -327,6 +330,8 @@ static void RunLXMCImportTests(void) {
 
 static void RunParseBudgetTests(void) {
     __block NSUInteger calls = 0;
+    __block NSUInteger cleanups=0;
+    __block NSTimeInterval handlerStarted=0,delayedCallbackAt=0,cleanedAt=0;
     __block NSError *cleanupReason;
     __block FMXProtocolCompletion heldCompletion;
     dispatch_semaphore_t started = dispatch_semaphore_create(0);
@@ -335,25 +340,32 @@ static void RunParseBudgetTests(void) {
         calls++;
         Check(request.HTTPBodyStream == nil && [parameters[@"server"] isEqual:@"qq"], @"QQ budget fixture reaches handler with retained native request");
         if ([parameters[@"id"] isEqual:@"fixture-long"]) {
-            Check(request.timeoutInterval == 30, @"Extension does not extend the original 30-second request timeout");
+            handlerStarted=NSProcessInfo.processInfo.systemUptime;
+            Check(request.timeoutInterval == 40, @"Extension does not extend the original 40-second fixture request timeout");
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 28*NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_DEFAULT,0), ^{
+                delayedCallbackAt=NSProcessInfo.processInfo.systemUptime;
                 complete(@{@"code":@200,@"data":@{@"url":@"https://example.invalid/fixture.mp3",@"quality":@"128k"}}, nil);
             });
         } else heldCompletion = complete;
         dispatch_semaphore_signal(started);
-        return ^(NSError *reason) { cleanupReason=reason; dispatch_semaphore_signal(cleaned); };
+        return ^(NSError *reason) { cleanups++;cleanedAt=NSProcessInfo.processInfo.systemUptime;cleanupReason=reason; dispatch_semaphore_signal(cleaned); };
     } canHandle:^BOOL(NSURLRequest *request, NSDictionary *parameters) {
         return [parameters[@"server"] isEqual:@"qq"] && ![parameters[@"qmc"] isEqual:@"1"];
     }];
 
     unsigned beforeOrigin = atomic_load(&originRequests);
     NSMutableURLRequest *longRequest = StreamRequest(@"action=parse", @"server=qq&id=fixture-long&level=qq_standard");
-    longRequest.timeoutInterval = 30;
+    // Keep the real 28-second response so the old 20-second cap still fails.
+    // Give loaded CI workers scheduling headroom; production timeouts are unchanged.
+    longRequest.timeoutInterval = 40;
     NSTimeInterval begin = NSProcessInfo.processInfo.systemUptime;
-    NSDictionary *result = FetchWithConfigurationAndWait(longRequest, NSURLSessionConfiguration.defaultSessionConfiguration, 32);
+    NSDictionary *result = FetchWithConfigurationAndWait(longRequest, NSURLSessionConfiguration.defaultSessionConfiguration, 50);
+    NSTimeInterval elapsed=NSProcessInfo.processInfo.systemUptime-begin;
+    NSError *longError=[result[@"error"] isKindOfClass:NSError.class]?result[@"error"]:nil;
+    fprintf(stderr,"LONG PARSE diagnostic: elapsed=%.3f handler_start=%.3f callback=%.3f cleanup=%.3f calls=%lu cleanups=%lu status=%ld error_domain=%s error_code=%ld cleanup_domain=%s cleanup_code=%ld\n",elapsed,handlerStarted?handlerStarted-begin:-1,delayedCallbackAt?delayedCallbackAt-begin:-1,cleanedAt?cleanedAt-begin:-1,(unsigned long)calls,(unsigned long)cleanups,(long)[result[@"status"] integerValue],longError.domain.UTF8String?:"none",(long)longError.code,cleanupReason.domain.UTF8String?:"none",(long)cleanupReason.code);
     Check([result[@"status"] integerValue] == 200 && [result[@"json"][@"code"] integerValue] == 200 && result[@"json"][@"data"][@"url"] != nil,
           @"Actual NSURLSession accepts a 28-second anonymous resolution beyond the old 20-second cap");
-    Check(NSProcessInfo.processInfo.systemUptime-begin >= 27.5 && calls == 1 && cleanupReason == nil,
+    Check(elapsed >= 27.5 && delayedCallbackAt-handlerStarted >= 27.5 && calls == 1 && cleanups == 1 && cleanupReason == nil,
           @"Delayed resolution completes once with successful cleanup");
     Check(atomic_load(&originRequests) == beforeOrigin, @"Delayed supported QQ request never reaches the native backend");
     while (dispatch_semaphore_wait(started, DISPATCH_TIME_NOW) == 0) {}

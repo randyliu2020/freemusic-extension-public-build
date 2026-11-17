@@ -4,6 +4,7 @@
 #import <math.h>
 #import <stdio.h>
 #import <string.h>
+#import <objc/runtime.h>
 
 NSString * const FMJSDownloadErrorDomain = @"FMJSDownload";
 static const uint64_t FMJSMaximumFileBytes = 1024ULL * 1024ULL * 1024ULL;
@@ -12,6 +13,12 @@ static NSError *FMJDError(NSInteger code, NSString *message) {
     return [NSError errorWithDomain:FMJSDownloadErrorDomain code:code userInfo:@{NSLocalizedDescriptionKey:message}];
 }
 static NSError *FMJDCancelled(void) { return [NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil]; }
+static NSError *FMJDValidationError(NSError *error,NSString *stage) {
+    error=error ?: FMJDError(FMJSDownloadInvalidAudio,@"Audio validation failed");
+    NSMutableDictionary *info=[error.userInfo mutableCopy] ?: NSMutableDictionary.dictionary;
+    info[@"FMJSValidationStage"]=stage;
+    return [NSError errorWithDomain:error.domain code:error.code userInfo:info];
+}
 static NSString *FMJDHeader(NSHTTPURLResponse *response,NSString *name) {
     for(id key in response.allHeaderFields) if([[key description] caseInsensitiveCompare:name]==NSOrderedSame) return [response.allHeaderFields[key] description];
     return nil;
@@ -45,22 +52,22 @@ static NSString *FMJDHeader(NSHTTPURLResponse *response,NSString *name) {
                 NSError *error=nil;
                 if([self isCancelled]){completion(FMJDCancelled());return;}
                 for(NSString *key in @[@"tracks",@"duration",@"playable"]){
-                    if([asset statusOfValueForKey:key error:&error]!=AVKeyValueStatusLoaded){completion(error ?: FMJDError(FMJSDownloadInvalidAudio,@"Audio properties could not be loaded"));return;}
+                    if([asset statusOfValueForKey:key error:&error]!=AVKeyValueStatusLoaded){completion(FMJDValidationError(error,[@"asset_load_" stringByAppendingString:key]));return;}
                 }
                 NSArray<AVAssetTrack *> *tracks=[asset tracksWithMediaType:AVMediaTypeAudio];
                 double duration=CMTimeGetSeconds(asset.duration);
-                if(!asset.playable || !tracks.count || !isfinite(duration) || duration<=0){completion(FMJDError(FMJSDownloadInvalidAudio,@"Downloaded file contains no playable finite audio"));return;}
+                if(!asset.playable || !tracks.count || !isfinite(duration) || duration<=0){completion(FMJDValidationError(FMJDError(FMJSDownloadInvalidAudio,@"Downloaded file contains no playable finite audio"),!asset.playable?@"asset_not_playable":(!tracks.count?@"asset_no_audio_tracks":@"asset_invalid_duration")));return;}
                 AVAssetReader *reader=[[AVAssetReader alloc] initWithAsset:asset error:&error];
-                if(!reader){completion(error ?: FMJDError(FMJSDownloadInvalidAudio,@"Audio reader could not be created"));return;}
+                if(!reader){completion(FMJDValidationError(error,@"reader_create"));return;}
                 NSDictionary *settings=@{AVFormatIDKey:@(kAudioFormatLinearPCM),AVLinearPCMBitDepthKey:@16,
                     AVLinearPCMIsFloatKey:@NO,AVLinearPCMIsBigEndianKey:@NO,AVLinearPCMIsNonInterleaved:@NO};
                 AVAssetReaderTrackOutput *output=[[AVAssetReaderTrackOutput alloc] initWithTrack:tracks.firstObject outputSettings:settings];
                 output.alwaysCopiesSampleData=NO;
-                if(![reader canAddOutput:output]){completion(FMJDError(FMJSDownloadInvalidAudio,@"Audio decoder does not accept this track"));return;}
+                if(![reader canAddOutput:output]){completion(FMJDValidationError(nil,@"reader_add_output"));return;}
                 [reader addOutput:output];
                 [self->_lock lock];self->_reader=reader;BOOL stopped=self->_cancelled;[self->_lock unlock];
                 if(stopped){completion(FMJDCancelled());return;}
-                if(![reader startReading]){completion(reader.error ?: FMJDError(FMJSDownloadInvalidAudio,@"Audio decoder rejected downloaded file"));return;}
+                if(![reader startReading]){completion(FMJDValidationError(reader.error,@"reader_start"));return;}
                 uint64_t samples=0;
                 while(![self isCancelled]){
                     @autoreleasepool {
@@ -70,7 +77,7 @@ static NSString *FMJDHeader(NSHTTPURLResponse *response,NSString *name) {
                     }
                 }
                 if([self isCancelled]){[reader cancelReading];completion(FMJDCancelled());return;}
-                if(reader.status!=AVAssetReaderStatusCompleted || !samples){completion(reader.error ?: FMJDError(FMJSDownloadInvalidAudio,@"Audio decoding did not reach a clean end"));return;}
+                if(reader.status!=AVAssetReaderStatusCompleted || !samples){completion(FMJDValidationError(reader.error,reader.status!=AVAssetReaderStatusCompleted?@"reader_incomplete":@"reader_no_samples"));return;}
                 completion(nil);
             }
         });
@@ -78,12 +85,25 @@ static NSString *FMJDHeader(NSHTTPURLResponse *response,NSString *name) {
 }
 @end
 
+// A task owns this immutable destination/revision and its delegate-queue result.
+// didFinish must adopt Foundation's temporary file before returning; only the
+// subsequent didComplete callback may hand the transfer back to the main state.
+static const void *FMJDTransferKey=&FMJDTransferKey;
+@interface FMJSDownloadTransfer : NSObject
+@property(nonatomic,strong) NSURL *target;
+@property(nonatomic) NSUInteger revision;
+@property(nonatomic) BOOL moved;
+@property(nonatomic,strong) NSError *moveError;
+@end
+@implementation FMJSDownloadTransfer @end
+
 @interface FMJSDownloadCoordinator ()
 - (void)next;
 - (void)removeCandidate;
 - (void)transfer:(NSURL *)url quality:(NSString *)quality;
 - (void)inspectFile:(NSURL *)file response:(NSHTTPURLResponse *)response revision:(NSUInteger)revision;
 - (void)finishFile:(NSURL *)file response:(NSHTTPURLResponse *)response quality:(NSString *)quality error:(NSError *)error;
+- (void)recordPhase:(NSString *)phase error:(NSError *)error response:(NSHTTPURLResponse *)response bytes:(uint64_t)bytes;
 @end
 @implementation FMJSDownloadCoordinator {
     FMQualityResolver *_resolver;
@@ -101,6 +121,8 @@ static NSString *FMJDHeader(NSHTTPURLResponse *response,NSString *name) {
     dispatch_source_t _timer;
     BOOL _started,_finished,_suspended,_resolving,_validated;
     NSUInteger _revision,_attempts,_transferFailures,_validationFailures,_successes,_completionCount;
+    NSUInteger _progressCallbacks;
+    NSMutableArray *_events;
     NSTimeInterval _remaining,_lastTick;
 }
 - (instancetype)initWithResolver:(FMQualityResolver *)resolver configuration:(NSURLSessionConfiguration *)configuration
@@ -121,11 +143,22 @@ static NSString *FMJDHeader(NSHTTPURLResponse *response,NSString *name) {
         // LX musicUrl returns a bare URL. Never forward the original API session's
         // cookie/authentication or arbitrary default headers to a script URL.
         _configuration.HTTPAdditionalHeaders=nil;
-        _remaining=900;
+        _remaining=900;_events=NSMutableArray.array;
     }return self;
 }
 - (BOOL)current {
     @try{return _isCurrent && _isCurrent();}@catch(__unused NSException *exception){return NO;}
+}
+- (void)recordPhase:(NSString *)phase error:(NSError *)error response:(NSHTTPURLResponse *)response bytes:(uint64_t)bytes {
+    NSMutableDictionary *event=[@{@"phase":phase,@"quality":_quality ?: @"",@"http_status":@(response.statusCode),@"bytes":@(bytes)} mutableCopy];
+    if(error){
+        NSMutableArray *chain=NSMutableArray.array;
+        for(NSError *item=error;item && chain.count<4;item=[item.userInfo[NSUnderlyingErrorKey] isKindOfClass:NSError.class]?item.userInfo[NSUnderlyingErrorKey]:nil)
+            [chain addObject:@{@"domain":item.domain ?: @"",@"code":@(item.code)}];
+        event[@"errors"]=chain;
+        if([error.userInfo[@"FMJSValidationStage"] isKindOfClass:NSString.class])event[@"validation_stage"]=error.userInfo[@"FMJSValidationStage"];
+    }
+    [_events addObject:event];if(_events.count>32)[_events removeObjectAtIndex:0];
 }
 - (void)startWithProgress:(FMJSDownloadProgress)progress completion:(FMJSDownloadCompletion)completion {
     FMJDMain(^{
@@ -170,7 +203,7 @@ static NSString *FMJDHeader(NSHTTPURLResponse *response,NSString *name) {
         self->_resolving=NO;
         if(![self current]){[self finishFile:nil response:nil quality:nil error:FMJDCancelled()];return;}
         if(self->_suspended){self->_pendingURL=url;self->_pendingQuality=quality;self->_pendingError=error;return;}
-        if(!url || error){[self finishFile:nil response:nil quality:nil error:error ?: self->_lastError ?: FMJDError(FMJSDownloadInvalidResponse,@"No download candidate remains")];return;}
+        if(!url || error){[self recordPhase:@"resolution_end" error:error response:nil bytes:0];[self finishFile:nil response:nil quality:nil error:error ?: self->_lastError ?: FMJDError(FMJSDownloadInvalidResponse,@"No download candidate remains")];return;}
         [self transfer:url quality:quality];
     }];
 }
@@ -179,29 +212,12 @@ static NSString *FMJDHeader(NSHTTPURLResponse *response,NSString *name) {
     _quality=[quality copy];++_attempts;NSUInteger revision=++_revision;
     NSMutableURLRequest *request=[NSMutableURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:_configuration.timeoutIntervalForRequest];
     [request setValue:@"identity" forHTTPHeaderField:@"Accept-Encoding"];
-    NSURL *target=[_directory URLByAppendingPathComponent:[NSUUID.UUID.UUIDString stringByAppendingString:@".media"]];
-    __weak typeof(self) weakSelf=self;
-    NSURLSessionDownloadTask *task=[_session downloadTaskWithRequest:request completionHandler:^(NSURL *location,NSURLResponse *response,NSError *error){
-        NSError *moveError=nil;
-        BOOL moved=location && [NSFileManager.defaultManager moveItemAtURL:location toURL:target error:&moveError];
-        // Capture an owned copy before URLSession removes its temporary file.
-        dispatch_async(dispatch_get_main_queue(),^{
-            typeof(self) self=weakSelf;
-            if(!self || self->_finished || revision!=self->_revision){if(moved)[NSFileManager.defaultManager removeItemAtURL:target error:nil];return;}
-            self->_task=nil;
-            if(![self current]){if(moved)[NSFileManager.defaultManager removeItemAtURL:target error:nil];[self finishFile:nil response:nil quality:nil error:FMJDCancelled()];return;}
-            if(error || !moved){
-                if(moved)[NSFileManager.defaultManager removeItemAtURL:target error:nil];
-                if(moveError){[self finishFile:nil response:nil quality:nil error:moveError];return;}
-                self->_lastError=error ?: FMJDError(FMJSDownloadInvalidResponse,@"Download did not produce a file");++self->_transferFailures;
-                if(error.code==NSURLErrorCancelled){[self finishFile:nil response:nil quality:nil error:error];return;}
-                [self next];return;
-            }
-            self->_candidateFile=target;
-            self->_candidateResponse=[response isKindOfClass:NSHTTPURLResponse.class]?(NSHTTPURLResponse *)response:nil;
-            [self inspectFile:target response:self->_candidateResponse revision:revision];
-        });
-    }];
+    FMJSDownloadTransfer *transfer=FMJSDownloadTransfer.new;transfer.revision=revision;
+    transfer.target=[_directory URLByAppendingPathComponent:[NSUUID.UUID.UUIDString stringByAppendingString:@".media"]];
+    // Completion-handler tasks suppress download delegate progress on Foundation.
+    // Delegate mode is required for real pause/cancel/progress behavior.
+    NSURLSessionDownloadTask *task=[_session downloadTaskWithRequest:request];
+    objc_setAssociatedObject(task,FMJDTransferKey,transfer,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     _task=task;
     if(_progress)_progress(0,NSURLSessionTransferSizeUnknown,_quality);
     if(!_suspended)[task resume];
@@ -237,7 +253,7 @@ static NSString *FMJDHeader(NSHTTPURLResponse *response,NSString *name) {
             if(declared+8>bytes)failure=FMJDError(FMJSDownloadIncompleteFile,@"WAV container is truncated");
         }
     }
-    if(failure){_lastError=failure;++_validationFailures;[self removeCandidate];[self next];return;}
+    if(failure){[self recordPhase:@"file_validation" error:failure response:response bytes:bytes];_lastError=failure;++_validationFailures;[self removeCandidate];[self next];return;}
     _validation=[FMJSDownloadValidation new];
     __weak typeof(self) weakSelf=self;
     [_validation validate:file completion:^(NSError *error){
@@ -245,7 +261,8 @@ static NSString *FMJDHeader(NSHTTPURLResponse *response,NSString *name) {
             typeof(self) self=weakSelf;if(!self || self->_finished || revision!=self->_revision)return;
             self->_validation=nil;
             if(![self current]){[self finishFile:nil response:nil quality:nil error:FMJDCancelled()];return;}
-            if(error){self->_lastError=error;++self->_validationFailures;[self removeCandidate];[self next];return;}
+            if(error){[self recordPhase:@"audio_validation" error:error response:response bytes:bytes];self->_lastError=error;++self->_validationFailures;[self removeCandidate];[self next];return;}
+            [self recordPhase:@"validated" error:nil response:response bytes:bytes];
             self->_validated=YES;if(!self->_suspended)[self finishFile:file response:response quality:self->_quality error:nil];
         });
     }];
@@ -253,6 +270,7 @@ static NSString *FMJDHeader(NSHTTPURLResponse *response,NSString *name) {
 - (void)URLSession:(NSURLSession *)session downloadTask:(NSURLSessionDownloadTask *)task didWriteData:(int64_t)bytesWritten totalBytesWritten:(int64_t)totalBytesWritten totalBytesExpectedToWrite:(int64_t)totalBytesExpectedToWrite {
     FMJDMain(^{
         if(self->_finished || task!=self->_task)return;
+        ++self->_progressCallbacks;
         if(totalBytesWritten>(int64_t)FMJSMaximumFileBytes || totalBytesExpectedToWrite>(int64_t)FMJSMaximumFileBytes){
             [self->_task cancel];self->_task=nil;++self->_revision;self->_lastError=FMJDError(FMJSDownloadSizeLimit,@"Download exceeds the bounded file size");++self->_transferFailures;[self next];return;
         }
@@ -260,7 +278,32 @@ static NSString *FMJDHeader(NSHTTPURLResponse *response,NSString *name) {
         if(!self->_suspended && self->_progress)self->_progress(totalBytesWritten,totalBytesExpectedToWrite,self->_quality);
     });
 }
-- (void)URLSession:(NSURLSession *)session downloadTask:(NSURLSessionDownloadTask *)task didFinishDownloadingToURL:(NSURL *)location { /* Completion-handler tasks retain their own completion path. */ }
+- (void)URLSession:(NSURLSession *)session downloadTask:(NSURLSessionDownloadTask *)task didFinishDownloadingToURL:(NSURL *)location {
+    FMJSDownloadTransfer *transfer=objc_getAssociatedObject(task,FMJDTransferKey);if(!transfer)return;
+    NSError *error=nil;
+    transfer.moved=[NSFileManager.defaultManager moveItemAtURL:location toURL:transfer.target error:&error];
+    transfer.moveError=error;
+}
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
+    FMJSDownloadTransfer *transfer=objc_getAssociatedObject(task,FMJDTransferKey);if(!transfer)return;
+    NSHTTPURLResponse *response=[task.response isKindOfClass:NSHTTPURLResponse.class]?(NSHTTPURLResponse *)task.response:nil;
+    FMJDMain(^{
+        NSURL *target=transfer.target;
+        if(self->_finished || transfer.revision!=self->_revision || task!=self->_task){if(transfer.moved)[NSFileManager.defaultManager removeItemAtURL:target error:nil];return;}
+        self->_task=nil;
+        if(![self current]){if(transfer.moved)[NSFileManager.defaultManager removeItemAtURL:target error:nil];[self finishFile:nil response:nil quality:nil error:FMJDCancelled()];return;}
+        if(error || !transfer.moved){
+            if(transfer.moved)[NSFileManager.defaultManager removeItemAtURL:target error:nil];
+            if(!error && transfer.moveError){[self recordPhase:@"storage" error:transfer.moveError response:response bytes:0];[self finishFile:nil response:nil quality:nil error:transfer.moveError];return;}
+            self->_lastError=error ?: FMJDError(FMJSDownloadInvalidResponse,@"Download did not produce a file");++self->_transferFailures;
+            [self recordPhase:@"transfer" error:self->_lastError response:response bytes:(uint64_t)MAX((int64_t)0,task.countOfBytesReceived)];
+            if(error.code==NSURLErrorCancelled){[self finishFile:nil response:nil quality:nil error:error];return;}
+            [self next];return;
+        }
+        self->_candidateFile=target;self->_candidateResponse=response;
+        [self inspectFile:target response:response revision:transfer.revision];
+    });
+}
 - (void)suspend { FMJDMain(^{if(self->_finished || self->_suspended)return;self->_suspended=YES;[self->_task suspend];}); }
 - (void)resume {
     FMJDMain(^{
@@ -290,6 +333,7 @@ static NSString *FMJDHeader(NSHTTPURLResponse *response,NSString *name) {
 - (NSDictionary<NSString *,id> *)diagnostics {
     NSAssert(NSThread.isMainThread,@"Download diagnostics are main-thread confined");
     return @{@"attempts":@(_attempts),@"transfer_failures":@(_transferFailures),@"validation_failures":@(_validationFailures),
-        @"successes":@(_successes),@"completions":@(_completionCount),@"finished":@(_finished),@"suspended":@(_suspended)};
+        @"successes":@(_successes),@"completions":@(_completionCount),@"finished":@(_finished),@"suspended":@(_suspended),
+        @"progress_callbacks":@(_progressCallbacks),@"events":[_events copy]};
 }
 @end

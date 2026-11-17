@@ -100,6 +100,7 @@ jobs:
           ./download-coordinator-tests v7-validation/download-coordinator-tests.json
 
       - name: Test native download queue integration with real transfers
+        if: ${{ !cancelled() }}
         shell: bash
         run: bash test_native_download_macos.sh "$PWD/v7-validation/native-download-tests.json"
 

@@ -50,7 +50,7 @@ network interception works on an iPhone. Device validation is required.
 - The existing small player quality badge uses measured AVAsset format information. Requested quality and filename extensions are not treated as measured quality; unavailable information is shown as unknown. This does not verify the provenance of a supposedly lossless master.
 - A metadata deadline cancels that request without automatically disabling a responsive JS source. A blocked JavaScript queue is still discarded; public JavaScriptCore APIs cannot forcibly kill an infinite loop.
 
-Package v6 with `--v3-changes --player-left-swipe --playback-cache --adaptive-playback`. Cloud builds contain only the extension and authored fixtures. Simulator fixtures and instruction emulation do not constitute an on-device test of the original FreeMusic IPA.
+Package v6/v7 with `--v3-changes --player-left-swipe --playback-cache --adaptive-playback`. Cloud builds contain only the extension and authored fixtures. Simulator fixtures and instruction emulation do not constitute an on-device test of the original FreeMusic IPA.
 
 ## V4 additions
 
