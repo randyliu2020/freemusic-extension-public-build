@@ -34,6 +34,7 @@ static NSData *Wave(void) {
 @property(nonatomic,readonly) NSData *audio;
 @property(nonatomic,readonly) NSUInteger requests;
 - (NSURL *)URL:(NSString *)name;
+- (void)setBody:(NSData *)body MIME:(NSString *)mime forName:(NSString *)name;
 - (void)stop;
 @end
 @implementation FMDownloadHTTPFixture {
@@ -42,10 +43,11 @@ static NSData *Wave(void) {
     uint16_t _port;
     NSUInteger _requests;
     BOOL _stopped;
+    NSMutableDictionary *_bodies,*_MIMEs;
 }
 - (instancetype)init {
     if((self=[super init])){
-        _audio=Wave();_lock=NSLock.new;_fd=socket(AF_INET,SOCK_STREAM,0);
+        _audio=Wave();_lock=NSLock.new;_bodies=NSMutableDictionary.dictionary;_MIMEs=NSMutableDictionary.dictionary;_fd=socket(AF_INET,SOCK_STREAM,0);
         NSAssert(_fd>=0,@"Loopback socket creation");
         struct sockaddr_in addr={0};addr.sin_len=sizeof(addr);addr.sin_family=AF_INET;addr.sin_addr.s_addr=inet_addr("127.0.0.1");
         NSAssert(bind(_fd,(struct sockaddr *)&addr,sizeof(addr))==0 && listen(_fd,32)==0,@"Loopback bind/listen");
@@ -61,6 +63,9 @@ static NSData *Wave(void) {
 }
 - (NSUInteger)requests { [_lock lock];NSUInteger value=_requests;[_lock unlock];return value; }
 - (NSURL *)URL:(NSString *)name { return [NSURL URLWithString:[NSString stringWithFormat:@"http://127.0.0.1:%u/%@",_port,name]]; }
+- (void)setBody:(NSData *)body MIME:(NSString *)mime forName:(NSString *)name {
+    NSString *path=[@"/" stringByAppendingString:name];[_lock lock];_bodies[path]=body;_MIMEs[path]=mime;[_lock unlock];
+}
 - (void)stop { [_lock lock];BOOL stopped=_stopped;_stopped=YES;int fd=_fd;_fd=-1;[_lock unlock];if(!stopped&&fd>=0){shutdown(fd,SHUT_RDWR);close(fd);} }
 - (BOOL)send:(NSData *)data client:(int)client {
     const uint8_t *p=data.bytes;NSUInteger done=0;
@@ -75,14 +80,14 @@ static NSData *Wave(void) {
     }
     NSString *raw=[[NSString alloc] initWithData:request encoding:NSUTF8StringEncoding];NSArray *parts=[raw componentsSeparatedByString:@" "];
     if(parts.count<2)return;NSString *path=parts[1];
-    [_lock lock];++_requests;[_lock unlock];
+    [_lock lock];++_requests;NSData *customBody=_bodies[path];NSString *customMIME=_MIMEs[path];[_lock unlock];
     BOOL interrupted=[path hasPrefix:@"/interrupt"],shortFile=[path hasPrefix:@"/short"],slow=[path hasPrefix:@"/slow"];
     BOOL html=[path hasPrefix:@"/html"],bad=[path hasPrefix:@"/bad"],missing=[path hasPrefix:@"/missing"];
-    NSData *body=(html||bad||missing)?[@"<html>authored server error, not an audio file</html>" dataUsingEncoding:NSUTF8StringEncoding]:_audio;
+    NSData *body=customBody ?: ((html||bad||missing)?[@"<html>authored server error, not an audio file</html>" dataUsingEncoding:NSUTF8StringEncoding]:_audio);
     NSUInteger declared=body.length;
     if(interrupted || shortFile)body=[body subdataWithRange:NSMakeRange(0,body.length/2)];
     if(!interrupted)declared=body.length;
-    NSString *header=[NSString stringWithFormat:@"HTTP/1.1 %@\r\nContent-Type: %@\r\nContent-Length: %lu\r\nCache-Control: public, max-age=3600\r\nConnection: close\r\n\r\n",missing?@"404 Not Found":@"200 OK",html?@"text/html":@"audio/wav",(unsigned long)declared];
+    NSString *header=[NSString stringWithFormat:@"HTTP/1.1 %@\r\nContent-Type: %@\r\nContent-Length: %lu\r\nCache-Control: public, max-age=3600\r\nConnection: close\r\n\r\n",missing?@"404 Not Found":@"200 OK",customMIME ?: (html?@"text/html":@"audio/wav"),(unsigned long)declared];
     if(![self send:[header dataUsingEncoding:NSUTF8StringEncoding] client:client])return;
     if(slow){
         for(NSUInteger offset=0;offset<body.length;offset+=4096){
