@@ -107,7 +107,7 @@ finalize() {
 import pathlib,subprocess,sys
 try:
     with pathlib.Path(sys.argv[2]).open('w') as log:
-        subprocess.run(['xcrun','simctl','spawn',sys.argv[1],'log','show','--last','3m','--style','compact','--predicate','process == "FreeMusic"'],stdout=log,stderr=subprocess.STDOUT,timeout=15)
+        subprocess.run(['xcrun','simctl','spawn',sys.argv[1],'log','show','--last','10m','--style','compact','--predicate','process == "FreeMusic"'],stdout=log,stderr=subprocess.STDOUT,timeout=15)
 except (OSError,subprocess.TimeoutExpired): pass
 PY
     fi
@@ -271,7 +271,9 @@ export FMX_SMOKE_CONTAINER="$container"
 run_phase() {
   phase="$1"
   shift
-  xcrun simctl launch --terminate-running-process "$device_id" org.codex.fmx.smoke "$@" > "$output_dir/launch-$phase.log" 2>&1
+  xcrun simctl launch --terminate-running-process \
+    --stdout="$output_dir/host-$phase.stdout.log" --stderr="$output_dir/host-$phase.stderr.log" \
+    "$device_id" org.codex.fmx.smoke "$@" > "$output_dir/launch-$phase.log" 2>&1
   python3 - "$phase" <<'PY'
 import os,pathlib,time,sys,json
 phase=sys.argv[1]; root=pathlib.Path(os.environ['FMX_SMOKE_CONTAINER'])/'Documents'/'smoke'

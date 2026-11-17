@@ -50,7 +50,15 @@ static NSDictionary *SettingsEntryDiagnostics(void *extensionHandle) {
 }
 
 static void Main(dispatch_block_t block) {
-    if (NSThread.isMainThread) block(); else dispatch_sync(dispatch_get_main_queue(),block);
+    if (NSThread.isMainThread) { block(); return; }
+    // A test assertion on the main queue must return to the test runner's
+    // exception handler. Unwinding out of a dispatch block terminates the host
+    // and turns the actual failure into an uninformative phase timeout.
+    __block NSException *failure = nil;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        @try { block(); } @catch (NSException *exception) { failure = exception; }
+    });
+    if (failure) @throw failure;
 }
 static void Check(BOOL value, NSString *reason) {
     if (!value) @throw [NSException exceptionWithName:@"FMXSmokeFailure" reason:reason ?: @"Failed assertion" userInfo:nil];
@@ -416,6 +424,7 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
 @property(nonatomic,strong) UILabel *label;
 @property(nonatomic,strong) NSURL *output;
 @property(nonatomic,strong) NSMutableArray *results;
+@property(nonatomic,copy) NSString *activeTest;
 @property(nonatomic,strong) NSArray *realArtworkKeys;
 @property(nonatomic) BOOL forced;
 @property(nonatomic) BOOL failed;
@@ -432,6 +441,7 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
         @"host":@"self-authored Simulator app; original IPA not used",@"systemVersion":UIDevice.currentDevice.systemVersion,
         @"real-supported-animated-artwork-keys":self.realArtworkKeys ?: @[],@"forced-capability":@(self.forced),
         @"requires-forced-coordinator-pass":@(self.requiresForced),@"tests":self.results ?: @[],
+        @"active_test":self.activeTest ?: @"",
         @"settings_entry_diagnostics":SettingsEntryDiagnostics(self.extensionHandle),
         @"lock-screen-system-display-validated":@NO,@"original-app-launch-validated":@NO,
         @"note":@"Forced capabilities, if used, exercise local coordinator logic only. This is not a lock-screen display or original-app launch test."};
@@ -441,11 +451,15 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
 }
 - (void)test:(NSString *)name body:(NSDictionary *(^)(void))body {
     NSTimeInterval start=NSProcessInfo.processInfo.systemUptime;
+    self.activeTest = name; [self saveJSON:NO];
+    fprintf(stderr,"START %s\n",name.UTF8String); fflush(stderr);
     NSMutableDictionary *result=[@{@"name":name} mutableCopy];
     @try { NSDictionary *details=body(); result[@"passed"]=@YES; if(details) result[@"details"]=details; }
     @catch(NSException *exception) { result[@"passed"]=@NO; result[@"error"]=exception.reason ?: exception.name; self.failed=YES; }
     result[@"elapsed_seconds"]=@(NSProcessInfo.processInfo.systemUptime-start);
+    self.activeTest = nil;
     [self.results addObject:result]; [self saveJSON:NO];
+    fprintf(stderr,"%s %s %s\n",[result[@"passed"] boolValue]?"PASS":"FAIL",name.UTF8String,[result[@"error"] UTF8String] ?: ""); fflush(stderr);
     Main(^{ self.label.text=[NSString stringWithFormat:@"%@\n%@\n%@",self.forced ? @"Forced coordinator fixture" : @"Native extension smoke",name,[result[@"passed"] boolValue] ? @"PASS" : result[@"error"]]; });
 }
 - (void)screenshot:(NSString *)filename {
