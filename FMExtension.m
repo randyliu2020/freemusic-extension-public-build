@@ -319,7 +319,7 @@ __attribute__((constructor)) static void FMXInitialize(void) {
                     isCurrent:^BOOL { return [FMXManager shared].runtime == runtime && runtime.manifest != nil; }
                     resolve:^dispatch_block_t(NSString *quality, NSTimeInterval timeout, FMQualityAttemptCompletion resolved) {
                         FMXPlaybackStatus(runtime, diagnosticID, source, [NSString stringWithFormat:@"正在尝试 JS 音质 %@", quality], NO);
-                        NSString *identifier = [runtime resolveMusicURLForSource:source musicInfo:info quality:quality timeout:timeout invalidateOnTimeout:NO completion:resolved];
+                        NSString *identifier = [runtime resolveIsolatedMusicURLForSource:source musicInfo:info quality:quality timeout:timeout completion:resolved];
                         return ^{ [runtime cancelRequestWithIdentifier:identifier]; };
                     }];
                 [session nextWithCompletion:^(NSURL *url, NSString *requestedQuality, NSError *error) {
@@ -344,7 +344,7 @@ __attribute__((constructor)) static void FMXInitialize(void) {
                             return [[FMQualityResolver alloc] initWithPlatform:source supportedQualities:qualities timeout:35
                                 isCurrent:^BOOL{return [FMXManager shared].runtime==runtime&&runtime.manifest!=nil;}
                                 resolve:^dispatch_block_t(NSString *quality,NSTimeInterval timeout,FMQualityAttemptCompletion resolved){
-                                    NSString *identifier=[runtime resolveMusicURLForSource:source musicInfo:info quality:quality timeout:timeout invalidateOnTimeout:NO completion:resolved];
+                                    NSString *identifier=[runtime resolveIsolatedMusicURLForSource:source musicInfo:info quality:quality timeout:timeout completion:resolved];
                                     return ^{[runtime cancelRequestWithIdentifier:identifier];};
                                 }];
                         },^BOOL{return [FMXManager shared].runtime==runtime&&runtime.manifest!=nil;});

@@ -38,15 +38,27 @@ int main(int argc,const char *argv[]) { @autoreleasepool {
     Check(Wait(^BOOL{ return callbacks==1; },2) && error.code==NSUserCancelledError && !result,@"soft attempt explicit cancellation completes once");
     Pump(0.6); Check(callbacks==1 && runtime.manifest,@"ordinary cancellation keeps responsive runtime available");
 
-    callbacks=0; __block NSString *requested;
-    FMQualityResolver *session=[[FMQualityResolver alloc] initWithPlatform:@"tx" supportedQualities:@[@"flac24bit",@"flac"] timeout:0.24 isCurrent:^BOOL{ return runtime.manifest!=nil; } resolve:^dispatch_block_t(NSString *q,NSTimeInterval limit,FMQualityAttemptCompletion done){
-        NSString *token=[runtime resolveMusicURLForSource:@"tx" musicInfo:@{} quality:q timeout:limit invalidateOnTimeout:NO completion:done];
+    callbacks=0; __block NSString *requested;NSMutableArray *limits=NSMutableArray.array;
+    FMQualityResolver *session=[[FMQualityResolver alloc] initWithPlatform:@"tx" supportedQualities:@[@"flac24bit",@"flac",@"320k",@"128k"] timeout:0.6 isCurrent:^BOOL{ return runtime.manifest!=nil; } resolve:^dispatch_block_t(NSString *q,NSTimeInterval limit,FMQualityAttemptCompletion done){
+        [limits addObject:@(limit)];
+        NSString *token=[runtime resolveIsolatedMusicURLForSource:@"tx" musicInfo:@{} quality:q timeout:limit completion:done];
         return ^{ [runtime cancelRequestWithIdentifier:token]; };
     }];
     [session nextWithCompletion:^(NSURL *u,NSString *q,NSError *e){ ++callbacks; result=u; requested=q; error=e; }];
-    Check(Wait(^BOOL{ return callbacks==1; },2) && result && !error && [requested isEqual:@"flac"],@"production ladder plus JSCore skips slow high attempt and resolves lower");
-    Pump(0.6); Check(callbacks==1 && runtime.manifest,@"old high completion cannot replace ladder result");
+    Check(Wait(^BOOL{ return callbacks==1; },2) && result && !error && [requested isEqual:@"flac24bit"] && limits.count==1 && [limits[0] doubleValue]==0.6,@"isolated JSCore high quality receives bounded caller budget instead of four-way slice");
+    callbacks=0;
+    [session nextWithCompletion:^(NSURL *u,NSString *q,NSError *e){++callbacks;result=u;requested=q;error=e;}];
+    Check(Wait(^BOOL{return callbacks==1;},2) && result && !error && [requested isEqual:@"flac"] && limits.count==2 && [limits[1] doubleValue]==0.6,@"actual media failure resolves lower in fresh isolated worker with renewed short budget");
+    Pump(0.6); Check(callbacks==1 && runtime.manifest,@"completed isolated workers cannot replace lower result or invalidate parent source");
     [session cancel];
+
+    callbacks=0;
+    session=[[FMQualityResolver alloc] initWithPlatform:@"tx" supportedQualities:@[@"flac24bit",@"flac"] timeout:0.06 isCurrent:^BOOL{return runtime.manifest!=nil;} resolve:^dispatch_block_t(NSString *q,NSTimeInterval limit,FMQualityAttemptCompletion done){
+        NSString *token=[runtime resolveIsolatedMusicURLForSource:@"tx" musicInfo:@{} quality:q timeout:limit completion:done];return ^{[runtime cancelRequestWithIdentifier:token];};
+    }];
+    [session nextWithCompletion:^(NSURL *u,NSString *q,NSError *e){++callbacks;result=u;error=e;}];
+    Check(Wait(^BOOL{return callbacks==1;},2) && !result && error.code==NSURLErrorTimedOut && runtime.manifest,@"isolated slow source still obeys a shorter overall caller deadline");
+    Pump(0.3);Check(callbacks==1 && runtime.manifest,@"isolated short-deadline worker cannot deliver a late URL or poison parent");
 
     callbacks=0;
     [runtime resolveMusicURLForSource:@"tx" musicInfo:@{} quality:@"128k" timeout:1 completion:^(NSURL *u,NSError *e){ ++callbacks; result=u; error=e; }];

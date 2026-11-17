@@ -53,6 +53,18 @@ typedef void (^LXSourceURLCompletion)(NSURL * _Nullable URL, NSError * _Nullable
                               timeout:(NSTimeInterval)timeout
                   invalidateOnTimeout:(BOOL)invalidateOnTimeout
                            completion:(LXSourceURLCompletion)completion;
+/// One private JS/runtime worker per call, cloned from this instance's original
+/// source/bootstrap/name snapshots. The absolute timeout includes initialization
+/// and URL resolution. Completion/cancellation destroys that worker's HTTP tasks
+/// and timers without disabling this source or another playback/download call.
+/// All resolve variants together admit at most 16 pending calls per instance.
+/// Timeout is clamped to 0.01...20 seconds; smaller caller deadlines are honored.
+/// Like the other APIs, cannot preempt arbitrary synchronous JavaScript loops.
+- (NSString *)resolveIsolatedMusicURLForSource:(NSString *)source
+                                    musicInfo:(NSDictionary *)musicInfo
+                                      quality:(nullable NSString *)quality
+                                      timeout:(NSTimeInterval)timeout
+                                   completion:(LXSourceURLCompletion)completion;
 - (void)cancelRequestWithIdentifier:(NSString *)identifier;
 
 /// Idempotent; cancels network requests and timers, fails pending completions.

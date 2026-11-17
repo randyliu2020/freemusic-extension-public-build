@@ -206,6 +206,14 @@ static NSDictionary *LXCrypto(NSString *operation, NSDictionary *args) {
 @end
 @implementation LXHTTPState @end
 
+@interface LXIsolatedResolution : NSObject
+@property(nonatomic,strong) LXSourceRuntime *worker;
+@property(nonatomic,copy) LXSourceURLCompletion completion;
+@property(nonatomic,strong) dispatch_source_t deadlineTimer;
+@property(nonatomic) NSTimeInterval deadline;
+@end
+@implementation LXIsolatedResolution @end
+
 @interface LXHTTPDelegate : NSObject <NSURLSessionDataDelegate>
 @property(nonatomic,weak) LXSourceRuntime *owner;
 @end
@@ -221,6 +229,7 @@ static NSDictionary *LXCrypto(NSString *operation, NSDictionary *args) {
 - (void)cancelTimer:(NSString *)identifier;
 - (BOOL)finishLoad:(NSError *)error;
 - (BOOL)finishResolve:(NSString *)identifier URL:(NSURL *)URL error:(NSError *)error;
+- (BOOL)finishIsolatedResolution:(NSString *)identifier URL:(NSURL *)URL error:(NSError *)error;
 - (void)receiveResponse:(NSHTTPURLResponse *)response task:(NSURLSessionTask *)task completion:(void (^)(NSURLSessionResponseDisposition))completion;
 - (void)receiveData:(NSData *)data task:(NSURLSessionTask *)task;
 - (void)finishHTTPTask:(NSURLSessionTask *)task error:(NSError *)error;
@@ -248,6 +257,7 @@ static NSDictionary *LXCrypto(NSString *operation, NSDictionary *args) {
 
 @implementation LXSourceRuntime {
     NSString *_bootstrap;
+    NSString *_sourceSnapshot, *_sourceName;
     dispatch_queue_t _jsQueue;
     dispatch_queue_t _timerQueue;
     NSLock *_lock;
@@ -258,6 +268,7 @@ static NSDictionary *LXCrypto(NSString *operation, NSDictionary *args) {
     NSMutableDictionary<NSString *,dispatch_source_t> *_timers; // lock protected.
     NSMutableDictionary<NSString *,LXSourceURLCompletion> *_pending; // lock protected.
     NSMutableSet<NSString *> *_softResolutions; // lock protected; opt-in quality attempts only.
+    NSMutableDictionary<NSString *,LXIsolatedResolution *> *_isolatedResolutions; // lock protected.
     LXSourceLoadCompletion _loadCompletion; // lock protected.
     NSDictionary *_proposedManifest; // JS queue only.
     BOOL _started, _invalidated; // lock protected.
@@ -270,6 +281,7 @@ static NSDictionary *LXCrypto(NSString *operation, NSDictionary *args) {
         _timerQueue = dispatch_queue_create("app.freemusic.lx.timers", DISPATCH_QUEUE_SERIAL);
         _lock = [NSLock new];
         _HTTPTasks = [NSMutableDictionary dictionary]; _timers = [NSMutableDictionary dictionary]; _pending = [NSMutableDictionary dictionary]; _softResolutions = NSMutableSet.set;
+        _isolatedResolutions=NSMutableDictionary.dictionary;
         NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
         configuration.HTTPCookieStorage = nil; configuration.HTTPCookieAcceptPolicy = NSHTTPCookieAcceptPolicyNever;
         configuration.HTTPShouldSetCookies = NO; configuration.URLCredentialStorage = nil; configuration.URLCache = nil;
@@ -289,6 +301,12 @@ static NSDictionary *LXCrypto(NSString *operation, NSDictionary *args) {
 - (void)dealloc {
     [_session invalidateAndCancel];
     for (dispatch_source_t timer in _timers.allValues) dispatch_source_cancel(timer);
+    for(LXIsolatedResolution *attempt in _isolatedResolutions.allValues){
+        if(attempt.deadlineTimer)dispatch_source_cancel(attempt.deadlineTimer);
+        [attempt.worker invalidate];
+        LXSourceURLCompletion completion=attempt.completion;
+        if(completion)dispatch_async(dispatch_get_main_queue(),^{completion(nil,LXError(NSUserCancelledError,@"Source owner released"));});
+    }
 }
 - (BOOL)isInvalidated { [_lock lock]; BOOL value = _invalidated; [_lock unlock]; return value; }
 - (BOOL)finishLoad:(NSError *)error {
@@ -307,6 +325,10 @@ static NSDictionary *LXCrypto(NSString *operation, NSDictionary *args) {
     if ([script lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > 2 * 1024 * 1024 || !_bootstrap.length || !script.length) {
         [self finishLoad:LXError(2,@"Missing or oversized source/bootstrap")]; [self invalidate]; return;
     }
+    script=[script copy];name=[name copy]?:@"Imported source";
+    [_lock lock];
+    if(!_invalidated){_sourceSnapshot=script;_sourceName=name;}
+    [_lock unlock];
     timeout = isfinite(timeout) ? MAX(1,MIN(30,timeout)) : 15;
     __weak typeof(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(timeout*NSEC_PER_SEC)), dispatch_get_global_queue(QOS_CLASS_UTILITY,0), ^{
@@ -383,7 +405,7 @@ static NSDictionary *LXCrypto(NSString *operation, NSDictionary *args) {
     NSString *json = LXJSON(payload);
     BOOL validQuality = [source isEqualToString:@"local"] ? quality == nil : [sourceInfo[@"qualitys"] containsObject:quality ?: @""];
     [_lock lock];
-    BOOL unavailable = _invalidated || !sourceInfo || !validQuality || !json || _pending.count >= 16;
+    BOOL unavailable = _invalidated || !sourceInfo || !validQuality || !json || _pending.count+_isolatedResolutions.count >= 16;
     if (!unavailable) {
         _pending[identifier] = [completion copy];
         if (!invalidateOnTimeout) [_softResolutions addObject:identifier];
@@ -410,6 +432,75 @@ static NSDictionary *LXCrypto(NSString *operation, NSDictionary *args) {
     dispatch_async(_jsQueue, ^{ if (![self isInvalidated]) [self->_context[@"__LXResolve"] callWithArguments:@[identifier,json]]; });
     return identifier;
 }
+- (NSString *)resolveIsolatedMusicURLForSource:(NSString *)source musicInfo:(NSDictionary *)musicInfo quality:(NSString *)quality timeout:(NSTimeInterval)timeout completion:(LXSourceURLCompletion)completion {
+    NSTimeInterval began=NSProcessInfo.processInfo.systemUptime;
+    timeout=isfinite(timeout)?MAX(0.01,MIN(20,timeout)):20;
+    NSString *identifier=NSUUID.UUID.UUIDString;
+    // Freeze caller-owned mutable metadata as well as the source text. The copy
+    // does not add app credentials or expose either snapshot through diagnostics.
+    NSString *json=LXJSON(@{@"source":source?:@"",@"info":@{@"type":quality?:NSNull.null,@"musicInfo":musicInfo?:@{}}});
+    NSDictionary *payload=json?LXJSONObject(json):nil;
+    NSString *platform=payload[@"source"];
+    NSString *type=payload[@"info"][@"type"]==NSNull.null?nil:payload[@"info"][@"type"];
+    NSDictionary *metadata=payload[@"info"][@"musicInfo"];
+    NSDictionary *sourceInfo=self.manifest[@"sources"][platform?:@""];
+    BOOL validQuality=[platform isEqual:@"local"]?type==nil:[sourceInfo[@"qualitys"] containsObject:type?:@""];
+    LXIsolatedResolution *attempt=LXIsolatedResolution.new;
+    attempt.completion=[completion copy];attempt.deadline=began+timeout;
+    NSString *script,*name,*bootstrap;
+    __weak typeof(self) weakSelf=self;
+    [_lock lock];
+    BOOL unavailable=_invalidated||!sourceInfo||!validQuality||!payload||!_sourceSnapshot.length||_pending.count+_isolatedResolutions.count>=16;
+    if(!unavailable){
+        script=_sourceSnapshot;name=_sourceName;bootstrap=_bootstrap;
+        _isolatedResolutions[identifier]=attempt;
+        attempt.deadlineTimer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,_timerQueue);
+        NSTimeInterval remaining=MAX(0,attempt.deadline-NSProcessInfo.processInfo.systemUptime);
+        dispatch_source_set_timer(attempt.deadlineTimer,dispatch_time(DISPATCH_TIME_NOW,(int64_t)(remaining*NSEC_PER_SEC)),DISPATCH_TIME_FOREVER,0);
+        dispatch_source_set_event_handler(attempt.deadlineTimer,^{
+            [weakSelf finishIsolatedResolution:identifier URL:nil error:LXError(7,@"Isolated music URL resolution timed out")];
+        });
+        dispatch_resume(attempt.deadlineTimer);
+    }
+    [_lock unlock];
+    if(unavailable){dispatch_async(dispatch_get_main_queue(),^{completion(nil,LXError(6,@"Source unavailable, unsupported quality, invalid metadata, or too many requests"));});return identifier;}
+    LXSourceRuntime *worker=[[LXSourceRuntime alloc]initWithBootstrapScript:bootstrap];
+    [_lock lock];
+    BOOL current=_isolatedResolutions[identifier]==attempt&&!_invalidated;
+    if(current)attempt.worker=worker;
+    [_lock unlock];
+    if(!current){[worker invalidate];return identifier;}
+    __weak LXSourceRuntime *weakWorker=worker;
+    [worker loadSource:script name:name timeout:MAX(0.01,attempt.deadline-NSProcessInfo.processInfo.systemUptime) completion:^(NSDictionary *manifest,NSError *error){
+        LXSourceRuntime *parent=weakSelf,*activeWorker=weakWorker;
+        if(!parent||!activeWorker){[activeWorker invalidate];return;}
+        [parent->_lock lock];
+        BOOL active=parent->_isolatedResolutions[identifier]==attempt&&!parent->_invalidated;
+        NSTimeInterval remaining=attempt.deadline-NSProcessInfo.processInfo.systemUptime;
+        [parent->_lock unlock];
+        if(!active){[activeWorker invalidate];return;}
+        if(error||!manifest){[parent finishIsolatedResolution:identifier URL:nil error:error?:LXError(4,@"Worker source initialization failed")];return;}
+        if(remaining<=0){[parent finishIsolatedResolution:identifier URL:nil error:LXError(7,@"Isolated music URL resolution timed out")];return;}
+        // A hard timeout is safe here: only this invocation owns the worker.
+        [activeWorker resolveMusicURLForSource:platform musicInfo:metadata quality:type timeout:remaining completion:^(NSURL *URL,NSError *failure){
+            [weakSelf finishIsolatedResolution:identifier URL:URL error:failure];
+        }];
+    }];
+    return identifier;
+}
+- (BOOL)finishIsolatedResolution:(NSString *)identifier URL:(NSURL *)URL error:(NSError *)error {
+    [_lock lock];
+    LXIsolatedResolution *attempt=_isolatedResolutions[identifier];
+    if(attempt)[_isolatedResolutions removeObjectForKey:identifier];
+    [_lock unlock];
+    if(!attempt)return NO;
+    if(attempt.deadlineTimer)dispatch_source_cancel(attempt.deadlineTimer);
+    [attempt.worker invalidate];
+    if(!error&&NSProcessInfo.processInfo.systemUptime>=attempt.deadline)error=LXError(7,@"Isolated music URL resolution timed out");
+    LXSourceURLCompletion completion=attempt.completion;
+    dispatch_async(dispatch_get_main_queue(),^{completion(error?nil:URL,error);});
+    return YES;
+}
 - (BOOL)finishResolve:(NSString *)identifier URL:(NSURL *)URL error:(NSError *)error {
     [_lock lock]; LXSourceURLCompletion completion = _pending[identifier]; [_pending removeObjectForKey:identifier]; [_softResolutions removeObject:identifier]; [_lock unlock];
     if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(URL,error); });
@@ -429,6 +520,7 @@ static NSDictionary *LXCrypto(NSString *operation, NSDictionary *args) {
     });
 }
 - (void)cancelRequestWithIdentifier:(NSString *)identifier {
+    if([self finishIsolatedResolution:identifier URL:nil error:LXError(NSUserCancelledError,@"Request cancelled")])return;
     [_lock lock]; BOOL soft = [_softResolutions containsObject:identifier]; [_lock unlock];
     [self finishResolve:identifier URL:nil error:LXError(NSUserCancelledError,@"Request cancelled")];
     if (soft) [self cancelSoftResolutionOnJSQueue:identifier];
@@ -595,16 +687,20 @@ static NSDictionary *LXCrypto(NSString *operation, NSDictionary *args) {
     NSArray *tasks = _HTTPTasks.allValues; [_HTTPTasks removeAllObjects];
     NSArray *timers = _timers.allValues; [_timers removeAllObjects];
     NSDictionary *pending = [_pending copy]; [_pending removeAllObjects]; [_softResolutions removeAllObjects];
+    NSArray<LXIsolatedResolution *> *isolated=_isolatedResolutions.allValues;[_isolatedResolutions removeAllObjects];
+    _sourceSnapshot=nil;_sourceName=nil;
     LXSourceLoadCompletion load = _loadCompletion; _loadCompletion = nil;
     [_lock unlock];
     for (LXHTTPState *state in tasks) [state.task cancel];
     for (dispatch_source_t timer in timers) dispatch_source_cancel(timer);
+    for(LXIsolatedResolution *attempt in isolated){if(attempt.deadlineTimer)dispatch_source_cancel(attempt.deadlineTimer);[attempt.worker invalidate];}
     [_session invalidateAndCancel];
     self.manifest = nil;
     NSError *error = LXError(NSUserCancelledError,@"Source runtime invalidated");
     dispatch_async(dispatch_get_main_queue(), ^{
         if (load) load(nil,error);
         for (LXSourceURLCompletion completion in pending.allValues) completion(nil,error);
+        for (LXIsolatedResolution *attempt in isolated) attempt.completion(nil,error);
     });
     dispatch_async(_jsQueue, ^{
         [self->_context[@"__LXDispose"] callWithArguments:@[]];

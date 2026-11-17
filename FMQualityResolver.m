@@ -17,7 +17,7 @@ static BOOL FMQValidURL(NSURL *URL) {
 @implementation FMQualityResolver {
     NSArray<NSString *> *_qualities;
     NSUInteger _nextIndex, _attemptToken;
-    NSTimeInterval _remaining, _attemptStarted;
+    NSTimeInterval _remaining, _resolutionBudget, _attemptStarted;
     BOOL (^_isCurrent)(void);
     FMQualityAttemptResolver _resolve;
     FMQualityResolutionCompletion _completion;
@@ -25,7 +25,7 @@ static BOOL FMQValidURL(NSURL *URL) {
     dispatch_source_t _timer;
     NSMutableSet<NSString *> *_returnedURLs;
     NSError *_terminalError;
-    BOOL _attemptActive, _deliveryPending;
+    BOOL _attemptActive, _deliveryPending, _renewBudget;
 }
 + (NSArray<NSString *> *)orderedQualitiesForPlatform:(NSString *)platform supportedQualities:(NSArray<NSString *> *)supportedQualities {
     NSArray *order;
@@ -40,7 +40,8 @@ static BOOL FMQValidURL(NSURL *URL) {
                          timeout:(NSTimeInterval)timeout isCurrent:(BOOL (^)(void))isCurrent resolve:(FMQualityAttemptResolver)resolve {
     if ((self = [super init])) {
         _qualities = [self.class orderedQualitiesForPlatform:platform supportedQualities:supportedQualities];
-        _remaining = isfinite(timeout) && timeout > 0 ? MIN(timeout, 60) : 35;
+        _resolutionBudget = isfinite(timeout) && timeout > 0 ? MIN(timeout, 60) : 35;
+        _remaining = _resolutionBudget;
         _isCurrent = [isCurrent copy]; _resolve = [resolve copy];
         _returnedURLs = NSMutableSet.set;
     }
@@ -73,6 +74,10 @@ static BOOL FMQValidURL(NSURL *URL) {
             self->_deliveryPending = NO;
             NSError *finalError = self->_terminalError ?: error;
             if (URL && !finalError && ![self sourceIsCurrent]) finalError = FMQError(FMQualityResolverSourceChanged,@"Source or playback generation changed");
+            // A later next means this candidate failed during actual media IO.
+            // Give remaining qualities a fresh bounded call, without resetting
+            // the index/deduplication or refreshing failures within this call.
+            if(URL && !finalError)self->_renewBudget=YES;
             completion(finalError ? nil : URL, finalError ? nil : quality, finalError);
         });
     }
@@ -89,6 +94,7 @@ static BOOL FMQValidURL(NSURL *URL) {
             dispatch_async(dispatch_get_main_queue(), ^{ completion(nil,nil,FMQError(FMQualityResolverBusy,@"A quality attempt is already in progress")); });
             return;
         }
+        if(self->_renewBudget && !self->_terminalError){self->_remaining=self->_resolutionBudget;self->_renewBudget=NO;}
         self->_completion = [completion copy];
         [self attemptNext];
     });
@@ -100,8 +106,10 @@ static BOOL FMQValidURL(NSURL *URL) {
     if (!_qualities.count || !_resolve) { [self terminate:FMQError(FMQualityResolverNoSupportedQuality,@"No supported common quality")]; return; }
     if (_remaining <= 0.001) { [self terminate:FMQError(NSURLErrorTimedOut,@"Total quality resolution time exhausted")]; return; }
     if (_nextIndex >= _qualities.count) { [self terminate:FMQError(FMQualityResolverExhausted,@"All supported qualities failed or returned a previously failed URL")]; return; }
-    NSUInteger remainingCount = _qualities.count - _nextIndex;
-    NSTimeInterval budget = MIN(10, _remaining / remainingCount);
+    // Match LX mobile's userApi request ceiling. The enclosing call's shorter
+    // budget still wins; several slow qualities cannot each consume 20 seconds
+    // inside a single 35-second host request.
+    NSTimeInterval budget = MIN(20, _remaining);
     NSString *quality = _qualities[_nextIndex++];
     NSUInteger token = ++_attemptToken;
     _attemptStarted = NSProcessInfo.processInfo.systemUptime; _attemptActive = YES;

@@ -27,7 +27,7 @@ NetEase and QQ musicUrl scripts can be selected. Track metadata already received
 from search/import is normalized to the LX fields without inventing unavailable
 media IDs or quality hashes. Missing platform data can still limit a script.
 Kugou's exact native hash request can use scripts advertising standard 128k
-quality; failures retain the original fallback path. When JS is enabled for QQ, a premium/QMC request can receive a plain JS audio URL with null QMC metadata; the original response decoder passes the plain URL through without invoking its encrypted-media branch. No decryption or authorization checks are altered.
+quality. Enabled JS routes report exhausted candidates rather than silently falling back to the native source. When JS is enabled for QQ, a premium/QMC request can receive a plain JS audio URL with null QMC metadata; the original response decoder passes the plain URL through without invoking its encrypted-media branch. No decryption or authorization checks are altered.
 No membership, authentication, DRM or account checks are modified.
 
 This is an experimental binary extension, not recovered original source code.
@@ -38,6 +38,8 @@ network interception works on an iPhone. Device validation is required.
 
 - Align AES-ECB padding and raw RSA with LX mobile. Support binary request/response bytes, multipart form bodies and additional buffer/console behavior. This is a JavaScriptCore implementation, not the original Android QuickJS native bridge; unsupported platform/source capabilities remain explicit.
 - Playback and native manual downloads use independent highest-first JS resolver sessions. Download retries must not consume a playing item's remaining quality candidates or reuse another source generation.
+- Each quality attempt is capped at 20 seconds, matching [LX mobile's request deadline](https://github.com/lyswhut/lx-music-mobile/blob/0669d1b6d419967822ff52ec06e50b9613bfd136/src/core/init/userApi/index.ts#L52-L57). Source initialization counts toward that limit. The existing 35-second parse-chain budget and any shorter caller deadline still apply. After an accepted URL fails during actual media I/O, the remaining candidates receive a fresh bounded parse call. Quality indices and failed-URL deduplication never reset.
+- Each production musicUrl attempt owns an isolated JS runtime. Completion, timeout, cancellation and source changes retire its network tasks and timers without cancelling another playback/download attempt. This does not preempt synchronous JavaScript loops.
 - Native manual download integration is restricted to the exact verified CacheManager and JS-owned URLs. Existing task identities, original download UI and original completion/save/list-registration callbacks are retained. Unowned downloads remain native.
 - Real downloaded files are checked before success; unsuccessful candidates proceed to lower supported qualities. Cancellation/source changes retire temporary data and stale callbacks. Already saved files are preserved.
 - Synthetic loopback and independent host tests never use third-party sources, credentials or original IPA code in CI. Packaging still requires full signing and testing on the user's device.
@@ -120,10 +122,12 @@ identifiers consistent. No certificate or profile is fabricated or reused.
   eligible, and no music files are deleted. This can cause extra network parsing
   on those platforms, including after JS is disabled.
 
-- JS APIs: musicUrl, Promise, HTTP text/JSON/form, cancellation, timers, buffer
-  UTF-8/base64/hex, MD5, AES-128-CBC/ECB and randomBytes.
-- RSA, zlib, multipart and binary HTTP are not implemented. Rich QQ/Kugou metadata
-  is unavailable in the host search results. Not every LX source is compatible.
+- JS APIs: musicUrl, Promise, HTTP text/JSON/form/binary/multipart, cancellation,
+  timers, buffer UTF-8/base64/hex, MD5, AES-128-CBC/ECB, public RSA NoPadding and
+  randomBytes. Binary multipart inputs must be in memory; file/stream parts and
+  zlib are unsupported. Only existing search/import metadata is passed to scripts;
+  missing media IDs or quality hashes cannot be fabricated. Not every LX source
+  is compatible.
 - Qishui search and playback use the host's native service flow; importing an LX
   script does not add Qishui JS support. The verified configuration loader is
   intentionally restricted to this original 4.2.7 executable.

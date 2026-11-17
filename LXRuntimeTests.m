@@ -4,6 +4,8 @@
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <unistd.h>
+#import <stdatomic.h>
+#import <errno.h>
 
 static void Require(BOOL value, NSString *message) {
     if (!value) { fprintf(stderr,"FAIL: %s\n",message.UTF8String); exit(1); }
@@ -142,6 +144,120 @@ static void CompatibilityCrypto(NSString *bootstrap) {
     Load(runtime,script,YES);Resolve(runtime,@"crypto",YES,nil);[runtime invalidate];
     printf("PASS: v7 RSA SPKI/PKCS1 raw known vectors, ECB NoPadding NIST vector, byte views and mobile buffer contract\n");
 }
+// Read native resource counts under the runtime's own lock. No test API, source
+// text, media URLs or credential state is exposed by the production interface.
+static NSDictionary *Resources(LXSourceRuntime *runtime) {
+    // KVC finds isInvalidated, which takes this lock itself. Read it first.
+    NSNumber *invalidated=[runtime valueForKey:@"invalidated"];
+    NSLock *lock=[runtime valueForKey:@"lock"];[lock lock];
+    NSDictionary *result=@{@"http":@([[runtime valueForKey:@"HTTPTasks"] count]),@"timers":@([[runtime valueForKey:@"timers"] count]),@"pending":@([[runtime valueForKey:@"pending"] count]),@"workers":@([[runtime valueForKey:@"isolatedResolutions"] count]),@"invalidated":invalidated};
+    [lock unlock];return result;
+}
+static LXSourceRuntime *Worker(LXSourceRuntime *runtime,NSString *identifier) {
+    NSLock *lock=[runtime valueForKey:@"lock"];[lock lock];
+    LXSourceRuntime *worker=[[[runtime valueForKey:@"isolatedResolutions"] objectForKey:identifier] valueForKey:@"worker"];
+    [lock unlock];return worker;
+}
+static void Pump(NSTimeInterval seconds) {
+    NSDate *until=[NSDate dateWithTimeIntervalSinceNow:seconds];
+    while(until.timeIntervalSinceNow>0)[[NSRunLoop mainRunLoop]runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+}
+static atomic_uint holdStarted,holdClosed,lateRequests,pingRequests,cancelledCallbacks;
+static int StartIsolationServer(uint16_t *port) {
+    int server=socket(AF_INET,SOCK_STREAM,0);Require(server>=0,@"Create isolation fixture socket");
+    struct sockaddr_in address={0};address.sin_len=sizeof(address);address.sin_family=AF_INET;address.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+    Require(bind(server,(struct sockaddr *)&address,sizeof(address))==0&&listen(server,32)==0,@"Listen isolation fixture");
+    socklen_t length=sizeof(address);getsockname(server,(struct sockaddr *)&address,&length);*port=ntohs(address.sin_port);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
+        for(;;){int client=accept(server,NULL,NULL);if(client<0)return;
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{@autoreleasepool{
+                int noPipe=1;setsockopt(client,SOL_SOCKET,SO_NOSIGPIPE,&noPipe,sizeof(noPipe));
+                struct timeval timeout={3,0};setsockopt(client,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));
+                NSMutableData *data=NSMutableData.data;char bytes[2048];NSString *text=@"";
+                while(data.length<16384){ssize_t count=recv(client,bytes,sizeof(bytes),0);if(count<=0)break;[data appendBytes:bytes length:(NSUInteger)count];text=[[NSString alloc]initWithData:data encoding:NSUTF8StringEncoding]?:@"";if([text containsString:@"\r\n\r\n"])break;}
+                if([text hasPrefix:@"GET /hold "]){
+                    atomic_fetch_add(&holdStarted,1);
+                    // No response: only cancellation closes this real socket.
+                    ssize_t count=recv(client,bytes,sizeof(bytes),0);
+                    if(count==0||(count<0&&errno==ECONNRESET))atomic_fetch_add(&holdClosed,1);
+                }else{
+                    if([text hasPrefix:@"GET /late "])atomic_fetch_add(&lateRequests,1);
+                    if([text hasPrefix:@"GET /ping "])atomic_fetch_add(&pingRequests,1);
+                    if([text hasPrefix:@"GET /callback "])atomic_fetch_add(&cancelledCallbacks,1);
+                    const char reply[]="HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
+                    send(client,reply,sizeof(reply)-1,0);
+                }
+                close(client);
+            }});
+        }
+    });return server;
+}
+static void RequireDrained(LXSourceRuntime *worker) {
+    NSDictionary *counts=Resources(worker);
+    Require([counts[@"invalidated"] boolValue]&&[counts[@"http"] unsignedIntegerValue]==0&&[counts[@"timers"] unsignedIntegerValue]==0&&[counts[@"pending"] unsignedIntegerValue]==0,@"Completed isolated worker has zero HTTP tasks, timers and pending resolutions");
+}
+static void IsolatedResolutions(NSString *bootstrap) {
+    uint16_t port=0;int server=StartIsolationServer(&port);
+    NSString *script=[NSString stringWithFormat:
+        @"const base='http://127.0.0.1:%hu';const touch=path=>lx.request(base+path,{timeout:5000},()=>{});"
+        "lx.on('request',p=>new Promise(resolve=>{"
+        "lx.request(base+'/hold',{timeout:5000},()=>touch('/callback'));"
+        "setInterval(()=>touch('/ping'),30);setTimeout(()=>touch('/late'),2500);"
+        "setTimeout(()=>resolve('https://fixture.invalid/'+p.info.musicInfo.songmid+'.mp3'),p.info.musicInfo.wait);"
+        "}));lx.send('inited',{sources:{wy:{type:'music',actions:['musicUrl'],qualitys:['128k']}}});",port];
+    LXSourceRuntime *parent=[[LXSourceRuntime alloc]initWithBootstrapScript:bootstrap];Load(parent,script,YES);
+    __block NSUInteger callbacks=0;
+    unsigned initialStarted=atomic_load(&holdStarted),initialClosed=atomic_load(&holdClosed);
+    NSString *cancelled=[parent resolveIsolatedMusicURLForSource:@"wy" musicInfo:@{@"songmid":@"cancel",@"wait":@2000} quality:@"128k" timeout:3 completion:^(NSURL *URL,NSError *error){Require(NSThread.isMainThread&&!URL&&error.code==NSUserCancelledError,@"Isolated cancellation is exactly one native main callback");callbacks++;}];
+    LXSourceRuntime *cancelledWorker=Worker(parent,cancelled);Require(cancelledWorker!=nil,@"A separate worker exists before resolution starts");
+    Wait(^BOOL{return atomic_load(&holdStarted)>initialStarted&&[Resources(cancelledWorker)[@"timers"] unsignedIntegerValue]>=2&&atomic_load(&pingRequests)>0;},2);
+    [parent cancelRequestWithIdentifier:cancelled];[parent cancelRequestWithIdentifier:cancelled];Wait(^BOOL{return callbacks==1;},2);
+    RequireDrained(cancelledWorker);Wait(^BOOL{return atomic_load(&holdClosed)>initialClosed;},2);
+    Pump(0.15);unsigned quietPings=atomic_load(&pingRequests);Pump(2.6);
+    Require(atomic_load(&pingRequests)==quietPings&&atomic_load(&lateRequests)==0&&atomic_load(&cancelledCallbacks)==0&&callbacks==1,@"Cancelling an attempt stops actual timer traffic, held HTTP and late callbacks");
+    Require(parent.manifest!=nil&&[Resources(parent)[@"workers"] unsignedIntegerValue]==0,@"Cancelling one worker leaves its selected parent available");
+
+    callbacks=0;__block NSUInteger successes=0,cancellations=0;
+    initialStarted=atomic_load(&holdStarted);initialClosed=atomic_load(&holdClosed);
+    LXSourceURLCompletion outcome=^(NSURL *URL,NSError *error){Require(NSThread.isMainThread,@"Concurrent isolated callback thread");if(URL&&!error)successes++;else if(error.code==NSUserCancelledError)cancellations++;else Require(NO,@"Unexpected concurrent worker result");callbacks++;};
+    NSString *first=[parent resolveIsolatedMusicURLForSource:@"wy" musicInfo:@{@"songmid":@"first",@"wait":@2000} quality:@"128k" timeout:3 completion:outcome];
+    NSString *second=[parent resolveIsolatedMusicURLForSource:@"wy" musicInfo:@{@"songmid":@"second",@"wait":@1500} quality:@"128k" timeout:3 completion:outcome];
+    LXSourceRuntime *workerA=Worker(parent,first),*workerB=Worker(parent,second);
+    Require(workerA&&workerB&&workerA!=workerB,@"Simultaneous playback/download resolutions have distinct runtimes");
+    Wait(^BOOL{return atomic_load(&holdStarted)>=initialStarted+2;},2);[parent cancelRequestWithIdentifier:first];
+    Wait(^BOOL{return callbacks==2;},3);Require(successes==1&&cancellations==1&&parent.manifest!=nil,@"Cancelling one attempt does not cancel the other worker or parent");
+    RequireDrained(workerA);RequireDrained(workerB);Wait(^BOOL{return atomic_load(&holdClosed)>=initialClosed+2;},2);
+
+    callbacks=0;initialStarted=atomic_load(&holdStarted);initialClosed=atomic_load(&holdClosed);
+    first=[parent resolveIsolatedMusicURLForSource:@"wy" musicInfo:@{@"songmid":@"parent-a",@"wait":@2000} quality:@"128k" timeout:3 completion:^(NSURL *URL,NSError *error){Require(!URL&&error.code==NSUserCancelledError,@"Parent invalidation cancels worker A");callbacks++;}];
+    second=[parent resolveIsolatedMusicURLForSource:@"wy" musicInfo:@{@"songmid":@"parent-b",@"wait":@2000} quality:@"128k" timeout:3 completion:^(NSURL *URL,NSError *error){Require(!URL&&error.code==NSUserCancelledError,@"Parent invalidation cancels worker B");callbacks++;}];
+    workerA=Worker(parent,first);workerB=Worker(parent,second);Wait(^BOOL{return atomic_load(&holdStarted)>=initialStarted+2;},2);
+    [parent invalidate];Wait(^BOOL{return callbacks==2;},2);RequireDrained(workerA);RequireDrained(workerB);
+    Wait(^BOOL{return atomic_load(&holdClosed)>=initialClosed+2;},2);Pump(1.0);
+    Require(callbacks==2&&atomic_load(&lateRequests)==0&&atomic_load(&cancelledCallbacks)==0,@"Parent invalidation drains every worker and suppresses late native effects");
+    shutdown(server,SHUT_RDWR);close(server);
+
+    NSString *delayed=@"lx.on('request',()=>new Promise(r=>setTimeout(()=>r('https://fixture.invalid/delayed.mp3'),180)));setTimeout(()=>lx.send('inited',{sources:{wy:{type:'music',actions:['musicUrl'],qualitys:['128k']}}}),180);";
+    parent=[[LXSourceRuntime alloc]initWithBootstrapScript:bootstrap];Load(parent,delayed,YES);
+    __block BOOL finished=NO;NSTimeInterval began=NSProcessInfo.processInfo.systemUptime;
+    NSString *timed=[parent resolveIsolatedMusicURLForSource:@"wy" musicInfo:@{@"songmid":@"deadline"} quality:@"128k" timeout:0.28 completion:^(NSURL *URL,NSError *error){Require(!URL&&error.code==7,@"Initialization plus resolution shares one absolute deadline");finished=YES;}];
+    LXSourceRuntime *timedWorker=Worker(parent,timed);Wait(^BOOL{return finished;},2);
+    Require(NSProcessInfo.processInfo.systemUptime-began<1.2&&parent.manifest!=nil,@"Worker deadline does not add another timeout after initialization or disable parent");RequireDrained(timedWorker);[parent invalidate];
+
+    NSMutableString *large=[NSMutableString stringWithString:@"/*"];[large appendString:[@"x" stringByPaddingToLength:1024*1024 withString:@"x" startingAtIndex:0]];
+    [large appendString:@"*/lx.on('request',()=>{if(lx.currentScriptInfo.name!=='fixture'||lx.currentScriptInfo.rawScript.length<1048576)throw Error('snapshot');return Promise.resolve('https://fixture.invalid/large.mp3')});lx.send('inited',{sources:{wy:{type:'music',actions:['musicUrl'],qualitys:['128k']}}});"];
+    parent=[[LXSourceRuntime alloc]initWithBootstrapScript:bootstrap];Load(parent,large,YES);[large appendString:@"throw Error('caller mutated source')"];
+    finished=NO;[parent resolveIsolatedMusicURLForSource:@"wy" musicInfo:@{@"songmid":@"large"} quality:@"128k" timeout:5 completion:^(NSURL *URL,NSError *error){Require(URL&&!error,@"An authored one-MiB source uses immutable source/name snapshots");finished=YES;}];Wait(^BOOL{return finished;},6);[parent invalidate];
+
+    parent=[[LXSourceRuntime alloc]initWithBootstrapScript:bootstrap];Load(parent,@"lx.on('request',()=>new Promise(()=>{}));lx.send('inited',{sources:{wy:{type:'music',actions:['musicUrl'],qualitys:['128k']}}});",YES);
+    callbacks=0;__block NSUInteger refused=0;
+    outcome=^(NSURL *URL,NSError *error){Require(!URL&&error,@"Pending capacity test never invents a URL");if(error.code==6)refused++;callbacks++;};
+    [parent resolveMusicURLForSource:@"wy" musicInfo:@{} quality:@"128k" timeout:5 completion:outcome];
+    for(NSUInteger index=0;index<16;index++)[parent resolveIsolatedMusicURLForSource:@"wy" musicInfo:@{} quality:@"128k" timeout:5 completion:outcome];
+    Require([Resources(parent)[@"workers"] unsignedIntegerValue]==15&&[Resources(parent)[@"pending"] unsignedIntegerValue]==1,@"Legacy and isolated calls share the existing 16-request cap");
+    [parent invalidate];Wait(^BOOL{return callbacks==17;},3);Require(refused==1,@"Excess isolated request is rejected once while admitted workers all cancel once");
+    printf("PASS: isolated JSCore workers drain real loopback sockets/timers, independent cancellation, parent invalidation, total initialization deadline, one-MiB snapshot and combined pending limit\n");
+}
 int main(int argc,const char *argv[]) {
     @autoreleasepool {
         Require(argc==2,@"Usage: LXRuntimeTests /absolute/path/LXBootstrap.js");
@@ -200,6 +316,7 @@ int main(int argc,const char *argv[]) {
         LXSourceRuntime *missing=[[LXSourceRuntime alloc] initWithBootstrapScript:bootstrap]; Load(missing,@"const fixture=1;",NO);
         AuthenticatedQQ([[LXSourceRuntime alloc] initWithBootstrapScript:bootstrap],port);
         CompatibilityCrypto(bootstrap);
+        IsolatedResolutions(bootstrap);
         shutdown(server,SHUT_RDWR); close(server);
         printf("PASS: native JavaScriptCore, crypto, HTTP loopback, binary and multipart wire bytes, cookie isolation, callbacks, cancellation, timeout fixtures\n");
     }
