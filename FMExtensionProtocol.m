@@ -217,7 +217,9 @@ static NSArray *FMXProtocolClasses(id self, SEL selector) {
 + (void)setTrackMetadataObserver:(void (^)(id))observer {
     @synchronized(self) {
         FMXMetadataObserver=[observer copy];
-        FMLXMCSetTrackObserver(observer ? ^(NSDictionary *track){observer(track);} : nil);
+        FMLXMCTrackObserver trackObserver=nil;
+        if(observer)trackObserver=^(NSDictionary *track){observer(track);};
+        FMLXMCSetTrackObserver(trackObserver);
     }
 }
 
