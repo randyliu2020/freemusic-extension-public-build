@@ -22,7 +22,9 @@
             @try{
                 Main(^{oldRoot=self.window.rootViewController;host=CFBridgingRelease(factory());self.window.rootViewController=host;[self.window makeKeyAndVisible];});
                 waitAlert();fill(initial);waitBinding();finish();originalID=state[@"native_playlist_id"];originalCount=[state[@"library_playlist_count"] unsignedIntegerValue];
-                Main(^{Check(FindIdentifier(host.view,[@"LXFixture.Library." stringByAppendingString:originalID.stringValue])!=nil,@"Committed local playlist is visible in the original-style SwiftUI List");cloudPreserved=FindIdentifier(host.view,@"LXFixture.Library.77")!=nil;Check(cloudPreserved,@"Existing cloud playlist remains visible beside local entries");reopen();});
+                Check(Until(^BOOL{state=CFBridgingRelease(copyState());NSArray *mounted=state[@"mounted_playlist_ids"];cloudPreserved=[mounted containsObject:@77];return [mounted containsObject:originalID]&&cloudPreserved;},5),@"SwiftUI mounts both the committed local playlist row and the existing cloud playlist row");
+                [self screenshot:@"v8-lxmc-first-import-library.png"];
+                Main(^{reopen();});
                 waitAlert();fill(updated);choose(0,0);waitBinding();finish();
                 Check([state[@"native_playlist_id"] isEqual:originalID]&&[state[@"library_playlist_count"] unsignedIntegerValue]==originalCount&&[state[@"saved_track_ids"] isEqual:@[@"8103"]],@"Explicit overwrite preserves playlist identity and replaces all songs without a duplicate");
                 Main(^{reopen();});waitAlert();fill(updated);choose(1,0);waitBinding();finish();copyID=state[@"native_playlist_id"];
@@ -33,5 +35,5 @@
                 @synchronized(SmokeSearchTransport.class){Check(SmokeSearchRequests.count==3,@"Only three real library refreshes reach the cloud fixture");for(NSDictionary *request in SmokeSearchRequests)Check([SmokeQuery([NSURLRequest requestWithURL:[NSURL URLWithString:request[@"url"]]])[@"action"] isEqual:@"playlist_list"],@"No local import, marker, edit or synthetic ID reaches remote transport");}
                 [self screenshot:@"v8-lxmc-duplicate-cancel.png"];
             }@finally{RestoreSearchFixtureTransport();Main(^{if(host.presentedViewController)[host dismissViewControllerAnimated:NO completion:nil];self.window.rootViewController=oldRoot;[self.window makeKeyAndVisible];});}
-            return @{@"production_duplicate_ui":@YES,@"native_swift_codable_chain":@YES,@"overwrite_same_native_id":@YES,@"save_copy_new_native_id":@YES,@"cancel_preserves_library":@YES,@"original_cloud_entry_preserved":@(cloudPreserved),@"explicit_result_feedback":@YES,@"external_network_used":@NO,@"original_app_runtime_verified":@NO,@"ui_tap_validated":@NO};
+            return @{@"production_duplicate_ui":@YES,@"native_swift_codable_chain":@YES,@"swiftui_row_lifecycle_verified":@YES,@"overwrite_same_native_id":@YES,@"save_copy_new_native_id":@YES,@"cancel_preserves_library":@YES,@"original_cloud_entry_preserved":@(cloudPreserved),@"explicit_result_feedback":@YES,@"external_network_used":@NO,@"original_app_runtime_verified":@NO,@"ui_tap_validated":@NO};
         }];

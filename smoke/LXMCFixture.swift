@@ -22,10 +22,23 @@ private struct LXNativePlaylist: Decodable, Identifiable {
 private final class LXSmokeState {
     static let shared = LXSmokeState()
     var snapshot: [String: Any] = [:]
-    func reset() { snapshot = ["ui_tap_validated": false, "original_import_callback_count": 0, "completed": false] }
+    var generation = UUID()
+    private var mountedPlaylists: Set<Int> = []
+    func reset() {
+        generation = UUID()
+        mountedPlaylists = []
+        snapshot = ["ui_tap_validated": false, "original_import_callback_count": 0,
+                    "completed": false, "mounted_playlist_ids": [Int]()]
+    }
+    func rowMounted(_ id: Int, mounted: Bool, generation: UUID) {
+        guard generation == self.generation else { return }
+        if mounted { mountedPlaylists.insert(id) } else { mountedPlaylists.remove(id) }
+        snapshot["mounted_playlist_ids"] = mountedPlaylists.sorted()
+    }
 }
 
 private struct LXOriginalImportFixture: View {
+    private let generation = LXSmokeState.shared.generation
     @State private var showImport = true
     @State private var importURL = ""
     @State private var playlists: [LXNativePlaylist] = []
@@ -39,6 +52,12 @@ private struct LXOriginalImportFixture: View {
                         Text("Native playlist \(playlist.id): \(playlist.count ?? 0) tracks")
                     }
                     .accessibilityIdentifier("LXFixture.Library.\(playlist.id)")
+                    // SwiftUI rows can expose virtual accessibility elements
+                    // without assigning that identifier to a backing UIView.
+                    // Observe the actual row lifecycle instead of traversing
+                    // UIKit's private hosting hierarchy in the component test.
+                    .onAppear { LXSmokeState.shared.rowMounted(playlist.id, mounted: true, generation: generation) }
+                    .onDisappear { LXSmokeState.shared.rowMounted(playlist.id, mounted: false, generation: generation) }
                 }
             }
             .navigationTitle("资料库")
