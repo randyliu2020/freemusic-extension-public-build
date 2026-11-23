@@ -6,9 +6,9 @@ from interaction_patch import (ORIGINAL_BINARY_SHA256, ORIGINAL_BINARY_SIZE, BAS
     _verify_cave, CAVE as SHARED_CAVE)
 CAVE=0x509B40
 END=0x509D40
-DYLSYM=0x40805C
-SETUP_SITE=0x58B68
-FAILURE_SITE=0x5AAE0
+DYLSYM=0x40821c
+SETUP_SITE=0x58b20
+FAILURE_SITE=0x5aa98
 SETUP_NAME=0x509CC0
 FAILURE_NAME=0x509CF0
 ASSEMBLY={
@@ -17,18 +17,18 @@ stp x29, x30, [sp, #-16]!
 mov x0, #-2
 adrp x1, 0x509000
 add x1, x1, #0xcc0
-bl 0x40805c
+bl 0x40821c
 cbz x0, done
 mov x16, x0
 mov x0, x19
 adrp x8, 0x54d000
-ldr x8, [x8, #0x6a0]
+ldr x8, [x8, #0x748]
 ldr x1, [x19, x8]
 blr x16
 done:
 ldp x29, x30, [sp], #16
 sub sp, x29, #0x50
-b 0x58b6c
+b 0x58b24
 """,
 0x509BC0: """
 stp x29, x30, [sp, #-48]!
@@ -40,23 +40,23 @@ cbnz x1, native
 cmp w2, #4
 b.ne native
 adrp x9, 0x5a000
-add x9, x9, #0x1b8
+add x9, x9, #0x170
 cmp x30, x9
 b.eq media
 adrp x9, 0x5a000
-add x9, x9, #0xa7c
+add x9, x9, #0xa34
 cmp x30, x9
 b.ne native
 media:
 mov x0, #-2
 adrp x1, 0x509000
 add x1, x1, #0xcf0
-bl 0x40805c
+bl 0x40821c
 cbz x0, native
 mov x16, x0
 mov x0, x20
 adrp x8, 0x54d000
-ldr x8, [x8, #0x6a0]
+ldr x8, [x8, #0x748]
 ldr x1, [x20, x8]
 blr x16
 cbz w0, native
@@ -69,14 +69,17 @@ ldp x2, x20, [sp, #32]
 ldp x0, x1, [sp, #16]
 ldp x29, x30, [sp], #48
 stp x28, x27, [sp, #-0x60]!
-b 0x5aae4
+b 0x5aa9c
 """
 }
-ENCODED={5282624: 'fd7bbfa920008092010000902100339143f9fb97e00000b4f00300aae00313aa28020090085143f9616a68f800023fd6fd7bc1a8bf4301d1fd3bed17', 5282752: 'fd7bbda9e00701a9e25302a91f0400f181030054610300b55f1000712103005489daffb029e10691df0309eba000005489daffb029f12991df0309eb21020054200080920100009021c0339114f9fb97800100b4f00300aae00314aa28020090085143f9816a68f800023fd6a0000034e25342a9e00741a9fd7bc3a8c0035fd6e25342a9e00741a9fd7bc3a8fc6fbaa9a543ed17'}
-CONTEXTS={
-0x58240:(0x928,"b7e8c08d8ed6b7bc3ce45b00318756a7c3691a19d8389f7cb98c3712c835263d"),
-0x58B68:(0x20,"d5289be4ee66b6a148ad520e32d8a7db180cd9575633b08d817b70836f5b4eb2"),
-0x5AAE0:(0x2c,"77daf1b0cad0d4d27b3cadedf18dd3fadc79523cd66e1399f226048c9914849c"),
+ENCODED = {
+    0x509b40: 'fd7bbfa9200080920100009021003391b3f9fb97e00000b4f00300aae00313aa2802009008a543f9616a68f800023fd6fd7bc1a8bf4301d1eb3bed17',
+    0x509bc0: 'fd7bbda9e00701a9e25302a91f0400f181030054610300b55f1000712103005489daffb029c10591df0309eba000005489daffb029d12891df0309eb21020054200080920100009021c0339184f9fb97800100b4f00300aae00314aa2802009008a543f9816a68f800023fd6a0000034e25342a9e00741a9fd7bc3a8c0035fd6e25342a9e00741a9fd7bc3a8fc6fbaa99343ed17',
+}
+CONTEXTS = {
+    0x581f8: (0x928, "f18af736fca1e2c5d742bd4a3e6a4ad4a58fe2f6d4b010b114fae992e4de7f01"),
+    0x58b20: (0x20, "d5289be4ee66b6a148ad520e32d8a7db180cd9575633b08d817b70836f5b4eb2"),
+    0x5aa98: (0x2c, "77daf1b0cad0d4d27b3cadedf18dd3fadc79523cd66e1399f226048c9914849c"),
 }
 def payload():
     data=bytearray(END-CAVE); used=set()
@@ -94,7 +97,7 @@ def payload():
     return bytes(data)
 def patch_plan(original):
     if len(original)!=ORIGINAL_BINARY_SIZE or sha256(original)!=ORIGINAL_BINARY_SHA256:
-        raise InteractionPatchError("Original FreeMusic 4.2.7 executable SHA256 mismatch")
+        raise InteractionPatchError("Original FreeMusic 4.2.9 executable SHA256 mismatch")
     _verify_cave(original,END-SHARED_CAVE)
     for offset,(length,digest) in CONTEXTS.items():
         if sha256(original[offset:offset+length])!=digest:

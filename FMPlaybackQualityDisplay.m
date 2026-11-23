@@ -100,7 +100,7 @@ static void FMPQPrepare(void) {
         const struct mach_header_64 *header=(const struct mach_header_64 *)_dyld_get_image_header(0);
         if (!header || header->magic!=MH_MAGIC_64 || header->cputype!=CPU_TYPE_ARM64 ||
             header->filetype!=MH_EXECUTE || header->ncmds>1024 || header->sizeofcmds>65536) return;
-        const uint8_t uuid[16]={0x48,0xc7,0x7a,0x33,0x63,0xbc,0x3e,0x8f,0x8f,0xc7,0x5e,0xd6,0x13,0x29,0x24,0xc4};
+        const uint8_t uuid[16]={0x21,0x2e,0x31,0x08,0x9a,0x0c,0x33,0x09,0xbe,0xdc,0x7e,0x99,0x6e,0x81,0x99,0xd1};
         const uint8_t *cursor=(const uint8_t *)(header+1), *end=cursor+header->sizeofcmds;
         BOOL uuidMatches=NO, rangeMatches=NO;
         for (uint32_t index=0; index<header->ncmds; index++) {
@@ -112,21 +112,21 @@ static void FMPQPrepare(void) {
             if (command->cmd==LC_SEGMENT_64 && command->cmdsize>=sizeof(struct segment_command_64)) {
                 const struct segment_command_64 *segment=(const struct segment_command_64 *)command;
                 if (!strncmp(segment->segname,"__TEXT",16) && segment->fileoff==0 &&
-                    segment->vmaddr==0x100000000ull && segment->filesize>=0x4253d0 &&
-                    segment->vmsize>=0x4253d0 && (segment->initprot&5)==5) rangeMatches=YES;
+                    segment->vmaddr==0x100000000ull && segment->filesize>=0x4254d8 &&
+                    segment->vmsize>=0x4254d8 && (segment->initprot&5)==5) rangeMatches=YES;
             }
             cursor+=command->cmdsize;
         }
         if (!uuidMatches || !rangeMatches) return;
         const uint8_t *base=(const uint8_t *)header;
-        // Original 4.2.7 display-only Published setter/getter, key paths and
+        // Original 4.2.9 display-only Published setter/getter, key paths and
         // player-header Text construction. No original bytecode is bundled.
-        if (!FMPQDigest(base+0x664d0,0x7c,"f23dd226fcecd34ca9cca942cd577ff1b5f69665ceacb843b5edeef268767792") ||
-            !FMPQDigest(base+0x664bc,0x14,"ffb583c229ff4e127e87d3f00b76e0418bd1937cf04f820ddc2f42472378f493") ||
-            !FMPQDigest(base+0x417938,0x50,"0685cd1254de2234753a59060d7525048182905d7a8b71eb2fa43a9f703d1732") ||
-            !FMPQDigest(base+0x425380,0x50,"fd92245f52e09be637668ea565fb4000c9d839b63ef03079596c83767d2a3325") ||
-            !FMPQDigest(base+0x1b1ab4,0x64,"ede214d81d9d9f3db3ef206360dae7f02edcec51287812df181a36d1a59287cc")) return;
-        FMPQNativeSetter=(void *)(base+0x664d0);
+        if (!FMPQDigest(base+0x664a8,0x7c,"2cdaf67a4ac9d4198b88278f81db6b9aed4ecd49f5cc352a04b61ba7d8890ee6") ||
+            !FMPQDigest(base+0x66494,0x14,"f3fe3e1616ae0d64c392ce048f370c3d1b5abba19ec18e8248c024c116a7d2dd") ||
+            !FMPQDigest(base+0x417ae8,0x50,"5c75fc2f3d8e4e42d10f6a8e186706dbc42f03b92ee66af346bb3a06787dbf30") ||
+            !FMPQDigest(base+0x425488,0x50,"6e0d5bc22201a3dbedbb5c25e3b6d7041c33a0db0405fd6bf66a774bab0adce0") ||
+            !FMPQDigest(base+0x1b195c,0x64,"fad2b26e3702703e3976ecf47a030368f49ddeb8818d6fa54c8374a181602c04")) return;
+        FMPQNativeSetter=(void *)(base+0x664a8);
         FMPQImageMatched=YES;
     });
 }

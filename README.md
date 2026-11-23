@@ -1,6 +1,6 @@
-# FreeMusic 4.2.7 extension — v8 search, playback and local playlist reliability
+# FreeMusic 4.2.9 extension — v8 search, playback and local playlist reliability
 
-Source-only build for a user-authorized modification of FreeMusic-Folia 4.2.7.
+Source-only build for a user-authorized modification of FreeMusic-Folia 4.2.9, build 4381.
 This repository does not contain the original application, signing identities,
 provisioning profiles, cookies, third-party music scripts, or music files.
 
@@ -33,6 +33,10 @@ No membership, authentication, DRM or account checks are modified.
 This is an experimental binary extension, not recovered original source code.
 Compilation/fixture success does not prove that a re-signed IPA launches or that
 network interception works on an iPhone. Device validation is required.
+
+This branch targets build 4381. Use the original 4.2.9 archive and the cumulative
+v8 packaging flags plus `--quiet-update`. This option suppresses the optional
+upgrade sheet on launch. A user-initiated check in Settings can still show it.
 
 ## V7 additions
 

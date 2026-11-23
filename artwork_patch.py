@@ -17,16 +17,16 @@ import struct
 import sys
 import zipfile
 
-IPA_SHA256 = "04ed76d57932c7de51cd1fe0dc8a10f918d9614277c90012b4c2baf9c51b9418"
-BINARY_SHA256 = "03f19d8402580a93ffd772e05512de4a8af533ef9ead51f3c12d334202b17887"
+IPA_SHA256 = "4f6d3ba77dea7b04feb9ff3852416cbf80c29fc24df1cfe82a93d6654a61cba1"
+BINARY_SHA256 = "59bb22eb6fb7a62bf574e8b42c9a16f1b3774368bda484a41ce9bea4b8af992f"
 BINARY_ENTRY = "Payload/FreeMusic.app/FreeMusic"
-BINARY_SIZE = 6288608
-OFFSET = 0x631F8
+BINARY_SIZE = 6160080
+OFFSET = 0x631C8
 OLD_SIZE = 1000
 NEW_SIZE = 1600
 OLD_INSTRUCTION = bytes.fromhex("057d8052")
 NEW_INSTRUCTION = bytes.fromhex("05c88052")
-CONTEXT_OFFSET = 0x631E8
+CONTEXT_OFFSET = 0x631B8
 ORIGINAL_CONTEXT = bytes.fromhex(
     "f60300aae00308aae10313aae30314aa057d8052e6cf40a9fd7b42a9bdfb4392ffc30091"
 )
@@ -34,11 +34,11 @@ ORIGINAL_CONTEXT = bytes.fromhex(
 # Relative virtual addresses resolved through LC_SEGMENT_64 VA-to-file mapping. Each array
 # belongs to the original URL resizing code, not to the local decoding cap.
 PROVIDER_TABLES = {
-    "music.126.net": (0x551688, [150, 300, 500, 800, 1000]),
-    "qq.com": (0x5516E0, [150, 300, 500, 800]),
-    "gtimg.cn": (0x551728, [150, 300, 500, 800]),
-    "kuwo.cn": (0x551770, [120, 300, 500, 700]),
-    "kugou.com": (0x5517B8, [150, 240, 400, 480]),
+    "music.126.net": (0x551728, [150, 300, 500, 800, 1000]),
+    "qq.com": (0x551780, [150, 300, 500, 800]),
+    "gtimg.cn": (0x5517C8, [150, 300, 500, 800]),
+    "kuwo.cn": (0x551810, [120, 300, 500, 700]),
+    "kugou.com": (0x551858, [150, 240, 400, 480]),
 }
 
 

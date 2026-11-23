@@ -279,7 +279,7 @@ static uintptr_t FMImpAddress(IMP implementation) {
 static BOOL FMVerify(void) {
     const struct mach_header_64 *header=(void *)_dyld_get_image_header(0);
     if(!header || header->magic!=MH_MAGIC_64 || header->filetype!=MH_EXECUTE || header->cputype!=CPU_TYPE_ARM64 || header->sizeofcmds>65536 || header->ncmds>1024)return NO;
-    const uint8_t expected[]={0x48,0xc7,0x7a,0x33,0x63,0xbc,0x3e,0x8f,0x8f,0xc7,0x5e,0xd6,0x13,0x29,0x24,0xc4};
+    const uint8_t expected[]={0x21,0x2e,0x31,0x08,0x9a,0x0c,0x33,0x09,0xbe,0xdc,0x7e,0x99,0x6e,0x81,0x99,0xd1};
     BOOL uuid=NO,range=NO;const uint8_t *cursor=(const void *)(header+1),*end=cursor+header->sizeofcmds;
     for(uint32_t i=0;i<header->ncmds;i++){
         if(end-cursor<(ptrdiff_t)sizeof(struct load_command))return NO;const struct load_command *command=(const void *)cursor;
@@ -291,15 +291,15 @@ static BOOL FMVerify(void) {
         }cursor+=command->cmdsize;
     }
     if(!uuid || !range)return NO;
-    const uintptr_t offsets[]={0x7a910,0x7af24,0x7b1bc};SEL selectors[]={FMProgressSEL(),FMFinishSEL(),FMCompleteSEL()};
-    const char *hashes[]={"f6f34513fef64004f8be0bf3f92ba307b128bac6b91c7c9f8306146e325901ed","e6ba6ca73b96f76b48e696558ca082ea3732b3f9d7147d3f01c99903bb560995","b0b576691558ef0d14e593af6ea6575d2aff464eebf39d03833d29edb71f82ed"};
+    const uintptr_t offsets[]={0x7a928,0x7af3c,0x7b1d4};SEL selectors[]={FMProgressSEL(),FMFinishSEL(),FMCompleteSEL()};
+    const char *hashes[]={"2db55b3197a54efe6b21b26e89127ec692c8b6071dc206545804d80b7e86f94c","7b1bd5b6daeefa316c33c5bc0c9aa3814a93764f623d6866457aaa4a6f00294f","c7b0b703c93f1957eac3a0775a1c2fdf6c33bd7e3adc325ab18e4e7349420dcb"};
     Class cls=NSClassFromString(@"_TtC9FreeMusic12CacheManager");if(!cls)return NO;
     for(NSUInteger i=0;i<3;i++){Method method=FMOwnMethod(cls,selectors[i]);const uint8_t *code=(const uint8_t *)header+offsets[i];
         if(!method || FMImpAddress(method_getImplementation(method))!=(uintptr_t)code || !FMDigest(code,64,hashes[i]))return NO;}
-    const uint8_t formatBranch[]={0x19,0x3c,0x12,0x14};
-    return FMDigest((const uint8_t *)header+0x780e4,64,"35efab6f7fbf04e02029fe13a93bb92f2b28f04a0be6496738cf5b3829089b53") &&
-        !memcmp((const uint8_t *)header+0x7acdc,formatBranch,sizeof(formatBranch)) &&
-        FMDigest((const uint8_t *)header+0x509d40,0x100,"8a301f4c5b6667c0e5fd3e6d00771a86c57da5cf3c72eaeae795205072b730b5");
+    const uint8_t formatBranch[]={0x13,0x3c,0x12,0x14};
+    return FMDigest((const uint8_t *)header+0x780fc,64,"35efab6f7fbf04e02029fe13a93bb92f2b28f04a0be6496738cf5b3829089b53") &&
+        !memcmp((const uint8_t *)header+0x7acf4,formatBranch,sizeof(formatBranch)) &&
+        FMDigest((const uint8_t *)header+0x509d40,0x100,"19fd327c64748e56881cb1c9c3d9ca21e04cd55958691d25da82dbff672f9526");
 }
 static BOOL FMInstallClass(Class cls) {
     FMState();[FMLock lock];

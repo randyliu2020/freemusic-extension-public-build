@@ -17,11 +17,11 @@ from interaction_patch import (
     CAVE as LYRIC_CAVE,
 )
 
-SITE = 0x1ABC70
+SITE = 0x1ABB18
 CAVE = 0x509740  # after the lyric patch's 0x509720..0x509734 allocation
-ORIGINAL_CONDITION = 0x1ABC74
-NATIVE_DISMISS = 0x1ABC9C
-TRANSLATION_GETTER = 0x404C24
+ORIGINAL_CONDITION = 0x1ABB1C
+NATIVE_DISMISS = 0x1ABB44
+TRANSLATION_GETTER = 0x404DE4
 
 # The original onEnded has saved LR and all callee-saved FP registers already.
 # translation returns dx/dy in d0/d1. Only caller-saved d2/d3/d4 and x8 are used;
@@ -29,7 +29,7 @@ TRANSLATION_GETTER = 0x404C24
 # Failed left tests resume the EXACT old predicate after its translation call.
 # Successful tests enter the EXACT old PresentationMode.dismiss + Binding write.
 TRAMPOLINE_ASSEMBLY = """
-bl 0x404c24
+bl 0x404de4
 fneg d2, d0
 mov x8, #0x4054000000000000
 fmov d3, x8
@@ -40,28 +40,28 @@ fmov d4, #1.5
 fmul d3, d3, d4
 fcmp d2, d3
 b.le fallback
-b 0x1abc9c
+b 0x1abb44
 fallback:
-b 0x1abc74
+b 0x1abb1c
 """
-TRAMPOLINE_HEX = "39edfb970240611e880ae8d20301679e4020631eed00005423c0601e04106f1e6308641e4020631e4d0000544c89f2174189f217"
-ORIGINAL_PREDICATE_HEX = "ed630994880ae8d20001679e2020601ead030054e8630994281ca14ee663099400c0601e0020681ee5020054"
-NATIVE_DISMISS_HEX = "000080d234560094081c80b97402088be80317aa0104fd97e80315aae00316aaf40317aaa3690994f40315aa2d650994e00315aae10316aaf40317aaa0690994211d00d021201891821300b042801791e00317aa3e72f997"
+TRAMPOLINE_HEX = "a9edfb970240611e880ae8d20301679e4020631eed00005423c0601e04106f1e6308641e4020631e4d000054f688f217eb88f217"
+ORIGINAL_PREDICATE_HEX = "b3640994880ae8d20001679e2020601ead030054ae640994281ca14eac64099400c0601e0020681ee5020054"
+NATIVE_DISMISS_HEX = "000080d288550094081c80b97402088be80317aaa005fd97e80315aae00316aaf40317aa696a0994f40315aaf3650994e00315aae10316aaf40317aa666a0994211d00d021a01a91821300b042801e91e00317aa9472f997"
 CONTEXTS = {
     SITE: ORIGINAL_PREDICATE_HEX,
     NATIVE_DISMISS: NATIVE_DISMISS_HEX,
     # Two already-existing top-bar modifiers use this one native view capture.
-    0x1C6A18: "c1fffff021c0159122ffffb042702f9141040014",
-    0x1D236C: "abd1ff17",
-    0x1A4ECC: "21b047f9f888f997e30300aa000100d000602891b50353f8e80315aae10313aab68354f8e20316aa3d850994",
-    0x1A48C8: "21b047f9798af997e30300aa600100d000b00d91a8c302d1130150f8e80313aae10317aaa94302d1380150f8e20318aabc860994",
+    0x1C6608: "c1fffff021a0059122ffffb042102a9141040014",
+    0x1D2574: "25d0ff17",
+    0x1A4DB8: "216447f93d89f997e30300aa000100d000201891b50353f8e80315aae10313aab68354f8e20316aaf2850994",
+    0x1A47B4: "216447f9be8af997e30300aa600100d000d01591a8c302d1130150f8e80313aae10317aaa94302d1380150f8e20318aa71870994",
 }
 
 
 def patch_plan(original: bytes) -> list[Change]:
     """Plan against the immutable original; parent merges disjoint changes."""
     if len(original) != ORIGINAL_BINARY_SIZE or sha256(original) != ORIGINAL_BINARY_SHA256:
-        raise InteractionPatchError("Original FreeMusic 4.2.7 executable SHA256 mismatch")
+        raise InteractionPatchError("Original FreeMusic 4.2.9 executable SHA256 mismatch")
     trampoline = bytes.fromhex(TRAMPOLINE_HEX)
     # The shared validator checks the complete zero-padding interval, executable
     # __TEXT permissions, no section overlap, and absence of encryption.
@@ -86,7 +86,7 @@ def patch_binary(original: bytes) -> tuple[bytes, dict]:
     result = apply_verified_plan(original, changes)
     return result, {
         "original_sha256": sha256(original), "patched_sha256": sha256(result),
-        "version": "FreeMusic 4.2.7 (4379)", "requires_resigning": True,
+        "version": "FreeMusic 4.2.9 (4381)", "requires_resigning": True,
         "scope": "existing FullPlayer top drag-handle and title-bar gestures only",
         "left_condition": "dx < -80 and -dx > 1.5 * abs(dy)",
         "original_downward_condition_preserved": True,

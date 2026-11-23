@@ -179,7 +179,7 @@ cp "$source_dir/LXBootstrap.js" "$app_dir/LXBootstrap.js"
 python3 - "$app_dir" "$sdk_version" "$source_dir" "$output_dir" <<'PY'
 import hashlib,json,pathlib,plistlib,sys
 app=pathlib.Path(sys.argv[1]); source=pathlib.Path(sys.argv[3]); out=pathlib.Path(sys.argv[4])
-info={'CFBundleIdentifier':'org.codex.fmx.smoke','CFBundleExecutable':'FreeMusic','CFBundleName':'LX Extension Smoke','CFBundleDisplayName':'LX Extension Smoke','CFBundlePackageType':'APPL','CFBundleShortVersionString':'4.2.7','CFBundleVersion':'1','MinimumOSVersion':'26.0','UIDeviceFamily':[1],'LSRequiresIPhoneOS':True,'UILaunchScreen':{},'UISupportedInterfaceOrientations':['UIInterfaceOrientationPortrait'],'UIApplicationSceneManifest':{'UIApplicationSupportsMultipleScenes':False,'UISceneConfigurations':{'UIWindowSceneSessionRoleApplication':[{'UISceneConfigurationName':'Smoke','UISceneDelegateClassName':'SmokeSceneDelegate'}]}}}
+info={'CFBundleIdentifier':'org.codex.fmx.smoke','CFBundleExecutable':'FreeMusic','CFBundleName':'LX Extension Smoke','CFBundleDisplayName':'LX Extension Smoke','CFBundlePackageType':'APPL','CFBundleShortVersionString':'4.2.9','CFBundleVersion':'4381','MinimumOSVersion':'26.0','UIDeviceFamily':[1],'LSRequiresIPhoneOS':True,'UILaunchScreen':{},'UISupportedInterfaceOrientations':['UIInterfaceOrientationPortrait'],'UIApplicationSceneManifest':{'UIApplicationSupportsMultipleScenes':False,'UISceneConfigurations':{'UIWindowSceneSessionRoleApplication':[{'UISceneConfigurationName':'Smoke','UISceneDelegateClassName':'SmokeSceneDelegate'}]}}}
 # Permit only the authored loopback HTTP media fixture; production Info.plist is untouched.
 info['NSAppTransportSecurity']={'NSAllowsLocalNetworking':True}
 with (app/'Info.plist').open('wb') as f: plistlib.dump(info,f)

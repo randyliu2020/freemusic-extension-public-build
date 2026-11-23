@@ -74,7 +74,7 @@ static BOOL FMCacheVerifyImage(void) {
     const struct mach_header_64 *header=(const struct mach_header_64 *)_dyld_get_image_header(0);
     if (!header || header->magic!=MH_MAGIC_64 || header->cputype!=CPU_TYPE_ARM64 ||
         header->filetype!=MH_EXECUTE || header->ncmds>1024 || header->sizeofcmds>65536) return NO;
-    const uint8_t uuid[16]={0x48,0xc7,0x7a,0x33,0x63,0xbc,0x3e,0x8f,0x8f,0xc7,0x5e,0xd6,0x13,0x29,0x24,0xc4};
+    const uint8_t uuid[16]={0x21,0x2e,0x31,0x08,0x9a,0x0c,0x33,0x09,0xbe,0xdc,0x7e,0x99,0x6e,0x81,0x99,0xd1};
     const uint8_t *cursor=(const uint8_t *)(header+1),*end=cursor+header->sizeofcmds;
     BOOL matchingUUID=NO, executableRange=NO;
     for (uint32_t i=0;i<header->ncmds;i++) {
@@ -95,10 +95,10 @@ static BOOL FMCacheVerifyImage(void) {
     const uint8_t *base=(const uint8_t *)header;
     // Digests, not original app bytecode. Require our complete authored payload,
     // five entry branches, and the untouched init / native invalidator routines.
-    if (!FMCacheDigest(base+0x43b70,0x134,"6ba7d38fd9eaa30b148ff2d977ad7fb8c110e23aa57f2ea74d059ceed32e53ed") ||
-        !FMCacheDigest(base+0x4a1c0,0x15c,"18dcbaa8078cd254cce3b8f1da765da73421f73ec75a24bef09223e19a6d6a73") ||
-        !FMCacheDigest(base+0x509780,0x3c0,"ff82b4066bf01200033870a24ec34b82a170322ae15aad2cbd0b3d0444c57f8f")) return NO;
-    const uint32_t sites[]={0x4ae88,0x4dc6c,0x57138,0x73188,0x4b168};
+    if (!FMCacheDigest(base+0x43bc4,0x134,"c712ed770d616dbcfd59e2392bcca2d184e3890edc6145cf09f3234fb26f4202") ||
+        !FMCacheDigest(base+0x4a378,0x15c,"180561c7f6cd8cbdde5080d3598d52113a1d705340cf9b9baa4260be3aa360e0") ||
+        !FMCacheDigest(base+0x509780,0x3c0,"2e7b3bd62a17e25e4e64113b2e907decaee412cadb143a3fab5cf608facafa4c")) return NO;
+    const uint32_t sites[]={0x4b040,0x4de24,0x57130,0x731a0,0x4b320};
     const uint32_t targets[]={0x509780,0x5097a0,0x5097c0,0x5098c0,0x509940};
     for (NSUInteger i=0;i<5;i++) {
         uint32_t word; memcpy(&word,base+sites[i],4);
@@ -124,9 +124,9 @@ void FMPlaybackCacheInstall(void) {
         Class nativeClass=NSClassFromString(@"_TtC9FreeMusic18AudioPlayerManager");
         Method method=nativeClass ? class_getInstanceMethod(nativeClass,sel_registerName("init")) : NULL;
         if (!method || method_getNumberOfArguments(method)!=2 ||
-            FMCacheIMPAddress(method_getImplementation(method))!=FMCacheMainBase+0x43b70) return;
+            FMCacheIMPAddress(method_getImplementation(method))!=FMCacheMainBase+0x43bc4) return;
         FMCachePreviousInit=(FMCacheInitIMP)method_getImplementation(method);
-        FMCacheInvalidate=(FMCacheNativeInvalidator)(FMCacheMainBase+0x4a1c0);
+        FMCacheInvalidate=(FMCacheNativeInvalidator)(FMCacheMainBase+0x4a378);
         @synchronized(FMCacheLock) { FMCacheImageMatched=YES; FMCacheInstalled=YES; }
         method_setImplementation(method,(IMP)FMCacheInit);
     });

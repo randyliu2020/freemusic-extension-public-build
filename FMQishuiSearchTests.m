@@ -15,13 +15,13 @@ static void WriteString(NSMutableData *data,NSUInteger offset,NSString *value) {
     memcpy((uint8_t *)data.mutableBytes+offset,pair,sizeof(pair));
 }
 static NSMutableData *Executable(void) {
-    NSMutableData *data=[NSMutableData dataWithLength:0x559100];
+    NSMutableData *data=[NSMutableData dataWithLength:0x5591b0];
     struct mach_header_64 header={.magic=MH_MAGIC_64,.cputype=CPU_TYPE_ARM64,.filetype=MH_EXECUTE,.ncmds=1,.sizeofcmds=sizeof(struct uuid_command)};
-    struct uuid_command uuid={.cmd=LC_UUID,.cmdsize=sizeof(struct uuid_command),.uuid={0x48,0xc7,0x7a,0x33,0x63,0xbc,0x3e,0x8f,0x8f,0xc7,0x5e,0xd6,0x13,0x29,0x24,0xc4}};
+    struct uuid_command uuid={.cmd=LC_UUID,.cmdsize=sizeof(struct uuid_command),.uuid={0x21,0x2e,0x31,0x08,0x9a,0x0c,0x33,0x09,0xbe,0xdc,0x7e,0x99,0x6e,0x81,0x99,0xd1}};
     memcpy(data.mutableBytes,&header,sizeof(header)); memcpy((uint8_t *)data.mutableBytes+sizeof(header),&uuid,sizeof(uuid));
     NSArray *keys=FMXQishuiConfigurationKeys();
-    for(NSUInteger i=0;i<keys.count;i++) { WriteString(data,0x558e18+i*32,keys[i]); WriteString(data,0x558e28+i*32,@"fixture"); }
-    WriteString(data,0x558dc0,@"trigger_type"); WriteString(data,0x558dd0,@"fixture"); return data;
+    for(NSUInteger i=0;i<keys.count;i++) { WriteString(data,0x558f70+i*32,keys[i]); WriteString(data,0x558f80+i*32,@"fixture"); }
+    WriteString(data,0x558f18,@"trigger_type"); WriteString(data,0x558f28,@"fixture"); return data;
 }
 static NSDictionary *Track(NSUInteger identifier) {
     return @{@"entity":@{@"track":@{@"base_info":@{@"id":@(identifier).stringValue,@"name":@"Fixture title",@"duration_ms":@210250},
@@ -106,7 +106,7 @@ int main(void) { @autoreleasepool {
     NSMutableData *binary=Executable(); Check(FMXQishuiConfigurationFromExecutable(binary)!=nil,@"verified layout extracts synthetic public configuration");
     NSMutableData *bad=[binary mutableCopy]; ((uint8_t *)bad.mutableBytes)[40]^=1;
     Check(!FMXQishuiConfigurationFromExecutable(bad),@"unknown executable UUID rejected");
-    bad=[binary mutableCopy]; WriteString(bad,0x558e18,@"wrong"); Check(!FMXQishuiConfigurationFromExecutable(bad),@"changed key layout rejected");
+    bad=[binary mutableCopy]; WriteString(bad,0x558f70,@"wrong"); Check(!FMXQishuiConfigurationFromExecutable(bad),@"changed key layout rejected");
     Check(!FMXQishuiConfigurationFromExecutable([binary subdataWithRange:NSMakeRange(0,64)]),@"truncated binary rejected");
     NSDictionary *decoded=FMXQishuiDecodeSearch(Payload(0,YES),nil); NSDictionary *track=[decoded[@"tracks"] firstObject];
     Check([track[@"server"] isEqual:@"qs"] && [track[@"id"] isEqual:@"0"] && [track[@"platform"] isEqual:@4],@"native source and ID preserved");

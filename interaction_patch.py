@@ -18,26 +18,26 @@ import json
 from pathlib import Path
 import struct
 
-ORIGINAL_BINARY_SHA256 = "03f19d8402580a93ffd772e05512de4a8af533ef9ead51f3c12d334202b17887"
-ORIGINAL_BINARY_SIZE = 6288608
+ORIGINAL_BINARY_SHA256 = "59bb22eb6fb7a62bf574e8b42c9a16f1b3774368bda484a41ce9bea4b8af992f"
+ORIGINAL_BINARY_SIZE = 6160080
 BASE = 0x100000000
 CAVE = 0x509680
-SEEK_SITE = 0x1AB5D4
-EXPAND_COUNT_SITE = 0x1A517C
-HIT_TESTING_SITE = 0x1AB714
+SEEK_SITE = 0x1AB47C
+EXPAND_COUNT_SITE = 0x1A5068
+HIT_TESTING_SITE = 0x1AB5BC
 HIT_CAVE = 0x509720
-NATIVE_PARENT_METADATA = 0x1C1570
-NATIVE_CAPTURE_METADATA = 0x519848
-NATIVE_ALLOC = 0x408BD8
+NATIVE_PARENT_METADATA = 0x1C1168
+NATIVE_CAPTURE_METADATA = 0x519838
+NATIVE_ALLOC = 0x408D98
 NATIVE_INITIALIZE_COPY = 0x1BE40
-NATIVE_SEEK_CLOSURE = 0x1C6A70
+NATIVE_SEEK_CLOSURE = 0x1C6660
 
 # Developer verification source. Production packaging needs no assembler.
 # At SEEK_SITE: X0=LyricsScroller metadata, X19=preview builder's frame storage,
 # [X19+16]=borrowed PlayerView value, X20=initialized LyricsScroller prefix.
 # Use the original parent value-witness initializeWithCopy, original capture
 # allocation metadata/destructor, and original seek closure. The destination
-# assumes ownership of the allocation's +1 reference, just as at 0x1AAA80.
+# assumes ownership of the allocation's +1 reference, just as at 0x1AA928.
 TRAMPOLINE_ASSEMBLY = """
 stp x29, x30, [sp, #-96]!
 mov x29, sp
@@ -49,25 +49,25 @@ str x0, [sp, #80]
 mov x21, x20
 ldr x22, [x19, #16]
 mov x0, #0
-bl 0x1c1570
+bl 0x1c1168
 ldur x8, [x0, #-8]
 ldrb w9, [x8, #80]
 add x10, x9, #16
 bic x24, x10, x9
 ldr x25, [x8, #64]
 adrp x0, 0x519000
-add x0, x0, #0x848
+add x0, x0, #0x838
 add x1, x24, x25
 orr x2, x9, #7
-bl 0x408bd8
+bl 0x408d98
 mov x23, x0
 add x1, x0, x24
 mov x0, x22
 adrp x2, 0x1c1000
-add x2, x2, #0x570
+add x2, x2, #0x168
 bl 0x1be40
 adrp x8, 0x1c6000
-add x8, x8, #0xa70
+add x8, x8, #0x660
 stp x8, x23, [x21, #24]
 ldr x0, [sp, #80]
 ldp x25, x26, [sp, #64]
@@ -77,7 +77,7 @@ ldp x19, x20, [sp, #16]
 ldp x29, x30, [sp], #96
 ret
 """
-TRAMPOLINE_HEX = "fd7bbaa9fd030091f35301a9f55b02a9f76303a9f96b04a9e02b00f9f50314aa760a40f9000080d2b2dff29708805ff8094141392a4100915801298a192140f980000090002021910103198b220940b242fdfb97f70300aa0100188be00316aac2e5ff9042c01591d649ec97e8e5ffb008c12991a8de01a9e02b40f9f96b44a9f76343a9f55b42a9f35341a9fd7bc6a8c0035fd6"
+TRAMPOLINE_HEX = "fd7bbaa9fd030091f35301a9f55b02a9f76303a9f96b04a9e02b00f9f50314aa760a40f9000080d2b0def29708805ff8094141392a4100915801298a192140f98000009000e020910103198b220940b2b2fdfb97f70300aa0100188be00316aac2e5ff9042a00591d649ec97e8e5ffb008811991a8de01a9e02b40f9f96b44a9f76343a9f55b42a9f35341a9fd7bc6a8c0035fd6"
 
 
 HIT_TRAMPOLINE_ASSEMBLY = """
@@ -85,9 +85,9 @@ stp x9, x10, [sp, #-16]!
 mov w9, #1
 strb w9, [x20, x8]
 ldp x9, x10, [sp], #16
-b 0x1ab718
+b 0x1ab5c0
 """
-HIT_TRAMPOLINE_HEX = "e92bbfa929008052896a2838e92bc1a8fa87f217"
+HIT_TRAMPOLINE_HEX = "e92bbfa929008052896a2838e92bc1a8a487f217"
 
 
 class InteractionPatchError(ValueError):
@@ -157,17 +157,17 @@ def _verify_cave(data: bytes, length: int) -> None:
 
 def patch_plan(original: bytes) -> list[Change]:
     if len(original) != ORIGINAL_BINARY_SIZE or sha256(original) != ORIGINAL_BINARY_SHA256:
-        raise InteractionPatchError("Original FreeMusic 4.2.7 executable SHA256 mismatch")
+        raise InteractionPatchError("Original FreeMusic 4.2.9 executable SHA256 mismatch")
     trampoline = bytes.fromhex(TRAMPOLINE_HEX)
     hit_trampoline = bytes.fromhex(HIT_TRAMPOLINE_HEX)
     _verify_cave(original, HIT_CAVE - CAVE + len(hit_trampoline))
     # These fingerprints also identify the two real UI call sites, the native
     # closure/capture reference, and the native copy function; not a byte search.
     contexts = {
-        0x1AB5C4: "9f4a0039000080d2a6670094fa0300aa9ffe01a9082480b9a0f7ffb0",
-        0x1A5170: "010100b021403c91e80313aa20008052e2031aaae30318aaf40317aad8820994",
-        0x1AAA70: "28008052e84a0039e800009008c12991e8d601a9000080d2776a0094",
-        0x1AB70C: "0570f997082480b99f6a2838",
+        0x1AB46C: "9f4a0039000080d2fa660094fa0300aa9ffe01a9082480b9a0f7ffb0",
+        0x1A505C: "010100b021002c91e80313aa20008052e2031aaae30318aaf40317aa8d830994",
+        0x1AA918: "28008052e84a0039e800009008811991e8d601a9000080d2cb690094",
+        0x1AB5B4: "5b70f997082480b99f6a2838",
     }
     for offset, expected in contexts.items():
         if original[offset:offset + len(expected) // 2] != bytes.fromhex(expected):
@@ -205,7 +205,7 @@ def patch_binary(original: bytes) -> tuple[bytes, dict]:
     changes = patch_plan(original)
     output = apply_verified_plan(original, changes)
     report = {"original_sha256": sha256(original), "patched_sha256": sha256(output),
-        "version": "FreeMusic 4.2.7 (4379)", "requires_resigning": True,
+        "version": "FreeMusic 4.2.9 (4381)", "requires_resigning": True,
         "changes": [{"offset": hex(c.offset), "before": c.before.hex(), "after": c.after.hex(), "reason": c.reason} for c in changes],
         "limits": ["Original IPA has not been executed in the simulator.", "Native UI gesture priority requires on-device validation after valid re-signing."]}
     return output, report

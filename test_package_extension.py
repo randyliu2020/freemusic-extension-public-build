@@ -202,8 +202,11 @@ class ActualIPATests(unittest.TestCase):
             self.assertEqual(package.parse_macho(a).segments, package.parse_macho(b).segments)
             self.assertEqual(len(a), len(b))
             self.assertEqual(a[artwork.OFFSET:artwork.OFFSET + 4], b[artwork.OFFSET:artwork.OFFSET + 4])
-            self.assertEqual(a[0x4000:6147184], b[0x4000:6147184])
-            self.assertEqual(b[6147184:], bytes(len(b) - 6147184))
+            signature = next(c for c in package.parse_macho(a, 2).commands if c.kind == package.LC_CODE_SIGNATURE)
+            start, length = struct.unpack_from("<II", signature.raw, 8)
+            self.assertEqual(a[0x4000:start], b[0x4000:start])
+            self.assertEqual(b[start:start+length], bytes(length))
+            self.assertEqual(a[start+length:], b[start+length:])
 
     def test_only_intended_zip_entries_change_and_bundle_settings_unchanged(self):
         with zipfile.ZipFile(self.original) as before, zipfile.ZipFile(self.output) as after:

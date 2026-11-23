@@ -22,7 +22,7 @@ class Machine:
         self.vm.mem_write(self.base+p.CAVE,p.payload());self.stack=0x2d0000;self.function=self.base+0x5e0000
         self.vm.reg_write(R.UC_ARM64_REG_SP,self.stack)
         for n in range(31):self.set(n,0x210000+n*0x100)
-        self.set(30,self.base+0x46b9c);self.original=[self.get(n) for n in range(31)]
+        self.set(30,self.base+0x46d54);self.original=[self.get(n) for n in range(31)]
         for n in range(8,16):self.vm.reg_write(getattr(R,f'UC_ARM64_REG_D{n}'),0xAABB000+n)
         self.saved_fp=[self.vm.reg_read(getattr(R,f'UC_ARM64_REG_D{n}')) for n in range(8,16)]
         self.vm.hook_add(UC_HOOK_CODE,self.hook)
@@ -65,7 +65,7 @@ class PlaybackSequencePatchTests(unittest.TestCase):
     def test_aslr_slide_keeps_symbol_and_continuation(self):
         for exports in (False,True):
             machine=Machine(exports,0x2f000000);machine.run()
-            self.assertEqual(machine.get(30),machine.base+0x46b9c)
+            self.assertEqual(machine.get(30),machine.base+0x46d54)
     def test_cave_does_not_overlap_v7_format_or_text_tail(self):
         import native_format_patch as previous
         self.assertGreaterEqual(p.CAVE,previous.END);self.assertLessEqual(p.END,0x50a000)

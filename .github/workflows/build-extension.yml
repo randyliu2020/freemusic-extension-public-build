@@ -2,7 +2,7 @@ name: Build FreeMusic extension only
 
 on:
   push:
-    branches: [main]
+    branches: [port-4.2.9]
   workflow_dispatch:
 
 permissions:
@@ -32,7 +32,7 @@ jobs:
           python test_native_format_patch.py -v
           python test_playback_sequence_patch.py -v
           python test_artwork_selection_patch.py -v
-          python test_v7_upgrade.py -v
+          python test_update_prompt_patch.py -v
 
   build:
     needs: instruction-tests

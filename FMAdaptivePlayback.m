@@ -118,7 +118,7 @@ static BOOL FMVerifyHost(void) {
     const struct mach_header_64 *header=(const struct mach_header_64 *)_dyld_get_image_header(0);
     if(!header || header->magic!=MH_MAGIC_64 || header->cputype!=CPU_TYPE_ARM64 ||
        header->filetype!=MH_EXECUTE || header->ncmds>1024 || header->sizeofcmds>65536)return NO;
-    const uint8_t expectedUUID[]={0x48,0xc7,0x7a,0x33,0x63,0xbc,0x3e,0x8f,0x8f,0xc7,0x5e,0xd6,0x13,0x29,0x24,0xc4};
+    const uint8_t expectedUUID[]={0x21,0x2e,0x31,0x08,0x9a,0x0c,0x33,0x09,0xbe,0xdc,0x7e,0x99,0x6e,0x81,0x99,0xd1};
     BOOL uuid=NO,range=NO;
     const uint8_t *cursor=(const uint8_t *)(header+1),*end=cursor+header->sizeofcmds;
     for(uint32_t i=0;i<header->ncmds;i++){
@@ -136,15 +136,15 @@ static BOOL FMVerifyHost(void) {
     }
     if(!uuid||!range)return NO;
     const uint8_t *base=(const uint8_t *)header;
-    if(!FMDigest(base+0x58240,0x928,"b7e8c08d8ed6b7bc3ce45b00318756a7c3691a19d8389f7cb98c3712c835263d")||
-       !FMDigest(base+0x5aae4,0x28,"36f8fd0f2f5c16d8851a328afd48364ea03a30dbccd5ad99bdc17872ce90f32f")||
-       !FMDigest(base+0x509b40,0x200,"41a161f44edd18ff4881e8834fdab82e0c0546091d51c74dea212c60219fc3ec"))return NO;
-    const uint32_t sites[]={0x58b68,0x5aae0},targets[]={0x509b40,0x509bc0};
+    if(!FMDigest(base+0x581f8,0x928,"f18af736fca1e2c5d742bd4a3e6a4ad4a58fe2f6d4b010b114fae992e4de7f01")||
+       !FMDigest(base+0x5aa9c,0x28,"36f8fd0f2f5c16d8851a328afd48364ea03a30dbccd5ad99bdc17872ce90f32f")||
+       !FMDigest(base+0x509b40,0x200,"0af3ef088561c992df64de91fcce007305ef8fe76fdd5a54061652825953d9ea"))return NO;
+    const uint32_t sites[]={0x58b20,0x5aa98},targets[]={0x509b40,0x509bc0};
     for(NSUInteger i=0;i<2;i++){
         uint32_t value;memcpy(&value,base+sites[i],4);
         if(value!=(0x14000000u|(((targets[i]-sites[i])/4)&0x03ffffffu)))return NO;
     }
-    FMSetup=(FMNativeSetup)(base+0x58240); FMFailure=(FMNativeFailure)(base+0x5aae0);
+    FMSetup=(FMNativeSetup)(base+0x581f8); FMFailure=(FMNativeFailure)(base+0x5aa98);
     return YES;
 }
 static void FMInstallHooks(void) {

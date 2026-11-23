@@ -24,11 +24,11 @@ static NSString *QSString(NSData *data, NSUInteger offset) {
     return [value rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location == NSNotFound ? value : nil;
 }
 NSDictionary *FMXQishuiConfigurationFromExecutable(NSData *data) {
-    if (data.length < 0x559100 || data.length > 16*1024*1024) return nil;
+    if (data.length < 0x5591b0 || data.length > 16*1024*1024) return nil;
     struct mach_header_64 header; memcpy(&header, data.bytes, sizeof(header));
     if (header.magic != MH_MAGIC_64 || header.cputype != CPU_TYPE_ARM64 || header.filetype != MH_EXECUTE ||
         header.ncmds > 1024 || header.sizeofcmds > data.length-sizeof(header)) return nil;
-    static const uint8_t uuid[16] = {0x48,0xc7,0x7a,0x33,0x63,0xbc,0x3e,0x8f,0x8f,0xc7,0x5e,0xd6,0x13,0x29,0x24,0xc4};
+    static const uint8_t uuid[16] = {0x21,0x2e,0x31,0x08,0x9a,0x0c,0x33,0x09,0xbe,0xdc,0x7e,0x99,0x6e,0x81,0x99,0xd1};
     NSUInteger offset = sizeof(header), end = offset+header.sizeofcmds; BOOL match = NO;
     for (uint32_t i=0; i<header.ncmds; i++) {
         struct load_command command;
@@ -42,13 +42,13 @@ NSDictionary *FMXQishuiConfigurationFromExecutable(NSData *data) {
     if (!match) return nil;
     NSArray *keys = FMXQishuiConfigurationKeys(); NSMutableDictionary *query = NSMutableDictionary.dictionary;
     for (NSUInteger i=0; i<keys.count; i++) {
-        NSUInteger pair = 0x558e18+i*32;
+        NSUInteger pair = 0x558f70+i*32;
         NSString *key = QSString(data,pair), *value = QSString(data,pair+16);
         if (![key isEqualToString:keys[i]] || !value.length) return nil;
         query[key] = value;
     }
-    if (![QSString(data,0x558dc0) isEqualToString:@"trigger_type"]) return nil;
-    NSString *trigger = QSString(data,0x558dd0); if (!trigger.length) return nil;
+    if (![QSString(data,0x558f18) isEqualToString:@"trigger_type"]) return nil;
+    NSString *trigger = QSString(data,0x558f28); if (!trigger.length) return nil;
     return @{@"query":query,@"trigger_type":trigger};
 }
 static NSDictionary *QSDictionary(id value) { return [value isKindOfClass:NSDictionary.class] ? value : @{}; }

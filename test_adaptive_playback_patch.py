@@ -29,7 +29,7 @@ class Machine:
         self.vm=Uc(UC_ARCH_ARM64,UC_MODE_ARM); self.vm.mem_map(p.BASE,0x600000)
         self.vm.mem_map(0x200000,0x100000); self.stack=0x2d0000; self.frame=0x2e0000
         self.vm.mem_write(p.BASE+p.CAVE,p.payload())
-        self.vm.mem_write(p.BASE+0x54d6a0,struct.pack('<Q',0x100))
+        self.vm.mem_write(p.BASE+0x54d748,struct.pack('<Q',0x100))
         self.vm.reg_write(R.UC_ARM64_REG_SP,self.stack); self.vm.reg_write(R.UC_ARM64_REG_FP,self.frame)
         for n in range(19,29):self.set(n,0x210000+n*0x1000)
         self.vm.mem_write(self.get(19)+0x100,struct.pack('<Q',0x260000))
@@ -77,7 +77,7 @@ class AdaptivePatchTests(unittest.TestCase):
             self.assertEqual(m.vm.reg_read(R.UC_ARM64_REG_LR),p.BASE+0x1234)
             self.assertEqual(m.calls,[(b'FMAdaptiveNativeDidSetup',m.callee[0],0x260000)] if exports else [])
     def test_both_real_media_failure_callers_owned_and_unowned(self):
-        for caller in (0x5a1b8,0x5aa7c):
+        for caller in (0x5a170,0x5aa34):
             for exports,handled in ((True,True),(True,False),(False,False)):
                 m=Machine(handled,exports);m.set(0,1);m.set(1,0);m.set(2,4)
                 m.run(0x509bc0,[caller,p.FAILURE_SITE+4],caller);m.check_callee()
@@ -87,8 +87,8 @@ class AdaptivePatchTests(unittest.TestCase):
                 if exports:self.assertEqual(m.calls[0],(b'FMAdaptiveNativeHandleFailure',m.callee[1],0x260100))
                 else:self.assertEqual(m.calls,[])
     def test_other_failure_arguments_and_callers_never_call_extension(self):
-        for args,caller in [((0,0,4),0x5a1b8),((1,0x1234,4),0x5aa7c),
-                            ((1,0,3),0x5a1b8),((1,0,4),0x77ec8),((2,0,4),0x5a1b8)]:
+        for args,caller in [((0,0,4),0x5a170),((1,0x1234,4),0x5aa34),
+                            ((1,0,3),0x5a170),((1,0,4),0x77ec8),((2,0,4),0x5a170)]:
             m=Machine();[m.set(n,v) for n,v in enumerate(args)]
             m.run(0x509bc0,[p.FAILURE_SITE+4],caller);m.check_callee()
             self.assertEqual(m.calls,[]);self.assertEqual([m.get(n) for n in (0,1,2)],list(args))

@@ -9,14 +9,14 @@ from interaction_patch import (ORIGINAL_BINARY_SHA256, ORIGINAL_BINARY_SIZE, BAS
 
 CAVE = 0x509D40
 END = 0x509E40
-SITE = 0x7ACDC
+SITE = 0x7acf4
 CONTINUATION = SITE + 4
-ORIGINAL_MOVE = 0x40C740
-DYLSYM = 0x40805C
+ORIGINAL_MOVE = 0x40c900
+DYLSYM = 0x40821c
 EXPORT_NAME = 0x509DF0
 MARKER = 0x509E10
 CONTEXTS = {
-    0x7AA50: (0x4D4, "efe92622b926885d8d5eb32585c284e1f99811baf6dcf0a28a80756fd0a2074e"),
+    0x7aa68: (0x4d4, "54f9c5a79511fa83e60d5bbffb15cf792aabba91d3667d45efffd4a8717ecd2c"),
 }
 ASSEMBLY = {CAVE: """
 stp x29, x30, [sp, #-64]!
@@ -26,7 +26,7 @@ str x4, [sp, #48]
 mov x0, #-2
 adrp x1, 0x509000
 add x1, x1, #0xdf0
-bl 0x40805c
+bl 0x40821c
 cbz x0, native
 mov x16, x0
 ldr x0, [sp, #16]
@@ -38,12 +38,14 @@ native:
 ldp x0, x1, [sp, #16]
 ldp x2, x3, [sp, #32]
 ldr x4, [sp, #48]
-bl 0x40c740
+bl 0x40c900
 done:
 ldp x29, x30, [sp], #64
-b 0x7ace0
+b 0x7acf8
 """}
-ENCODED = {5283136: 'fd7bbca9e00701a9e20f02a9e41b00f9200080920100009021c03791c0f8fb97e00000b4f00300aae00b40f9e10b42a9e31b40f900023fd605000014e00741a9e20f42a9e41b40f96e0afc97fd7bc4a8d4c3ed17'}
+ENCODED = {
+    0x509d40: 'fd7bbca9e00701a9e20f02a9e41b00f9200080920100009021c0379130f9fb97e00000b4f00300aae00b40f9e10b42a9e31b40f900023fd605000014e00741a9e20f42a9e41b40f9de0afc97fd7bc4a8dac3ed17',
+}
 
 def payload():
     data = bytearray(END-CAVE)

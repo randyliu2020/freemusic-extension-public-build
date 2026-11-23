@@ -333,7 +333,7 @@ static void FMXPlaybackStatus(LXSourceRuntime *runtime, NSString *identifier, NS
 }
 __attribute__((constructor)) static void FMXInitialize(void) {
     @autoreleasepool {
-        if (![[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] isEqual:@"4.2.7"] || ![NSBundle.mainBundle.executablePath.lastPathComponent isEqual:@"FreeMusic"]) return;
+        if (![[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] isEqual:@"4.2.9"] || ![[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] isEqual:@"4381"] || ![NSBundle.mainBundle.executablePath.lastPathComponent isEqual:@"FreeMusic"]) return;
         NSError *settingsError=nil;
         BOOL settingsReady=FMSettingsPrepareStandard(&settingsError);
         FMPlaybackCacheInstall();

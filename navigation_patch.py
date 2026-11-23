@@ -1,4 +1,4 @@
-"""Three local, version-locked FreeMusic 4.2.7 navigation changes.
+"""Three local, version-locked FreeMusic 4.2.9 navigation changes.
 
 Apply after load-command/signature rewriting, using the separately verified
 original executable as provenance. No Swift functions are called from foreign
@@ -12,15 +12,15 @@ import json
 from pathlib import Path
 import struct
 
-ORIGINAL_SHA256 = "03f19d8402580a93ffd772e05512de4a8af533ef9ead51f3c12d334202b17887"
-ORIGINAL_SIZE = 6288608
-UUID = bytes.fromhex("48c77a3363bc3e8f8fc75ed6132924c4")
+ORIGINAL_SHA256 = "59bb22eb6fb7a62bf574e8b42c9a16f1b3774368bda484a41ce9bea4b8af992f"
+ORIGINAL_SIZE = 6160080
+UUID = bytes.fromhex("212e31089a0c3309bedc7e996e8199d1")
 STUB_OFFSET = 0x3F00
 STUB_END = 0x3F0C
 CONTEXTS = {
-    0x22038: bytes.fromhex("e00315aaf0fbff97160840f9039b0f94d60000b4e8031baae00315aa0e0100941900805202000014"),
-    0x22098: bytes.fromhex("e00315aaf3fbff97190840f9eb9a0f94b90000b4e8031caae00315aa2101009416008052402900d0"),
-    0x194300: bytes.fromhex("36d20994f30300aa081e00b0081947f9ff3f0039211c009021602e910800088be03f0091bcc10994"),
+    0x22038: bytes.fromhex("e00315aaf0fbff97160840f9739b0f94d60000b4e8031baae00315aa0e0100941900805202000014"),
+    0x22098: bytes.fromhex("e00315aaf3fbff97190840f95b9b0f94b90000b4e8031caae00315aa2101009416008052402900d0"),
+    0x1941ec: bytes.fromhex("ebd20994f30300aa081e00b0086947f9ff3f0039211c009021202e910800088be03f009171c20994"),
 }
 
 class NavigationPatchError(ValueError):
@@ -35,8 +35,8 @@ def branch(source: int, target: int) -> bytes:
 PATCHES = {
     0x22048: (bytes.fromhex("d60000b4"), branch(0x22048, 0x22060), "profile_recent_optional_nil"),
     0x220A8: (bytes.fromhex("b90000b4"), branch(0x220A8, 0x220BC), "profile_cover_grid_optional_nil"),
-    0x194310: (bytes.fromhex("ff3f0039"), branch(0x194310, STUB_OFFSET), "initial_tab_library"),
-    STUB_OFFSET: (bytes(12), bytes.fromhex("49008052e93f0039") + branch(STUB_OFFSET+8, 0x194314), "initial_tab_inline_trampoline"),
+    0x1941fc: (bytes.fromhex("ff3f0039"), branch(0x1941fc, STUB_OFFSET), "initial_tab_library"),
+    STUB_OFFSET: (bytes(12), bytes.fromhex("49008052e93f0039") + branch(STUB_OFFSET+8, 0x194200), "initial_tab_inline_trampoline"),
 }
 
 def verify_macho(data: bytes) -> None:

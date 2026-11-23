@@ -41,7 +41,7 @@ static NSString *FMValidString(id value, NSUInteger limit) {
 static BOOL FMVerifyMainImage(void) {
     const struct mach_header_64 *header = (const struct mach_header_64 *)_dyld_get_image_header(0);
     if (!header || header->magic != MH_MAGIC_64 || header->cputype != CPU_TYPE_ARM64 || header->sizeofcmds > 65536 || header->ncmds > 1024) return NO;
-    const unsigned char expected[16] = {0x48,0xc7,0x7a,0x33,0x63,0xbc,0x3e,0x8f,0x8f,0xc7,0x5e,0xd6,0x13,0x29,0x24,0xc4};
+    const unsigned char expected[16] = {0x21,0x2e,0x31,0x08,0x9a,0x0c,0x33,0x09,0xbe,0xdc,0x7e,0x99,0x6e,0x81,0x99,0xd1};
     const uint8_t *cursor = (const uint8_t *)(header + 1), *end = cursor + header->sizeofcmds;
     BOOL uuid = NO;
     for (uint32_t index = 0; index < header->ncmds; index++) {
@@ -55,10 +55,10 @@ static BOOL FMVerifyMainImage(void) {
     // UUID plus the exact inspected public-selector call instructions. The parent
     // packager separately verifies the original binary hash before patching.
     const uint8_t *base = (const uint8_t *)header;
-    const uint8_t addCall[4] = {0xa2,0x9f,0x0e,0x94};
-    const uint8_t activityOne[4] = {0x5a,0x97,0x0e,0x94};
-    const uint8_t activityTwo[4] = {0xf4,0x96,0x0e,0x94};
-    if (memcmp(base + 0x618d8, addCall, 4) || memcmp(base + 0x64018, activityOne, 4) || memcmp(base + 0x641b0, activityTwo, 4)) return NO;
+    const uint8_t addCall[4] = {0x1e,0xa0,0x0e,0x94};
+    const uint8_t activityOne[4] = {0xe1,0x97,0x0e,0x94};
+    const uint8_t activityTwo[4] = {0x7b,0x97,0x0e,0x94};
+    if (memcmp(base + 0x618a8, addCall, 4) || memcmp(base + 0x63fbc, activityOne, 4) || memcmp(base + 0x64154, activityTwo, 4)) return NO;
     FMMainAddress = (uintptr_t)header; return YES;
 }
 static uintptr_t FMReturnAddress(void *address) {
@@ -68,7 +68,7 @@ static uintptr_t FMReturnAddress(void *address) {
     return (uintptr_t)__builtin_extract_return_addr(address);
 }
 static BOOL FMMatchesObserver(AVPlayer *player, void *caller) {
-    if (FMMainMatched && FMReturnAddress(caller) == FMMainAddress + 0x618dc) return YES;
+    if (FMMainMatched && FMReturnAddress(caller) == FMMainAddress + 0x618ac) return YES;
 #if defined(FMX_LISTENING_CAPTURE_TESTING) && FMX_LISTENING_CAPTURE_TESTING
     @synchronized(FMCaptureLock) { return player && player == FMTestPlayer; }
 #else
@@ -77,7 +77,7 @@ static BOOL FMMatchesObserver(AVPlayer *player, void *caller) {
 }
 static BOOL FMMatchesActivity(void *caller) {
     uintptr_t address = FMReturnAddress(caller);
-    if (FMMainMatched && (address == FMMainAddress + 0x6401c || address == FMMainAddress + 0x641b4)) return YES;
+    if (FMMainMatched && (address == FMMainAddress + 0x63fc0 || address == FMMainAddress + 0x64158)) return YES;
 #if defined(FMX_LISTENING_CAPTURE_TESTING) && FMX_LISTENING_CAPTURE_TESTING
     @synchronized(FMCaptureLock) { return FMTestActivityAllowed; }
 #else

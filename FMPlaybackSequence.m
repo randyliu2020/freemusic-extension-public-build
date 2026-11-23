@@ -46,7 +46,7 @@ static BOOL FMSequenceHash(const uint8_t *bytes,size_t length,const char *expect
 static BOOL FMSequenceVerify(void) {
     const struct mach_header_64 *header=(const struct mach_header_64 *)_dyld_get_image_header(0);
     if(!header||header->magic!=MH_MAGIC_64||header->cputype!=CPU_TYPE_ARM64||header->filetype!=MH_EXECUTE||header->ncmds>1024||header->sizeofcmds>65536)return NO;
-    const uint8_t UUID[]={0x48,0xc7,0x7a,0x33,0x63,0xbc,0x3e,0x8f,0x8f,0xc7,0x5e,0xd6,0x13,0x29,0x24,0xc4};
+    const uint8_t UUID[]={0x21,0x2e,0x31,0x08,0x9a,0x0c,0x33,0x09,0xbe,0xdc,0x7e,0x99,0x6e,0x81,0x99,0xd1};
     const uint8_t *cursor=(const uint8_t *)(header+1),*end=cursor+header->sizeofcmds;
     BOOL uuid=NO,text=NO,data=NO;
     for(uint32_t i=0;i<header->ncmds;i++) {
@@ -57,17 +57,17 @@ static BOOL FMSequenceVerify(void) {
         if(command->cmd==LC_SEGMENT_64&&command->cmdsize>=sizeof(struct segment_command_64)) {
             const struct segment_command_64 *segment=(const struct segment_command_64 *)command;
             if(!strncmp(segment->segname,"__TEXT",16)&&segment->vmaddr==0x100000000ull&&segment->fileoff==0&&segment->filesize>=0x509f40&&(segment->initprot&5)==5)text=YES;
-            if(segment->vmaddr<=0x10054d6a0ull&&segment->vmaddr+segment->vmsize>=0x10054d6a8ull&&(segment->initprot&1))data=YES;
+            if(segment->vmaddr<=0x10054d748ull&&segment->vmaddr+segment->vmsize>=0x10054d750ull&&(segment->initprot&1))data=YES;
         }
         cursor+=command->cmdsize;
     }
     if(!uuid||!text||!data)return NO;
-    const uint8_t *base=(const uint8_t *)header;uint32_t word=0;memcpy(&word,base+0x4fd90,4);
-    if(word!=(0x14000000u|(((0x509e40-0x4fd90)/4)&0x03ffffffu))||
-        !FMSequenceHash(base+0x4fd94,0x30,"e007ea652ca53dbeb857541edacfde43e2c7515b91e0495637c4661f971e537c")||
-        !FMSequenceHash(base+0x509e40,0x100,"d57f2fb11fae059ee9b307d74f5d6766d0311c13131f7faae4e435c1de865e48")||
-        !FMSequenceHash(base+0x56e20,0x40,"3d3f51e57df212858264df4d245944775bfbe41ac84a1f9d89927ee2b1f667a2"))return NO;
-    FMSequenceBase=base;FMSequenceReconcile=(FMNativeReconcile)(base+0x56e20);return YES;
+    const uint8_t *base=(const uint8_t *)header;uint32_t word=0;memcpy(&word,base+0x4fec8,4);
+    if(word!=(0x14000000u|(((0x509e40-0x4fec8)/4)&0x03ffffffu))||
+        !FMSequenceHash(base+0x4fecc,0x30,"ce96b7b35fb5fb0bc32900557f1fa71c33f474d6c6cf93d50acf12333a3649ed")||
+        !FMSequenceHash(base+0x509e40,0x100,"803d479955a09b2043fd698803fb832cb90a52ef108470bc9cee6bc244f12e74")||
+        !FMSequenceHash(base+0x56e18,0x40,"0f194e8b2a8848a100504b54fa62d28c7a832752a5ea6e8c54ad03c0d37b3d99"))return NO;
+    FMSequenceBase=base;FMSequenceReconcile=(FMNativeReconcile)(base+0x56e18);return YES;
 }
 void FMPlaybackSequenceInstall(void) {
     FMSequenceState();static dispatch_once_t once;dispatch_once(&once,^{FMSequenceAllowed=FMSequenceVerify();});
@@ -79,7 +79,7 @@ static BOOL FMSequenceCurrent(FMSequenceWatch *watch) {
     if(FMSequenceFixture)return YES;
     Class type=NSClassFromString(@"_TtC9FreeMusic18AudioPlayerManager");
     if(!type||![watch.owner isKindOfClass:type])return NO;
-    ptrdiff_t offset=0;memcpy(&offset,FMSequenceBase+0x54d6a0,sizeof(offset));
+    ptrdiff_t offset=0;memcpy(&offset,FMSequenceBase+0x54d748,sizeof(offset));
     size_t size=class_getInstanceSize(object_getClass(watch.owner));
     if(offset<16||(offset&7)||size<sizeof(void *)||(size_t)offset>size-sizeof(void *))return NO;
     void *nativePlayer=NULL;memcpy(&nativePlayer,(const uint8_t *)(__bridge void *)watch.owner+offset,sizeof(nativePlayer));

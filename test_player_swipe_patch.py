@@ -49,7 +49,7 @@ def execute(dx, dy, patched):
             machine.reg_write(r.UC_ARM64_REG_D0, bits(dx))
             machine.reg_write(r.UC_ARM64_REG_D1, bits(dy))
             machine.reg_write(r.UC_ARM64_REG_PC, machine.reg_read(r.UC_ARM64_REG_LR))
-        elif address in (p.BASE + p.NATIVE_DISMISS, p.BASE + 0x1ABCF4):
+        elif address in (p.BASE + p.NATIVE_DISMISS, p.BASE + 0x1abb9c):
             result.append(address == p.BASE + p.NATIVE_DISMISS)
             machine.emu_stop()
     vm.hook_add(UC_HOOK_CODE, hook)
@@ -98,7 +98,7 @@ class PlayerSwipe(unittest.TestCase):
         with self.assertRaises(p.InteractionPatchError): p.apply_verified_plan(value,[a])
 
     def test_local_original_exact_fingerprint_and_only_two_ranges(self):
-        original=ROOT.parent/'freemusic_analysis'/'main.bin'
+        original=ROOT.parent/'private'/'429.bin'
         if not original.exists(): self.skipTest('Original remains local; never upload to CI')
         data=original.read_bytes(); output,report=p.patch_binary(data)
         self.assertEqual(len(output),len(data))
