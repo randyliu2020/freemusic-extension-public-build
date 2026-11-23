@@ -17,32 +17,66 @@ UIViewController *(^navVisible)(UIViewController *,BOOL(^)(UIViewController *))=
 BOOL (^sameObjects)(NSArray *,NSArray *)=^BOOL(NSArray *a,NSArray *b) {
     if(a.count!=b.count)return NO;for(NSUInteger i=0;i<a.count;i++)if(a[i]!=b[i])return NO;return YES;
 };
-[self test:@"native_tabs_hide_discovery_and_open_favorites_once" body:^NSDictionary *{
-    void *(*factory)(void)=(void*(*)(void))dlsym(self.swiftUIFixtureHandle,"FMNavMakeAXEmptyFixture");
+[self test:@"native_tabs_hide_discovery_and_leave_library_root" body:^NSDictionary *{
+    void *(*factory)(void)=(void*(*)(void))dlsym(self.swiftUIFixtureHandle,"FMNavMakeFixture");
+    void (*openFavorites)(void)=(void(*)(void))dlsym(self.swiftUIFixtureHandle,"FMNavOpenFavorites");
+    void (*selectProfile)(void)=(void(*)(void))dlsym(self.swiftUIFixtureHandle,"FMNavSelectProfile");
+    void (*refresh)(void)=(void(*)(void))dlsym(self.extensionHandle,"FMNavigationRefresh");
     NSDictionary *(*diagnostics)(void)=(NSDictionary*(*)(void))dlsym(self.extensionHandle,"FMNavigationDiagnostics");
-    Check(factory&&diagnostics,@"Navigation production and real SwiftUI fixture exports");
-    __block UIViewController *oldRoot,*host;__block UITabBarController *tabs;__block NSDictionary *state;
+    Check(factory&&openFavorites&&selectProfile&&refresh&&diagnostics,@"Navigation and fixture exports");
+    NSUserDefaults *defaults=NSUserDefaults.standardUserDefaults;
+    NSInteger likesBefore=[defaults integerForKey:@"smoke.fmnav.likes-appearance-count"];
+    NSInteger likesRowBefore=[defaults integerForKey:@"smoke.fmnav.likes-row-count"];
+    NSInteger otherRowBefore=[defaults integerForKey:@"smoke.fmnav.other-row-count"];
+    __block UIViewController *oldRoot,*host,*library,*favorites,*profile;
+    __block UITabBarController *tabs;
+    __block NSDictionary *state;
+    UIViewController *(^visibleTitle)(NSString *)=^UIViewController *(NSString *title){
+        return navVisible(host,^BOOL(UIViewController *c){return [c.navigationItem.title isEqual:title]&&c.navigationController.topViewController==c;});
+    };
+    void (^sceneRefresh)(void)=^{
+        [NSNotificationCenter.defaultCenter postNotificationName:UISceneDidActivateNotification object:self.window.windowScene];
+        refresh();
+    };
     @try {
         Main(^{oldRoot=self.window.rootViewController;host=CFBridgingRelease(factory());self.window.rootViewController=host;[self.window makeKeyAndVisible];});
-        Check(Until(^BOOL{tabs=(id)navVisible(host,^BOOL(UIViewController *c){return [c isKindOfClass:UITabBarController.class];});return tabs!=nil&&tabs.tabs.count==5;},6),@"Original-shaped five-tab SwiftUI model appears");
-        Check(Until(^BOOL{UITab *discovery=tabs.tabs[1];return discovery.isHidden&&discovery.preferredPlacement==UITabPlacementSidebarOnly&&![tabs.compactTabIdentifiers containsObject:discovery.identifier];},5),@"Discovery hidden in compact, regular and sidebar placements");
-        BOOL opened=Until(^BOOL{state=diagnostics();return [state[@"startupState"] isEqual:@"opened"];},32);
-        Main(^{state=diagnostics();});
+        Check(Until(^BOOL{
+            tabs=(id)navVisible(host,^BOOL(UIViewController *c){return [c isKindOfClass:UITabBarController.class];});
+            library=visibleTitle(@"资料库");
+            return library&&tabs.tabs.count==5&&tabs.selectedTab==tabs.tabs[2]&&
+                [defaults integerForKey:@"smoke.fmnav.likes-row-count"]>likesRowBefore&&[defaults integerForKey:@"smoke.fmnav.other-row-count"]>otherRowBefore;
+        },6),@"Cold-start Library shows Favorites and another playlist on its root");
+        Check(Until(^BOOL{
+            UITab *discover=tabs.tabs[1];
+            return discover.isHidden&&discover.preferredPlacement==UITabPlacementSidebarOnly&&![tabs.compactTabIdentifiers containsObject:discover.identifier];
+        },5),@"Discovery hidden while Library stays selected");
+        Main(^{
+            sceneRefresh();
+            Check(visibleTitle(@"资料库")==library&&[defaults integerForKey:@"smoke.fmnav.likes-appearance-count"]==likesBefore,@"Refresh leaves the native Library root and both playlists reachable");
+            state=diagnostics();
+        });
         [[NSJSONSerialization dataWithJSONObject:state options:NSJSONWritingPrettyPrinted error:nil] writeToURL:[self.output URLByAppendingPathComponent:@"navigation-startup.json"] atomically:YES];
-        [self captureSurfaceDiagnostics:@"navigation-favorites-state"];
-        [self screenshot:@"navigation-favorites.png"];
-        if(!opened) {
-            void (*probe)(void)=(void(*)(void))dlsym(self.swiftUIFixtureHandle,"FMNavStartFixtureOCRProbe");
-            void *(*copyProbe)(void)=(void*(*)(void))dlsym(self.swiftUIFixtureHandle,"FMNavCopyFixtureOCRProbe");
-            if(probe&&copyProbe) {
-                __block NSDictionary *report;Main(^{probe();});
-                Until(^BOOL{void *value=copyProbe();if(value)report=CFBridgingRelease(value);return report!=nil;},8);
-                if(report)[[NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingPrettyPrinted error:nil] writeToURL:[self.output URLByAppendingPathComponent:@"navigation-fixture-ocr.json"] atomically:YES];
-            }
-        }
-        Check(opened&&[NSUserDefaults.standardUserDefaults integerForKey:@"smoke.fmnav.likes-appearance-count"]==1,@"Original Favorites NavigationLink opens exactly once and destination appears");
-        Check([state[@"axCandidateCount"] unsignedIntegerValue]==0&&[state[@"activationPath"] hasPrefix:@"selection_flow_"]&&[state[@"selectionCallbackDelivered"] boolValue],@"AX-empty visible Favorites row navigates through its original public cell selection delegate");
-        return @{@"native_tab_model_count":@5,@"discovery_hidden":@YES,@"favorites_opened":@YES,@"ax_empty_public_selection_flow":@YES,@"original_app_used":@NO,@"diagnostics":state};
+        [self captureSurfaceDiagnostics:@"navigation-library-root-state"];
+        [self screenshot:@"navigation-library-root.png"];
+        Main(^{openFavorites();});
+        Check(Until(^BOOL{
+            favorites=visibleTitle(@"我喜欢");
+            return favorites&&[defaults integerForKey:@"smoke.fmnav.likes-appearance-count"]>likesBefore;
+        },5),@"Selecting Favorites navigates using the fixture's native navigation path");
+        Main(^{
+            sceneRefresh();
+            Check(visibleTitle(@"我喜欢")==favorites,@"Foreground refresh preserves an explicitly selected playlist");
+            selectProfile();
+        });
+        Check(Until(^BOOL{profile=visibleTitle(@"我的");return profile&&tabs.selectedTab==tabs.tabs[3];},5),@"Selecting another tab reaches its own root");
+        Main(^{
+            sceneRefresh();
+            Check(tabs.selectedTab==tabs.tabs[3]&&visibleTitle(@"我的")==profile,@"Foreground refresh preserves the user's current tab");
+        });
+        return @{@"native_tab_model_count":@5,@"discovery_hidden":@YES,@"library_root_visible":@YES,
+                 @"favorites_opened_by_user":@YES,@"manual_destination_preserved_on_refresh":@YES,
+                 @"tab_selection_preserved_on_foreground":@YES,@"native_path_component_test":@YES,
+                 @"physical_tap_validated":@NO,@"original_app_used":@NO,@"diagnostics":state};
     } @finally {Main(^{if(host.presentedViewController)[host dismissViewControllerAnimated:NO completion:nil];self.window.rootViewController=oldRoot;[self.window makeKeyAndVisible];});}
 }];
 [self test:@"profile_keeps_original_gear_and_insights_stays_in_settings" body:^NSDictionary *{

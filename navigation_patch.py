@@ -90,7 +90,7 @@ def patch_binary(current: bytes, original: bytes) -> tuple[bytes, dict]:
         "uuid":UUID.hex(), "file_size_unchanged":True,
         "initial_tab":"library", "profile_sections":"native optional nil branches",
         "reserved_header_range":[STUB_OFFSET,STUB_END], "changes":changes,
-        "favorites_navigation":"handled by bounded public accessibility activation, verified separately",
+        "startup_destination":"library_root", "favorites_navigation":"manual",
         "discover_visibility":"handled by public UITab placement filters, model order retained",
     }
 

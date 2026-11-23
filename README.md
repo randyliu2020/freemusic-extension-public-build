@@ -81,8 +81,9 @@ the cloud receives only extension and anonymous test source.
   becomes a double tap; the full lyric view's close gesture remains unchanged.
 - The Discover tab is hidden without changing native tab identities. The two
   optional profile cover collections are removed through their existing empty
-  branches. Startup selects Library and attempts its unique Favorites link once,
-  confirming the resulting navigation before reporting success.
+  branches. A cold launch opens the Library root, where all playlists are
+  visible. Favorites opens when the user selects it. Returning from the
+  background preserves the current page.
 - Search results use native on-drag keyboard dismissal. Existing interactive
   policies, horizontal lists and unrelated modal text entry are preserved.
 - Monthly/yearly listening insights use measured AVPlayer progress, bound to the

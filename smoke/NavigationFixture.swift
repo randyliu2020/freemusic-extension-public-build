@@ -1,7 +1,6 @@
 // Independent original-shaped SwiftUI surface. No original IPA code or private data.
 import SwiftUI
 import UIKit
-import Vision
 
 private func fmNavCount(_ key: String) {
     let defaults = UserDefaults.standard
@@ -9,24 +8,26 @@ private func fmNavCount(_ key: String) {
 }
 
 private struct FMNavLibrary: View {
-    let hideAccessibility: Bool
+    @State private var path: [String] = []
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             List {
-                NavigationLink("我喜欢") {
-                    List { Text("Independent fixture song") }
-                        .navigationTitle("我喜欢")
-                        .onAppear { fmNavCount("smoke.fmnav.likes-appearance-count") }
-                }
-                .accessibilityIdentifier("smoke.fmnav.likes-link")
-                .accessibilityHidden(hideAccessibility)
-                NavigationLink("其他歌单") {
-                    Text("Other playlist").navigationTitle("其他歌单")
-                }
+                NavigationLink("我喜欢", value: "我喜欢")
+                    .accessibilityIdentifier("smoke.fmnav.likes-link")
+                    .onAppear { fmNavCount("smoke.fmnav.likes-row-count") }
+                NavigationLink("其他歌单", value: "其他歌单")
+                    .onAppear { fmNavCount("smoke.fmnav.other-row-count") }
             }
             .navigationTitle("资料库")
-            .onAppear { fmNavCount("smoke.fmnav.library-appearance-count") }
+            .navigationDestination(for: String.self) { title in
+                List { Text("Independent fixture song") }
+                    .navigationTitle(title)
+                    .onAppear {
+                        if title == "我喜欢" { fmNavCount("smoke.fmnav.likes-appearance-count") }
+                    }
+            }
         }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("smoke.fmnav.open-favorites-command"))) { _ in path.append("我喜欢") }
     }
 }
 
@@ -73,12 +74,11 @@ private struct FMNavProfile: View {
 private struct FMNavRoot: View {
     @State private var selection = 2
     let matched: Bool
-    var hideAccessibility = false
     var body: some View {
         TabView(selection: $selection) {
             Tab("首页", systemImage: "house", value: 0) { Text("Home fixture") }
             Tab(matched ? "发现" : "Unrelated tab", systemImage: "square.grid.2x2", value: 1) { Text("Discover fixture") }
-            Tab("资料库", systemImage: "music.note.list", value: 2) { FMNavLibrary(hideAccessibility: hideAccessibility) }
+            Tab("资料库", systemImage: "music.note.list", value: 2) { FMNavLibrary() }
             Tab("我的", systemImage: "person.crop.circle", value: 3) { FMNavProfile() }
             Tab("搜索", systemImage: "magnifyingglass", value: 4, role: .search) { Text("Search fixture") }
         }
@@ -92,17 +92,6 @@ private struct FMNavRoot: View {
 public func fmNavMakeFixture() -> UnsafeMutableRawPointer {
     let controller: UIViewController
     if #available(iOS 18.0, *) { controller = UIHostingController(rootView: FMNavRoot(matched: true)) }
-    else { controller = UIViewController() }
-    return Unmanaged.passRetained(controller).toOpaque()
-}
-
-// The same visible native List/NavigationLink with its AX link deliberately
-// absent. Navigation must still use the original cell's public primary action.
-@_cdecl("FMNavMakeAXEmptyFixture")
-@MainActor
-public func fmNavMakeAXEmptyFixture() -> UnsafeMutableRawPointer {
-    let controller: UIViewController
-    if #available(iOS 18.0, *) { controller = UIHostingController(rootView: FMNavRoot(matched: true, hideAccessibility: true)) }
     else { controller = UIViewController() }
     return Unmanaged.passRetained(controller).toOpaque()
 }
@@ -138,49 +127,8 @@ public func fmNavCloseOriginalSettings() {
     NotificationCenter.default.post(name: Notification.Name("smoke.fmnav.close-settings-command"), object: nil)
 }
 
-// Failure-only probe for this authored fixture. Production diagnostics never
-// retain OCR strings; here the image contains only the literal fixture UI.
-@MainActor private var fmNavOCRReport: NSDictionary?
-@_cdecl("FMNavStartFixtureOCRProbe")
+@_cdecl("FMNavOpenFavorites")
 @MainActor
-public func fmNavStartFixtureOCRProbe() {
-    fmNavOCRReport = nil
-    guard let window = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).flatMap({ $0.windows }).first(where: { $0.isKeyWindow }), let host = window.rootViewController else { return }
-    var queue = [host]
-    var owner: UIViewController?
-    while !queue.isEmpty && queue.count < 128 {
-        let controller = queue.removeFirst()
-        if controller.navigationItem.title == "资料库", controller.isViewLoaded, controller.view.window != nil { owner = controller; break }
-        queue.append(contentsOf: controller.children)
-    }
-    guard let root = owner?.view else { return }
-    var frames: [(Double, CGImage)] = []
-    for scale in [1.0, 2.0] {
-        let format = UIGraphicsImageRendererFormat(); format.scale = scale; format.opaque = true
-        let image = UIGraphicsImageRenderer(bounds: root.bounds, format: format).image { _ in _ = root.drawHierarchy(in: root.bounds, afterScreenUpdates: false) }
-        if let image = image.cgImage { frames.append((scale, image)) }
-    }
-    let capturedFrames = frames
-    DispatchQueue.global(qos: .userInitiated).async {
-        var reports: [[String: Any]] = []
-        for (scale, image) in capturedFrames {
-            let request = VNRecognizeTextRequest(); request.recognitionLevel = .accurate
-            request.recognitionLanguages = ["zh-Hans", "en-US"]; request.usesLanguageCorrection = false
-            do {
-                try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
-                let lines: [[String: Any]] = (request.results ?? []).map { observation in
-                    ["box": NSCoder.string(for: observation.boundingBox), "candidates": observation.topCandidates(3).map { ["text": $0.string, "confidence": $0.confidence] as [String: Any] }]
-                }
-                reports.append(["scale": scale, "lines": lines])
-            } catch { let failure = error as NSError; reports.append(["scale": scale, "error_domain": failure.domain, "error_code": failure.code]) }
-        }
-        let report = ["self_authored_fixture_only": true, "snapshots": reports] as NSDictionary
-        DispatchQueue.main.async { fmNavOCRReport = report }
-    }
-}
-@_cdecl("FMNavCopyFixtureOCRProbe")
-@MainActor
-public func fmNavCopyFixtureOCRProbe() -> UnsafeMutableRawPointer? {
-    guard let report = fmNavOCRReport else { return nil }
-    return Unmanaged.passRetained(report).toOpaque()
+public func fmNavOpenFavorites() {
+    NotificationCenter.default.post(name: Notification.Name("smoke.fmnav.open-favorites-command"), object: nil)
 }
