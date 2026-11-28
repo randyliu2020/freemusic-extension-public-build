@@ -87,6 +87,16 @@ private struct InteractionSearchFixture: View {
     }
 }
 
+// Read the short fixture Text's own size before any full-width tap target.
+// This measurement is independent of the extension's text layout observer.
+private struct InteractionShortLyricBounds: PreferenceKey {
+    static let defaultValue = CGRect.null
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        let next = nextValue()
+        if !next.isNull { value = next }
+    }
+}
+
 // Matches the native top bar and the simultaneous LyricsScroller drag-ended
 // action, sharing the parent presentation/binding dismissal.
 private struct InteractionPlayerSwipeSurface: View {
@@ -96,14 +106,23 @@ private struct InteractionPlayerSwipeSurface: View {
     @State private var volume = 0.5
     @State private var selectedLine: Int?
     @State private var gestureOwner = NSObject()
+    @State private var shortLyricBounds = CGRect.null
+    @State private var gestureTrace = "No completed gesture"
 
     private func fromLyricGutter(_ value: DragGesture.Value, ended: Bool) -> Bool {
         typealias Policy = @convention(c) (UnsafeRawPointer?, UnsafeRawPointer?, UInt32, UInt32) -> UInt32
         guard let address = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "FMXLyricGutterDismiss") else { return false }
         let policy = unsafeBitCast(address, to: Policy.self)
-        return withUnsafePointer(to: value) {
+        let dismiss = withUnsafePointer(to: value) {
             policy(Unmanaged.passUnretained(gestureOwner).toOpaque(), UnsafeRawPointer($0), ended ? 1 : 0, regularLyrics ? 1 : 0) == 1
         }
+        if ended, let traceAddress = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "FMXCopyLyricGestureTestTrace") {
+            typealias CopyTrace = @convention(c) () -> UnsafeMutableRawPointer?
+            if let retained = unsafeBitCast(traceAddress, to: CopyTrace.self)() {
+                gestureTrace = Unmanaged<NSString>.fromOpaque(retained).takeRetainedValue() as String
+            }
+        }
+        return dismiss
     }
 
     private func closeIfRequested(_ value: DragGesture.Value) {
@@ -136,6 +155,16 @@ private struct InteractionPlayerSwipeSurface: View {
                     .font(.subheadline)
                     .accessibilityIdentifier("smoke.interaction.lyric-translation.1")
             }
+        } else if index == 2 {
+            Text("Lyric 2")
+                .fixedSize(horizontal: true, vertical: true)
+                .background {
+                    GeometryReader { proxy in
+                        Color.clear.preference(key: InteractionShortLyricBounds.self,
+                            value: proxy.frame(in: .named("InteractionLyricsViewport")))
+                    }
+                }
+                .accessibilityIdentifier("smoke.interaction.lyric-text.2")
         } else {
             Text(index.isMultiple(of: 3)
                  ? "A long self-authored scrolling lyric that wraps across two lines \(index)"
@@ -160,9 +189,13 @@ private struct InteractionPlayerSwipeSurface: View {
             .onTapGesture { presentationMode.wrappedValue.dismiss() }
             .gesture(DragGesture(minimumDistance: 20).onEnded(closeIfRequested), including: .all)
             .accessibilityElement(children: .combine)
+            .accessibilityValue(Text(verbatim: gestureTrace))
             .accessibilityIdentifier("smoke.interaction.player-topbar")
 
             Text(selectedLine.map { "Selected lyric \($0)" } ?? "Playback surface")
+                .accessibilityValue(Text(verbatim: shortLyricBounds.isNull ? "" :
+                    [shortLyricBounds.minX, shortLyricBounds.minY, shortLyricBounds.width, shortLyricBounds.height]
+                        .map { String(Double($0)) }.joined(separator: "|")))
                 .accessibilityIdentifier("smoke.interaction.player-visible")
             ScrollView {
                 VStack(spacing: 16) {
@@ -178,6 +211,8 @@ private struct InteractionPlayerSwipeSurface: View {
                 }
             }
             .frame(height: 220)
+            .coordinateSpace(name: "InteractionLyricsViewport")
+            .onPreferenceChange(InteractionShortLyricBounds.self) { shortLyricBounds = $0 }
             .simultaneousGesture(DragGesture(minimumDistance: 8)
                 .onChanged { value in _ = fromLyricGutter(value, ended: false) }
                 .onEnded { value in

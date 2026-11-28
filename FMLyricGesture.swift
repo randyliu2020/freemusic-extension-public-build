@@ -1,6 +1,23 @@
 import SwiftUI
 import UIKit
 
+#if FMX_ADAPTIVE_PLAYBACK_TESTING && targetEnvironment(simulator)
+@MainActor
+private enum LyricGestureTrace {
+    static var layout = "no-layout"
+    static var touch = "no-touch"
+    static var decision = "no-gesture"
+}
+
+@_cdecl("FMXCopyLyricGestureTestTrace")
+@MainActor
+public func copyLyricGestureTestTrace() -> UnsafeMutableRawPointer? {
+    guard Thread.isMainThread else { return nil }
+    let report = "\(LyricGestureTrace.layout); \(LyricGestureTrace.touch); \(LyricGestureTrace.decision)"
+    return Unmanaged.passRetained(report as NSString).toOpaque()
+}
+#endif
+
 // Keep SwiftUI's measured visual lines in their scroll view's content
 // coordinates. Text, audio and identifiers are never read by this observer.
 @MainActor
@@ -31,6 +48,9 @@ private final class LyricViewport {
         for rect in lines where point.y >= rect.minY - 3 && point.y <= rect.maxY + 3 {
             row = row.union(rect)
         }
+        #if FMX_ADAPTIVE_PLAYBACK_TESTING && targetEnvironment(simulator)
+        LyricGestureTrace.touch += " view=\(scroll.bounds.size) point=\(point) row=\(row)"
+        #endif
         guard !row.isNull else { return nil }
         if point.x >= row.minX && point.x <= row.maxX { return false }
         // Allow the native 24/32-point gutter to decide near an uncertain
@@ -91,6 +111,9 @@ private final class LyricGeometryView: UIView, UIGestureRecognizerDelegate {
 
     private func measure() {
         viewports.removeAll()
+        #if FMX_ADAPTIVE_PLAYBACK_TESTING && targetEnvironment(simulator)
+        defer { LyricGestureTrace.layout = "lines=\(rectangles.count) viewports=\(viewports.count) size=\(bounds.size)" }
+        #endif
         measuredBounds = bounds
         guard let window, !rectangles.isEmpty, measuredSize.width > 0,
               abs(measuredSize.width - bounds.width) <= 1,
@@ -110,6 +133,9 @@ private final class LyricGeometryView: UIView, UIGestureRecognizerDelegate {
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         samples.removeAll()
+        #if FMX_ADAPTIVE_PLAYBACK_TESTING && targetEnvironment(simulator)
+        LyricGestureTrace.touch = "touch=\(touch.location(in: self))"
+        #endif
         guard window != nil, bounds.contains(touch.location(in: self)) else { return false }
         // A SwiftUI hosting view can be the UIKit hit target for sibling
         // subtrees. The native drag will identify the actual scrolling view.
@@ -242,6 +268,10 @@ private final class LyricDragOrigin {
             }
             return false
         }
+        #if FMX_ADAPTIVE_PLAYBACK_TESTING && targetEnvironment(simulator)
+        let mode = blankBesideLine.map { $0 ? "blank" : "text" } ?? "fallback"
+        LyricGestureTrace.decision = "matched=\(scroll != nil) mode=\(mode) origin=\(origin) delta=\(drag.translation)"
+        #endif
         defer { owner = nil; scroll = nil; probe = nil; blankBesideLine = nil }
         let width = viewportAtStart.width
         guard let target = scroll, target.window != nil, target.convert(target.bounds, to: nil) == viewportAtStart,

@@ -231,22 +231,39 @@ final class InteractionUITests: XCTestCase {
         XCTAssertTrue(visible.exists, "A start on long text scrolls at the short lyric's left-side x")
         XCTAssertGreaterThan(firstTextLineY(thirdText) - beforeY, 24, "The actual lyric moved down")
 
-        // The short intrinsic Text is a separate accessibility element from
-        // its full-width tappable row. Check the two starts against the actual
-        // short text bounds without consulting the implementation's classifier.
+        // XCTest can expose a full-width accessibility frame even for the
+        // shorter Text. The fixture measures that Text before the full-width
+        // tap target and reports its rectangle in scroll viewport coordinates.
+        // The measurement uses a separate GeometryReader from the production
+        // gesture classifier; it cannot decide the outcome of either drag.
         for (index, right) in [false, true].enumerated() {
             if right { open.tap(); XCTAssertTrue(visible.waitForExistence(timeout: 5)) }
             let text = lyricText(2)
             XCTAssertTrue(text.waitForExistence(timeout: 5))
             let x = insetX(right: right)
-            let rect = text.frame
+            expectation(for: NSPredicate(format: "value != nil AND value != ''"), evaluatedWith: visible)
+            waitForExpectations(timeout: 5)
+            let encoded = try XCTUnwrap(visible.value as? String)
+            let fields = encoded.split(separator: "|").compactMap { Double($0) }.map { CGFloat($0) }
+            XCTAssertEqual(fields.count, 4, "Measured x|y|width|height: \(encoded)")
+            guard fields.count == 4 else { return }
+            let viewport = lyrics.frame
+            let rect = CGRect(x: viewport.minX + fields[0], y: viewport.minY + fields[1],
+                              width: fields[2], height: fields[3])
+            XCTAssertGreaterThan(rect.width, 8)
+            XCTAssertLessThan(rect.width, viewport.width * 0.4, "The short Text measured before its tappable row")
+            XCTAssertGreaterThan(rect.height, 8)
+            XCTAssertEqual(rect.midX, viewport.midX, accuracy: 5)
             XCTAssertGreaterThan(right ? x - rect.maxX : rect.minX - x, 8, "Start is genuinely beside this short line")
             XCTAssertGreaterThan(min(x - lyrics.frame.minX, lyrics.frame.maxX - x), 32, "Start is outside both fixed gutters")
             XCTAssertTrue(lyrics.frame.contains(CGPoint(x: x, y: rect.midY)))
             let down = max(185, 2 * abs(rect.midX - x) + 15)
             let start = point(x, rect.midY)
             start.press(forDuration: 0.05, thenDragTo: point(rect.midX, rect.midY + down))
-            XCTAssertTrue(open.waitForExistence(timeout: 5), "Start beside the short lyric, move toward the text, and return")
+            let returned = open.waitForExistence(timeout: 5)
+            if !returned {
+                XCTFail("Start beside the short lyric, move toward its text, and return. Independent rect \(rect), x \(x), viewport \(viewport). Gesture: \(String(describing: bar.value))")
+            }
             let closed = app.staticTexts["smoke.interaction.player-close-count"]
             expectation(for: NSPredicate(format: "label == %@", "Closed: \(5 + index)"), evaluatedWith: closed)
             waitForExpectations(timeout: 5)
