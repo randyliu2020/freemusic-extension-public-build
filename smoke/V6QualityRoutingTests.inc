@@ -98,6 +98,67 @@
         NSUInteger beforeReplay = requestCount();
         Check([FetchSearchFixture(replayRequest)[@"data"][@"url"] isEqual:addressA] &&
               requestCount() == beforeReplay, @"Same source and quality replay uses the saved URL without JS network traffic");
+        // Exercise the actual protocol/manager/cache together. Only the
+        // original binary's player receiver is represented by the Swift fixture.
+        FMReplayCache *store=[(id)NSClassFromString(@"FMReplayCache") sharedCache];
+        __block NSString *audioKey;
+        Main(^{audioKey=[store keyForNamespace:manager.replayNamespace platform:@"tx" trackID:@"highest" quality:@"flac24bit"];});
+        NSURL *authored=SmokeWriteQualityWave();
+        BOOL published=[store publishVerifiedAudio:authored fileExtension:@"wav" forKey:audioKey expectedAddress:[NSURL URLWithString:addressA]];
+        [NSFileManager.defaultManager removeItemAtURL:authored error:nil];
+        NSURL *cachedFile=[store audioForKey:audioKey];
+        Check(published && cachedFile.isFileURL && ![cachedFile isEqual:authored], @"Store owns the complete authored media after its input file is removed");
+        void (*configureNative)(void *,void *)=dlsym(self.extensionHandle,"FMAdaptivePlaybackTestConfigureNative");
+        NSDictionary *(*adaptiveState)(void)=dlsym(self.extensionHandle,"FMAdaptivePlaybackDiagnostics");
+        void *setup=dlsym(self.swiftUIFixtureHandle,"FMAdaptiveFixtureSetupNative");
+        void *failure=dlsym(self.swiftUIFixtureHandle,"FMAdaptiveFixtureFailureNative");
+        void *(*create)(void)=dlsym(self.swiftUIFixtureHandle,"FMAdaptiveFixtureCreate");
+        void (*start)(void *,void *)=dlsym(self.swiftUIFixtureHandle,"FMAdaptiveFixtureStart");
+        void *(*copyPlayer)(void *)=dlsym(self.swiftUIFixtureHandle,"FMAdaptiveFixtureCopyPlayer");
+        void (*stop)(void *)=dlsym(self.swiftUIFixtureHandle,"FMAdaptiveFixtureStop");
+        Check(configureNative&&adaptiveState&&setup&&failure&&create&&start&&copyPlayer&&stop,@"Swift player receiver and production adaptive registration are available");
+        __block id receiver;
+        __block AVPlayer *player;
+        __block NSUInteger previousBindings;
+        __block double secondsAfterSeek=0;
+        NSUInteger beforeFile=requestCount(), fileRequests=NSNotFound;
+        @try {
+            Main(^{
+                configureNative(setup,failure);
+                receiver=CFBridgingRelease(create());
+                previousBindings=[adaptiveState()[@"bound"] unsignedIntegerValue];
+            });
+            NSDictionary *fileResponse=FetchSearchFixture(replayRequest);
+            NSURL *resolved=[NSURL URLWithString:fileResponse[@"data"][@"url"] ?: @""];
+            Check([fileResponse[@"code"] integerValue]==200 && resolved.isFileURL &&
+                  [resolved isEqual:cachedFile],@"Original parse request returns the store's published file URL through the production manager");
+            Main(^{
+                start((__bridge void *)receiver,(__bridge void *)resolved);
+                player=CFBridgingRelease(copyPlayer((__bridge void *)receiver));
+                AVAsset *asset=player.currentItem.asset;
+                Check([asset isKindOfClass:AVURLAsset.class] && [((AVURLAsset *)asset).URL isEqual:cachedFile] &&
+                      [adaptiveState()[@"bound"] unsignedIntegerValue]==previousBindings+1,@"The registered file URL binds to the real AVPlayerItem");
+            });
+            Check(Until(^BOOL{return player.currentItem.status==AVPlayerItemStatusReadyToPlay &&
+                CMTimeGetSeconds(player.currentTime)>0.1;},8),@"Audio playback advances from the cached file");
+            __block BOOL didSeek=NO;
+            Main(^{
+                [player pause];
+                [player seekToTime:CMTimeMake(9,4) toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero completionHandler:^(BOOL finished){
+                    dispatch_async(dispatch_get_main_queue(),^{didSeek=finished;});
+                }];
+            });
+            Check(Until(^BOOL{return didSeek && fabs(CMTimeGetSeconds(player.currentTime)-2.25)<0.1;},5),@"Seeking reaches the requested position in the local file");
+            Main(^{[player play];});
+            Check(Until(^BOOL{
+                secondsAfterSeek=CMTimeGetSeconds(player.currentTime);
+                return player.currentItem.status==AVPlayerItemStatusReadyToPlay && secondsAfterSeek>2.45;
+            },6),@"The local AVPlayer clock advances again after seeking");
+            fileRequests=requestCount()-beforeFile;
+            Check(fileRequests==0,@"No JS musicUrl HTTP or native origin request during local resolution, play and seek");
+        } @finally {
+            Main(^{if(receiver)stop((__bridge void *)receiver);configureNative(NULL,NULL);player=nil;receiver=nil;});
+        }
         NSString *otherName = @"V9ReplayOther.js";
         NSURL *otherFile = [directory URLByAppendingPathComponent:otherName];
         NSString *otherScript = @"lx.on('request',()=>Promise.resolve('https://fixture.invalid/source-b'));lx.send('inited',{sources:{tx:{type:'music',actions:['musicUrl'],qualitys:['flac24bit']}}});";
@@ -105,6 +166,7 @@
         @try {
             Main(^{ [manager activate:@{@"file":otherName, @"name":otherName}]; });
             Check(Until(^BOOL{return [manager.selectedFile isEqual:otherName] && manager.runtime.manifest != nil;},8), @"Source B is selected");
+            Check(![store audioForKey:audioKey],@"Changing the source immediately revokes the old complete file key");
             Check([FetchSearchFixture(replayRequest)[@"data"][@"url"] isEqual:@"https://fixture.invalid/source-b"], @"Source B resolves its own URL for the identical song and quality");
             Main(^{ [manager activate:@{@"file":filename, @"name":filename}]; });
             Check(Until(^BOOL{return [manager.selectedFile isEqual:filename] && manager.runtime.manifest != nil;},8), @"Return to source A");
@@ -113,6 +175,8 @@
                   requestCount() == beforeReturn + 1, @"Returning A after B requires a fresh JS address");
         } @finally { [NSFileManager.defaultManager removeItemAtURL:otherFile error:nil]; }
         return @{@"same_source_replay_without_js":@YES, @"source_switch_gets_own_url":@YES,
+                 @"protocol_file_url_bound_to_avplayer":@YES, @"local_media_seek_seconds":@(secondsAfterSeek),
+                 @"local_replay_transport_requests":@(fileRequests), @"old_complete_file_revoked_on_switch":@YES,
                  @"switching_back_resolves_again":@YES, @"scenarios":results,@"qmc_request_uses_JS":@YES,@"highest_first":@YES,@"all_qualities_attempted_once":@YES,@"unverified_quality_label":@"未知",@"native_origin_requests":@(nativeRequests),@"credential_metadata_allowlist":@YES,@"enriched_album_media_quality_metadata":@YES,@"isolated_workers":@YES,@"observed_JS_HTTP_attempts":attempts,@"observed_JS_HTTP_requests":@(requests.count-nativeRequests),@"real_network_used":@NO};
     } @finally {
         Main(^{ [manager disable]; });

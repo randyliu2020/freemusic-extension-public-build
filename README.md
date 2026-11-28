@@ -9,9 +9,9 @@ or a previously resolved address for the same source, platform, track and
 quality. After an address fails, the player retries the resolver. Changing the
 selected script starts a new cache generation. Local Downloads is the first
 Library row, followed by Recent Plays. Library playlist ordering,
-names, track ordering and removals are stored on the device. A deliberate
-downward drag in the lyrics can close the full player. Tapping a timed line
-continues to seek.
+names, track ordering and removals are stored on the device. Swiping over the
+lyrics scrolls the lines. A downward drag from a blank side margin collapses
+the player. Tapping a timed line continues to seek.
 
 Previously downloaded tracks with missing artwork can recover it from an
 embedded picture, known artwork, or public album metadata for the exact

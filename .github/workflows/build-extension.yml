@@ -108,6 +108,15 @@ jobs:
           xcrun clang -fobjc-arc -fblocks -framework Foundation -framework AVFoundation -framework CoreGraphics -framework ImageIO FMDownloadArtworkIntegration.m FMDownloadArtwork.m FMTrackMetadata.m FMDownloadArtworkIntegrationTests.m -o download-artwork-integration-tests
           ./download-artwork-integration-tests v9-validation/download-artwork-integration-tests.json
 
+      - name: Test download cover changes on the current Swift model
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p v10-validation
+          xcrun swiftc -swift-version 5 -parse-as-library FMNativeDownloadCoverModel.swift FMNativeDownloadCoverModelTests.swift -o native-cover-model-tests
+          ./native-cover-model-tests v10-validation/native-cover-model-tests.json
+
       - name: Test request interception on macOS
         shell: bash
         run: |
@@ -231,7 +240,10 @@ jobs:
       - name: Collect replay and playlist test results
         if: success()
         shell: bash
-        run: cp v9-validation/{replay-cache,replay-media,playlist-edit,download-artwork,download-artwork-integration}-tests.json smoke-artifact/
+        run: |
+          set -euo pipefail
+          cp v9-validation/{replay-cache,replay-media,playlist-edit,download-artwork,download-artwork-integration}-tests.json smoke-artifact/
+          cp v10-validation/native-cover-model-tests.json smoke-artifact/
 
       - name: Upload simulator validation evidence
         if: always()

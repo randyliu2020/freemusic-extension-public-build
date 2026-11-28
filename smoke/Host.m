@@ -11,6 +11,7 @@
 #import "FMExtensionProtocol.h"
 #import "FMListeningHistory.h"
 #import "FMQualityResolver.h"
+#import "FMReplayCache.h"
 
 @interface FMXManager : NSObject
 @property(atomic,strong) LXSourceRuntime *runtime;
@@ -19,6 +20,7 @@
 @property(nonatomic,copy) NSString *playbackRequest;
 @property(nonatomic,copy) NSString *selectedFile;
 @property(nonatomic,copy) NSString *loadingFile;
+@property(nonatomic,copy) NSString *replayNamespace;
 @property(nonatomic,copy) NSArray<NSDictionary *> *files;
 + (instancetype)shared;
 - (NSURL *)directory;
@@ -62,6 +64,18 @@ static void Main(dispatch_block_t block) {
 }
 static void Check(BOOL value, NSString *reason) {
     if (!value) @throw [NSException exceptionWithName:@"FMXSmokeFailure" reason:reason ?: @"Failed assertion" userInfo:nil];
+}
+static NSURL *SmokeWriteQualityWave(void) {
+    NSURL *file=[NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"FMX-quality-%@.wav",NSUUID.UUID.UUIDString]]];
+    const uint32_t sampleRate=22050, sampleCount=sampleRate*3, audioBytes=sampleCount*2;
+    NSMutableData *wave=NSMutableData.data;
+    void (^u16)(uint16_t)=^(uint16_t n){uint8_t bytes[2]={(uint8_t)n,(uint8_t)(n>>8)};[wave appendBytes:bytes length:2];};
+    void (^u32)(uint32_t)=^(uint32_t n){uint8_t bytes[4]={(uint8_t)n,(uint8_t)(n>>8),(uint8_t)(n>>16),(uint8_t)(n>>24)};[wave appendBytes:bytes length:4];};
+    [wave appendBytes:"RIFF" length:4];u32(36+audioBytes);[wave appendBytes:"WAVEfmt " length:8];
+    u32(16);u16(1);u16(1);u32(sampleRate);u32(sampleRate*2);u16(2);u16(16);[wave appendBytes:"data" length:4];u32(audioBytes);
+    for(uint32_t i=0;i<sampleCount;i++)u16((uint16_t)(int16_t)(500*sin(2*M_PI*220*i/sampleRate)));
+    Check([wave writeToURL:file atomically:YES],@"Write authored PCM media");
+    return file;
 }
 static BOOL Until(BOOL (^condition)(void), NSTimeInterval timeout) {
     NSTimeInterval end = NSProcessInfo.processInfo.systemUptime + timeout;
@@ -955,6 +969,13 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
             __block BOOL opened=NO;Main(^{UIBarButtonItem *entry=FindSettingsEntry(settings);if([entry.customView isKindOfClass:UIButton.class])opened=TapVisibleButton((UIButton*)entry.customView);else if(entry.target && entry.action)opened=[UIApplication.sharedApplication sendAction:entry.action to:entry.target from:entry forEvent:nil];});
             Check(opened,@"Settings extension action is callable through its native control");
             Check(Until(^BOOL{UIViewController *top=FrontController(self.window.rootViewController);if([top isKindOfClass:NSClassFromString(@"FMXPanel")]){panel=(UITableViewController*)top;return YES;}return NO;},5),@"Existing source panel opens from the original settings page");
+            Main(^{
+                NSIndexPath *artwork = FindRow(panel, @"网易云下载封面");
+                Check(artwork != nil, @"Source status shows NetEase download artwork");
+                UITableViewCell *row = [panel tableView:panel.tableView cellForRowAtIndexPath:artwork];
+                Check([row.accessibilityIdentifier isEqual:@"FMX.neteaseDownloadedArtwork"] && row.detailTextLabel.text.length > 0,
+                      @"Download artwork status is present even before any downloads are registered");
+            });
             __block UIViewController *surface;Main(^{surface=panel.navigationController;});
             [self waitForPresentation:surface expanded:YES];
             __block BOOL changed=NO;

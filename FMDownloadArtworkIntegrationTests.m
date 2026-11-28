@@ -114,11 +114,82 @@ int main(int argc,const char *argv[]) { @autoreleasepool {
     NSUInteger before=CountRequests();
     [integration refresh];[integration refresh];[integration refresh];
     [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.7]];
-    Check(CountRequests()==before && [FMDownloadArtwork isUsableJPEGAtURL:Child(assets,@"wy_100_cover.jpg")],
+    NSUInteger offlineAdditional=CountRequests()-before;
+    Check(offlineAdditional==0 && [FMDownloadArtwork isUsableJPEGAtURL:Child(assets,@"wy_100_cover.jpg")],
           @"repeat_refresh_offline_no_network_same_native_list_and_player_sidecar");
+    // Use the original three MusicFileStorage directories and both index URLs.
+    // These are authored files. No device data is needed for the filesystem race.
+    NSURL *legacyRoot=Child(root,@"fresh-install");
+    NSURL *support2=Child(legacyRoot,@"Library/Application Support"),*documents2=Child(legacyRoot,@"Documents");
+    NSURL *docs2=Child(documents2,@"Downloads"),*assets2=Child(support2,@"DownloadAssets");
+    NSURL *caches2=Child(legacyRoot,@"Library/Caches"),*music2=Child(caches2,@"MusicCache");
+    NSURL *oldIndex=Child(caches2,@"downloaded_tracks.json"),*newIndex=Child(support2,@"downloaded_tracks.json");
+    for(NSURL *dir in @[docs2,assets2,music2])Check([files createDirectoryAtURL:dir withIntermediateDirectories:YES attributes:nil error:nil],@"legacy_fixture_directory");
+    NSData *bad=[@"broken-first-slot" dataUsingEncoding:NSUTF8StringEncoding];
+    NSURL *first=Child(docs2,@"wy_201_cover.jpg"),*last=Child(music2,@"wy_201_cover.jpg");
+    [bad writeToURL:first atomically:YES];[fixturePNG writeToURL:last atomically:YES];
+    [wave writeToURL:Child(music2,@"wy_201.wav") atomically:YES];
+    NSData *caf=[[NSData alloc]initWithBase64EncodedString:@"Y2FmZgABAABkZXNjAAAAAAAAACBAv0AAAAAAAGxwY20AAAACAAAAAgAAAAEAAAABAAAAEGNoYW4AAAAAAAAADABkAAEAAAAAAAAAAGRhdGEAAAAAAAAAVAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==" options:0];
+    [caf writeToURL:Child(assets2,@"wy_202_playback.caf") atomically:YES];
+    [fixturePNG writeToURL:Child(music2,@"wy_202_cover.jpg") atomically:YES];
+    NSMutableDictionary *stale=[Track(@"wy",@"201",@"old") mutableCopy];
+    stale[@"cover"]=@"file:///private/OLD-APP-COMMON/Documents/Downloads/wy_201_cover.jpg";
+    NSMutableArray *legacyRows=[@[stale,Track(@"wy",@"202",@"cached"),Track(@"wy",@"203",@"late-file")] mutableCopy];
+    NSData *oldBytes=WriteIndex(legacyRows,oldIndex);
+    FMDownloadArtwork *legacyStore=[[FMDownloadArtwork alloc]initWithDirectory:Child(support2,@"FMDownloadArtwork-v1") downloads:docs2 configuration:configuration];
+    FMDownloadArtworkIntegration *legacyIntegration=[[FMDownloadArtworkIntegration alloc]initWithSupport:support2 documents:documents2 store:legacyStore];
+    NSMutableDictionary *delivered=NSMutableDictionary.dictionary; __block BOOL mainOnly=YES;
+    id observer=[NSNotificationCenter.defaultCenter addObserverForName:FMDownloadArtworkDidRecoverNotification object:nil queue:nil
+        usingBlock:^(NSNotification *note){
+            mainOnly &= NSThread.isMainThread;
+            NSString *key=note.userInfo[@"trackKey"];
+            if(key)delivered[key]=note.userInfo;
+        }];
+    [legacyIntegration start];
+    Check(Wait(^BOOL{return delivered[@"wy_201"] && delivered[@"wy_202"] && [legacyIntegration.status[@"wyMissingAudio"] integerValue]==1;},10),@"legacy_index_discovered_without_primary_and_status_counts_missing_audio");
+    Check([[NSData dataWithContentsOfURL:first] isEqual:fixturePNG] && [[NSData dataWithContentsOfURL:last] isEqual:fixturePNG],@"nonempty_corrupt_first_candidate_repaired_offline_from_exact_legacy_cache_good_copy_preserved");
+    Check([[NSData dataWithContentsOfURL:Child(assets2,@"wy_202_cover.jpg")] isEqual:fixturePNG],@"legacy_cache_only_picture_saved_to_permanent_native_folder_for_registered_decoded_caf");
+    NSDictionary *event=delivered[@"wy_201"];
+    Check(mainOnly && [event[@"server"] isEqual:@"wy"] && [event[@"id"] isEqual:@"201"] &&
+          [event[@"coverURL"] isEqual:first] && [event[@"expectedCover"] isEqual:stale[@"cover"]],@"main_thread_refresh_supplies_current_container_url_and_expected_original_index_cover");
+    Check([[NSData dataWithContentsOfURL:oldIndex] isEqual:oldBytes] && ![files fileExistsAtPath:newIndex.path] &&
+          [[NSData dataWithContentsOfURL:Child(music2,@"wy_201.wav")] isEqual:wave] && CountRequests()==before,@"offline_recovery_never_rewrites_either_index_or_audio");
+    [fixturePNG writeToURL:Child(music2,@"wy_203_cover.jpg") atomically:YES];
+    [wave writeToURL:Child(music2,@"wy_203.wav") atomically:YES];
+    Check(Wait(^BOOL{return delivered[@"wy_203"] && [legacyIntegration.status[@"wyUsable"] integerValue]==3;},10),@"metadata_before_audio_rescanned_when_only_legacy_audio_directory_changes");
+    Check([legacyIntegration.status[@"wyRegistered"] integerValue]==3 &&
+          [legacyIntegration.status[@"wyMissingAudio"] integerValue]==0 && [legacyIntegration.status[@"wyPending"] integerValue]==0,@"disjoint_private_status_counts_after_recovery");
+    // The real loader decodes the legacy index only when the new file is absent.
+    // A valid empty list, a malformed current file, and in-flight deletion are
+    // deliberately distinct. Do not resurrect an old registered song.
+    WriteIndex(@[],newIndex);
+    Check(Wait(^BOOL{return [legacyIntegration.status[@"scanned"] boolValue] && [legacyIntegration.status[@"wyRegistered"] integerValue]==0;},10),@"empty_primary_index_supersedes_nonempty_legacy_without_merging_deleted_tracks");
+    [files removeItemAtURL:first error:nil];
+    [bad writeToURL:newIndex atomically:YES];
+    [legacyIntegration refresh];
+    Check(Wait(^BOOL{return ![legacyIntegration.status[@"scanned"] boolValue];},10) &&
+          ![files fileExistsAtPath:first.path],@"malformed_primary_never_falls_back_to_stale_legacy_list");
+    NSURL *newFile=Child(music2,@"wy_207.aifc");
+    NSData *aifc=[[NSData alloc]initWithBase64EncodedString:@"Rk9STQAAAJBBSUZDRlZFUgAAAASigFFAQ09NTQAAABgAAQAAACgAEEAL+gAAAAAAAABzb3d0AABTU05EAAAAWAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" options:0];
+    [aifc writeToURL:newFile atomically:YES];
+    @synchronized(requests){offline=NO;}
+    WriteIndex(@[Track(@"wy",@"207",@"new-legacy-root")],newIndex);
+    Check(Wait(^BOOL{return [FMDownloadArtwork isUsableJPEGAtURL:Child(assets2,@"wy_207_cover.jpg")];},10) &&
+          Saw(@"/new-legacy-root.jpg"),@"registered_original_extension_can_fetch_art_when_audio_only_in_legacy_root");
+    Check(![files fileExistsAtPath:first.path] && [[NSData dataWithContentsOfURL:oldIndex] isEqual:oldBytes],@"primary_and_legacy_conflict_never_restores_removed_legacy_song");
+    NSMutableData *overBudget=[fixturePNG mutableCopy];[overBudget increaseLengthBy:8*1024*1024];
+    NSURL *uninspected=Child(docs2,@"wy_208_cover.jpg");
+    [overBudget writeToURL:uninspected atomically:YES];[wave writeToURL:Child(docs2,@"wy_208.wav") atomically:YES];
+    [fixturePNG writeToURL:Child(music2,@"wy_208_cover.jpg") atomically:YES];
+    WriteIndex(@[Track(@"wy",@"208",@"above-budget")],newIndex);
+    Check(Wait(^BOOL{return [legacyIntegration.status[@"wyFailed"] integerValue]==1;},10) &&
+          [[NSData dataWithContentsOfURL:uninspected] isEqual:overBudget],@"uninspected_large_original_is_preserved_and_reported_without_overwrite");
+    [NSNotificationCenter.defaultCenter removeObserver:observer];
     NSDictionary *report=@{@"passed":@YES,@"checks":checks,@"evidence":@{@"historical_rows_repaired":@38,
             @"native_existing_png_preserved":@YES,@"native_index_replacement_observed":@YES,
-            @"unchanged_index_during_repair":@YES,@"offline_additional_requests":@(CountRequests()-before)}};
+            @"unchanged_index_during_repair":@YES,@"offline_additional_requests":@(offlineAdditional),@"native_cover_locations":@3,
+            @"legacy_index_primary_precedence":@YES,@"registered_legacy_audio_allowed":@YES,
+            @"earlier_corrupt_cover_repaired":@YES,@"main_queue_refresh":@YES,@"late_audio_observed":@YES}};
     if(argc>1){NSData *json=[NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingPrettyPrinted error:nil];
         if(![json writeToFile:[NSString stringWithUTF8String:argv[1]] atomically:YES])return 1;}
     [files removeItemAtURL:root error:nil];printf("DONE download artwork registration and sidecar tests\n");return 0;

@@ -18,6 +18,7 @@
 #import "FMTrackMetadata.h"
 #import "FMDownloadIntegration.h"
 #import "FMDownloadArtworkIntegration.h"
+#import "FMNativeDownloadCoverDisplay.h"
 #import "FMPlaybackSequence.h"
 #import "FMSettingsMigration.h"
 
@@ -186,6 +187,20 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
 }
 @end
 
+static NSString *FMXCoverStatusText(NSDictionary *state) {
+    if (![state[@"scanned"] boolValue]) return @"暂未读到本机下载列表";
+    NSUInteger total = [state[@"wyRegistered"] unsignedIntegerValue];
+    if (!total) return @"尚未找到已登记的网易云下载";
+    NSMutableArray<NSString *> *parts = [NSMutableArray arrayWithObject:
+        [NSString stringWithFormat:@"%lu 首中已有 %lu 首可显示", (unsigned long)total,
+            (unsigned long)[state[@"wyUsable"] unsignedIntegerValue]]];
+    for (NSArray<NSString *> *field in @[@[@"wyPending", @"待处理"], @[@"wyMissingAudio", @"未找到本地音频"], @[@"wyFailed", @"暂未取得封面"]]) {
+        NSUInteger count = [state[field[0]] unsignedIntegerValue];
+        if (count) [parts addObject:[NSString stringWithFormat:@"%@ %lu 首", field[1], (unsigned long)count]];
+    }
+    return [parts componentsJoinedByString:@" · "];
+}
+
 @interface FMXPanel : UITableViewController <UIDocumentPickerDelegate>
 @end
 @implementation FMXPanel
@@ -197,20 +212,32 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
         self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:self action:@selector(close)];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(reload) name:FMXChanged object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(reload) name:FMXQishuiSearchStatusDidChangeNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(coverStatusChanged:)
+        name:FMDownloadArtworkStatusDidChangeNotification object:nil];
     [self reload];
+}
+- (void)coverStatusChanged:(NSNotification *)note {
+    if (!self.viewIfLoaded.window) return;
+    NSIndexPath *path = [NSIndexPath indexPathForRow:1 inSection:3];
+    UITableViewCell *cell = [self.tableView cellForRowAtIndexPath:path];
+    if (cell) {
+        NSString *text = FMXCoverStatusText(FMDownloadArtworkStatus());
+        if (![cell.detailTextLabel.text isEqualToString:text])
+            [self.tableView reloadRowsAtIndexPaths:@[path] withRowAnimation:UITableViewRowAnimationNone];
+    }
 }
 - (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self]; }
 - (void)close { [self dismissViewControllerAnimated:YES completion:nil]; }
 - (void)reload { [[FMXManager shared] refreshFiles]; [self.tableView reloadData]; }
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 5; }
-- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return section == 0 ? 3 : section == 1 ? [FMXManager shared].files.count + 1 : section == 2 ? 2 : 1; }
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return section == 0 ? 3 : section == 1 ? [FMXManager shared].files.count + 1 : (section == 2 || section == 3) ? 2 : 1; }
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section { return @[@"搜索", @"JS 音源", @"锁屏", @"音源状态", @"听歌记录"][section]; }
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     if (section == 0) return @"开启后，首页搜索汇总网易云、QQ、酷狗和汽水。单独搜索某个平台时，请关闭聚合搜索。汽水歌曲使用原 App 的播放方式。";
     if (section == 1) return @"支持网易云、QQ 和酷狗的基础洛雪音源。酷狗 JS 使用标准音质；部分脚本需要额外歌曲信息或尚未支持的功能。仅启用你信任的脚本。";
     if (section == 2) return @"用当前封面在手机上生成轻微缩放的循环动画。系统需要时才生成；低电量或减少动态效果开启时显示静态封面。需要 iOS 26 或更高版本。";
     if (section == 4) return @"按实际听歌记录查看月度、年度偏好，只保存在本机。";
-    return @"扩展 v9。播放时优先复用同音源、同音质的完整歌曲或播放地址。换源后重新解析，手动下载保留。";
+    return @"扩展 v10。命中完整歌曲缓存时可离线播放。仅复用播放地址时仍需联网读取音频。";
 }
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)path {
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
@@ -243,7 +270,12 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
         cell.detailTextLabel.text = [state[@"videoError"] length] ? @"动画生成未完成，继续显示静态封面" : nil;
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
     } else if (path.section == 4) { cell.textLabel.text = @"听歌画像"; cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator; }
-    else {
+    else if (path.section == 3 && path.row == 1) {
+        cell.textLabel.text = @"网易云下载封面";
+        cell.detailTextLabel.text = FMXCoverStatusText(FMDownloadArtworkStatus());
+        cell.accessibilityIdentifier = @"FMX.neteaseDownloadedArtwork";
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    } else {
         FMXManager *manager = [FMXManager shared];
         cell.textLabel.text = manager.status;
         cell.detailTextLabel.text = manager.playbackStatus ?: (manager.runtime ? @"本次启用后尚无 JS 解析记录。已适配平台优先使用 JS 支持的最高音质，失败逐档降低。" : nil);
@@ -352,6 +384,7 @@ __attribute__((constructor)) static void FMXInitialize(void) {
         FMAdaptivePlaybackInstall();
         FMPlaybackSequenceInstall();
         FMDownloadIntegrationInstall();
+        FMNativeDownloadCoverDisplayInstall();
         FMDownloadArtworkInstall();
         [FMExtensionProtocol setTrackMetadataObserver:^(id payload){FMTrackMetadataObserveResponse(payload);}];
         // Capture must install before the host registers its original AVPlayer

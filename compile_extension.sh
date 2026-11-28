@@ -19,7 +19,7 @@ elif [[ "$mode" != device ]]; then
   echo 'Unknown extension build mode' >&2
   exit 2
 fi
-sources=(FMExtension LXSourceRuntime FMExtensionProtocol FMLockScreen FMArtworkSelection FMSettingsEntry FMSearchPreferences FMSettingsMigration FMQishuiSearch FMListeningHistory FMInsights FMInteraction FMLXMC FMLXMCUI FMLXMCLocalStore FMLXMCLocalProtocol FMNavigation FMListeningCapture FMPlaybackCache FMReplayCache FMReplayMedia FMPlaylistEditor FMDownloadArtwork FMDownloadArtworkIntegration FMQualityResolver FMAdaptivePlayback FMPlaybackSequence FMPlaybackQualityDisplay FMTrackMetadata FMJSDownloadCoordinator FMDownloadIntegration)
+sources=(FMExtension LXSourceRuntime FMExtensionProtocol FMLockScreen FMArtworkSelection FMSettingsEntry FMSearchPreferences FMSettingsMigration FMQishuiSearch FMListeningHistory FMInsights FMInteraction FMLXMC FMLXMCUI FMLXMCLocalStore FMLXMCLocalProtocol FMNavigation FMListeningCapture FMPlaybackCache FMReplayCache FMReplayMedia FMPlaylistEditor FMDownloadArtwork FMDownloadArtworkIntegration FMNativeDownloadCoverDisplay FMQualityResolver FMAdaptivePlayback FMPlaybackSequence FMPlaybackQualityDisplay FMTrackMetadata FMJSDownloadCoordinator FMDownloadIntegration)
 objects=()
 for source in "${sources[@]}"; do
   object="$object_dir/$source.o"
@@ -33,7 +33,7 @@ done
 xcrun --sdk "$sdk" swiftc -target "$target" -sdk "$sdk_path" \
   -parse-as-library -emit-library -module-name FMExtension \
   -O "${swift_flags[@]}" "${objects[@]}" \
-  "$source_dir/FMAdaptivePlaybackBridge.swift" "$source_dir/FMPlaybackQualityBridge.swift" \
+  "$source_dir/FMAdaptivePlaybackBridge.swift" "$source_dir/FMPlaybackQualityBridge.swift" "$source_dir/FMNativeDownloadCoverModel.swift" \
   -Xlinker -install_name -Xlinker '@executable_path/Frameworks/FMExtension.dylib' \
   -Xlinker -current_version -Xlinker 1.5.0 \
   -Xlinker -compatibility_version -Xlinker 1.0.0 \

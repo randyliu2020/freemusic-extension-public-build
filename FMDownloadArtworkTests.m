@@ -174,6 +174,24 @@ int main(int argc, const char **argv) { @autoreleasepool {
     [[@"unusable" dataUsingEncoding:NSUTF8StringEncoding] writeToURL:corrupt atomically:YES];
     Check(![FMDownloadArtwork isUsableJPEGAtURL:corrupt],@"corrupt artwork fails native validator");
     Check([[NSData dataWithContentsOfURL:netFile] isEqual:plain],@"network recovery left original download byte-identical");
+    NSURL *container=[root URLByAppendingPathComponent:@"second-app"];
+    NSURL *support=[container URLByAppendingPathComponent:@"Library/Application Support"];
+    NSURL *legacy=[container URLByAppendingPathComponent:@"Library/Caches/MusicCache"];
+    NSURL *managed=[container URLByAppendingPathComponent:@"Documents/Downloads"];
+    [fm createDirectoryAtURL:legacy withIntermediateDirectories:YES attributes:nil error:nil];
+    [fm createDirectoryAtURL:managed withIntermediateDirectories:YES attributes:nil error:nil];
+    FMDownloadArtwork *scoped=[[FMDownloadArtwork alloc]initWithDirectory:[support URLByAppendingPathComponent:@"FMDownloadArtwork-v1"]
+                                                                downloads:managed configuration:cfg];
+    NSURL *legacyAudio=[legacy URLByAppendingPathComponent:@"wy_330.flac"];
+    [tagged writeToURL:legacyAudio atomically:YES];
+    NSUInteger beforeLegacy=requests.count;
+    Check(!Resolve(scoped,@"wy",@"330",legacyAudio,nil),@"unregistered caller cannot consume audio from native automatic cache");
+    __block BOOL legacyDone=NO;__block NSURL *legacyJPEG;
+    [scoped resolveRegisteredPlatform:@"wy" trackID:@"330" audioFile:legacyAudio coverURL:nil completion:^(NSURL *url){legacyJPEG=url;legacyDone=YES;}];
+    Check(Wait(^BOOL{return legacyDone;}) && [FMDownloadArtwork isUsableJPEGAtURL:legacyJPEG],@"registered exact native audio filename decodes embedded legacy FLAC");
+    legacyDone=NO;legacyJPEG=nil;
+    [scoped resolveRegisteredPlatform:@"wy" trackID:@"331" audioFile:legacyAudio coverURL:nil completion:^(NSURL *url){legacyJPEG=url;legacyDone=YES;}];
+    Check(Wait(^BOOL{return legacyDone;}) && !legacyJPEG && requests.count==beforeLegacy,@"same directory with another song id is rejected before all network activity");
     [fm removeItemAtURL:root error:nil];
     if (argc > 1) {
         NSDictionary *report = @{@"passed":@YES, @"assertion_count":@(passed.count), @"checks":passed.copy};

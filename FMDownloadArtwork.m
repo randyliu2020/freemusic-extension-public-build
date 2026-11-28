@@ -204,6 +204,7 @@ static NSURL *FMPublicURL(NSURL *url, NSString *platform, BOOL metadata) {
 @property (nonatomic, strong) NSURL *directory;
 @property (nonatomic, strong) NSURL *downloads;
 @property (nonatomic, strong) NSURL *nativeAssets;
+@property (nonatomic, strong) NSURL *legacyCache;
 @property (nonatomic, strong) NSURLSessionConfiguration *configuration;
 @property (nonatomic, strong) NSOperationQueue *workers;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSMutableArray *> *pending;
@@ -235,6 +236,8 @@ static NSURL *FMPublicURL(NSURL *url, NSString *platform, BOOL metadata) {
         _directory = directory;
         _downloads = downloads;
         _nativeAssets = [directory.URLByDeletingLastPathComponent URLByAppendingPathComponent:@"DownloadAssets"];
+        NSURL *library = directory.URLByDeletingLastPathComponent.URLByDeletingLastPathComponent;
+        _legacyCache = [[library URLByAppendingPathComponent:@"Caches"] URLByAppendingPathComponent:@"MusicCache"];
         _configuration = [configuration copy];
         _configuration.HTTPCookieStorage = nil;
         _configuration.HTTPShouldSetCookies = NO;
@@ -295,7 +298,7 @@ static NSURL *FMPublicURL(NSURL *url, NSString *platform, BOOL metadata) {
 }
 - (NSURL *)resolve:(NSString *)source identifier:(NSString *)trackID key:(NSString *)key
              audio:(NSURL *)audio cover:(NSURL *)cover {
-    if (!FMInside(audio,self.downloads) || !FMRegularSize(audio)) return nil;
+    if (!FMRegularSize(audio)) return nil;
     NSURL *destination = [self.directory URLByAppendingPathComponent:[key stringByAppendingPathExtension:@"jpg"]];
     if (FMValidDiskImage(destination,YES)) return destination;
     NSString *observed = FMTrackMetadataForParameters(@{@"id":trackID},source)[@"img"];
@@ -306,7 +309,7 @@ static NSURL *FMPublicURL(NSURL *url, NSString *platform, BOOL metadata) {
         if (safe && ![remote containsObject:safe]) [remote addObject:safe];
     }
     NSData *jpeg = nil;
-    if (cover.isFileURL && (FMInside(cover,self.downloads) || FMInside(cover,self.nativeAssets))) jpeg = FMJPEG(FMSmallFile(cover));
+    if (cover.isFileURL && (FMInside(cover,self.downloads) || FMInside(cover,self.nativeAssets) || FMInside(cover,self.legacyCache))) jpeg = FMJPEG(FMSmallFile(cover));
     NSString *basename = audio.lastPathComponent.stringByDeletingPathExtension;
     NSURL *sidecar = [self.nativeAssets URLByAppendingPathComponent:[basename stringByAppendingString:@"_cover.jpg"]];
     if (!jpeg && FMInside(sidecar,self.nativeAssets)) jpeg = FMJPEG(FMSmallFile(sidecar));
@@ -342,10 +345,31 @@ static NSURL *FMPublicURL(NSURL *url, NSString *platform, BOOL metadata) {
 }
 - (void)resolvePlatform:(NSString *)platform trackID:(NSString *)trackID audioFile:(NSURL *)audio
                coverURL:(NSURL *)coverURL completion:(void (^)(NSURL *))completion {
+    [self resolvePlatform:platform trackID:trackID audioFile:audio coverURL:coverURL registered:NO completion:completion];
+}
+- (void)resolveRegisteredPlatform:(NSString *)platform trackID:(NSString *)trackID audioFile:(NSURL *)audio
+                         coverURL:(NSURL *)coverURL completion:(void (^)(NSURL *))completion {
+    [self resolvePlatform:platform trackID:trackID audioFile:audio coverURL:coverURL registered:YES completion:completion];
+}
+- (void)resolvePlatform:(NSString *)platform trackID:(NSString *)trackID audioFile:(NSURL *)audio
+               coverURL:(NSURL *)coverURL registered:(BOOL)registered completion:(void (^)(NSURL *))completion {
     if (!completion) return;
     NSString *source = FMPlatformName(platform);
+    BOOL allowedFile = !registered && FMInside(audio,self.downloads);
+    if (registered && source && [trackID isKindOfClass:NSString.class] && trackID.length <= 256) {
+        NSString *base = [NSString stringWithFormat:@"%@_%@",platform,trackID];
+        NSString *name = audio.lastPathComponent.stringByDeletingPathExtension;
+        struct stat dir;
+        for (NSURL *root in @[self.downloads,self.nativeAssets,self.legacyCache]) {
+            if (lstat(root.fileSystemRepresentation,&dir) || !S_ISDIR(dir.st_mode) || !FMInside(audio,root) ||
+                ![audio.URLByDeletingLastPathComponent.URLByStandardizingPath.path isEqual:root.URLByStandardizingPath.path]) continue;
+            BOOL decoded = [name isEqual:[base stringByAppendingString:@"_playback"]] && [audio.pathExtension.lowercaseString isEqual:@"caf"];
+            allowedFile = [name isEqual:base] || decoded;
+            break;
+        }
+    }
     if (!source || ![trackID isKindOfClass:NSString.class] || !trackID.length || trackID.length > 256 ||
-        !FMInside(audio,self.downloads) || ![@[@"mp3",@"m4a",@"aac",@"alac",@"mp4",@"flac",@"wav",@"caf",@"aif",@"aiff",@"ogg",@"oga",@"opus",@"ape",@"wma",@"amr",@"dsf",@"dff"] containsObject:audio.pathExtension.lowercaseString]) {
+        !allowedFile || ![@[@"mp3",@"m4a",@"aac",@"alac",@"mp4",@"flac",@"wav",@"caf",@"aif",@"aiff",@"aifc",@"ogg",@"oga",@"opus",@"ape",@"wv",@"mpc",@"tta",@"spx",@"wma",@"amr",@"dsf",@"dff"] containsObject:audio.pathExtension.lowercaseString]) {
         dispatch_async(dispatch_get_main_queue(),^{completion(nil);}); return;
     }
     if ([source isEqual:@"kg"]) trackID = trackID.uppercaseString;

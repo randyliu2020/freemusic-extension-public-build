@@ -10,6 +10,11 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)resolvePlatform:(NSString *)platform trackID:(NSString *)trackID
               audioFile:(NSURL *)audio coverURL:(nullable NSURL *)coverURL
              completion:(void (^)(NSURL * _Nullable jpeg))completion;
+// Called by the download-index reader only. Legacy roots additionally require
+// an exact native filename for this registered platform and track.
+- (void)resolveRegisteredPlatform:(NSString *)platform trackID:(NSString *)trackID
+                        audioFile:(NSURL *)audio coverURL:(nullable NSURL *)coverURL
+                       completion:(void (^)(NSURL * _Nullable jpeg))completion;
 // Separate roots and transport allow offline tests with real files.
 - (instancetype)initWithDirectory:(NSURL *)directory downloads:(NSURL *)downloads
                     configuration:(NSURLSessionConfiguration *)configuration;

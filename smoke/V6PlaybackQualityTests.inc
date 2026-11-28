@@ -1,18 +1,6 @@
 // Actual local media, a genuine Swift String bridge and an authored Published
 // manager. This does not run the original app or claim a physical badge test.
 {
-NSURL *(^makeQualityWave)(void)=^NSURL *{
-    NSURL *file=[NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"FMX-quality-%@.wav",NSUUID.UUID.UUIDString]]];
-    const uint32_t sampleRate=22050, sampleCount=sampleRate*3, audioBytes=sampleCount*2;
-    NSMutableData *wave=NSMutableData.data;
-    void (^u16)(uint16_t)=^(uint16_t n){uint8_t bytes[2]={(uint8_t)n,(uint8_t)(n>>8)};[wave appendBytes:bytes length:2];};
-    void (^u32)(uint32_t)=^(uint32_t n){uint8_t bytes[4]={(uint8_t)n,(uint8_t)(n>>8),(uint8_t)(n>>16),(uint8_t)(n>>24)};[wave appendBytes:bytes length:4];};
-    [wave appendBytes:"RIFF" length:4];u32(36+audioBytes);[wave appendBytes:"WAVEfmt " length:8];
-    u32(16);u16(1);u16(1);u32(sampleRate);u32(sampleRate*2);u16(2);u16(16);[wave appendBytes:"data" length:4];u32(audioBytes);
-    for(uint32_t i=0;i<sampleCount;i++)u16((uint16_t)(int16_t)(500*sin(2*M_PI*220*i/sampleRate)));
-    Check([wave writeToURL:file atomically:YES],@"Write authored PCM media");
-    return file;
-};
 [self test:@"v6_quality_evidence_and_native_display_bridge" body:^NSDictionary *{
     NSDictionary *(*describe)(NSArray *)=dlsym(self.extensionHandle,"FMPlaybackQualityDescribeFormats");
     void (*observe)(id,AVPlayer *,NSString *)=dlsym(self.extensionHandle,"FMPlaybackQualityDisplayObserve");
@@ -48,7 +36,7 @@ NSURL *(^makeQualityWave)(void)=^NSURL *{
         Check([state()[@"selectedQuality"] isEqual:@"flac24bit"] && [state()[@"changes"] unsignedIntegerValue]==1,@"Only display Published property changes, preference remains unchanged");
     });
 
-    NSURL *file=makeQualityWave();
+    NSURL *file=SmokeWriteQualityWave();
     __block AVPlayer *player=nil;
     Main(^{
         player=[AVPlayer playerWithURL:file];
@@ -83,7 +71,7 @@ NSURL *(^makeQualityWave)(void)=^NSURL *{
     void *(*copyState)(const void *)=dlsym(self.swiftUIFixtureHandle,"FMPlaybackQualityFixtureCopyState");
     void *setter=dlsym(self.swiftUIFixtureHandle,"FMPlaybackQualityFixtureSetIndirect");
     Check(observe && configure && hold && pending && releaseOldest && diagnostics && create && copyState && setter,@"Delayed genuine probe fixture exports exist");
-    NSURL *file=makeQualityWave();
+    NSURL *file=SmokeWriteQualityWave();
     __block id manager=nil;__block AVPlayer *player=nil;__block NSUInteger staleBefore=0;
     NSDictionary *(^state)(void)=^NSDictionary *{return CFBridgingRelease(copyState((__bridge const void *)manager));};
     Main(^{
