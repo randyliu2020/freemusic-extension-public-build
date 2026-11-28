@@ -3,6 +3,8 @@
 // functions. Counters are written only by SwiftUI's actual gesture callbacks.
 import SwiftUI
 import UIKit
+import AVFAudio
+import Darwin
 
 private func interactionCount(_ name: String) {
     let key = "smoke.interaction." + name
@@ -88,10 +90,21 @@ private struct InteractionSearchFixture: View {
 // Matches the native top bar and the simultaneous LyricsScroller drag-ended
 // action, sharing the parent presentation/binding dismissal.
 private struct InteractionPlayerSwipeSurface: View {
+    let regularLyrics: Bool
     @Environment(\.presentationMode) private var presentationMode
     @State private var progress = 0.5
     @State private var volume = 0.5
     @State private var selectedLine: Int?
+    @State private var gestureOwner = NSObject()
+
+    private func fromLyricGutter(_ value: DragGesture.Value, ended: Bool) -> Bool {
+        typealias Policy = @convention(c) (UnsafeRawPointer?, UnsafeRawPointer?, UInt32, UInt32) -> UInt32
+        guard let address = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "FMXLyricGutterDismiss") else { return false }
+        let policy = unsafeBitCast(address, to: Policy.self)
+        return withUnsafePointer(to: value) {
+            policy(Unmanaged.passUnretained(gestureOwner).toOpaque(), UnsafeRawPointer($0), ended ? 1 : 0, regularLyrics ? 1 : 0) == 1
+        }
+    }
 
     private func closeIfRequested(_ value: DragGesture.Value) {
         let dx = value.translation.width, dy = value.translation.height
@@ -122,8 +135,9 @@ private struct InteractionPlayerSwipeSurface: View {
             ScrollView {
                 VStack(spacing: 16) {
                     ForEach(0..<30, id: \.self) { index in
-                        Text("Self-authored scrolling lyric \(index)")
+                        Text(index.isMultiple(of: 3) ? "A long self-authored scrolling lyric that wraps across two lines \(index)" : "Lyric \(index)")
                             .frame(maxWidth: .infinity, minHeight: 36)
+                            .padding(.horizontal, regularLyrics ? 32 : 24)
                             .contentShape(Rectangle())
                             .onTapGesture { selectedLine = index }
                             .accessibilityIdentifier("smoke.interaction.scroll-lyric.\(index)")
@@ -131,12 +145,11 @@ private struct InteractionPlayerSwipeSurface: View {
                 }
             }
             .frame(height: 220)
-            .simultaneousGesture(DragGesture(minimumDistance: 8).onEnded { value in
-                let delta = value.translation
-                if delta.height > 144 && delta.height > 2 * abs(delta.width) {
-                    closeIfRequested(value)
-                }
-            })
+            .simultaneousGesture(DragGesture(minimumDistance: 8)
+                .onChanged { value in _ = fromLyricGutter(value, ended: false) }
+                .onEnded { value in
+                    if fromLyricGutter(value, ended: true) { closeIfRequested(value) }
+                })
             .accessibilityIdentifier("smoke.interaction.player-lyrics")
             Slider(value: $progress)
                 .accessibilityIdentifier("smoke.interaction.player-progress")
@@ -157,9 +170,36 @@ private struct InteractionPlayerSwipeSurface: View {
     }
 }
 
+@MainActor
+private final class FixturePlayback: ObservableObject {
+    private var player: AVAudioPlayer?
+    private(set) var startCount = 0
+    var isPlaying: Bool { player?.isPlaying == true }
+
+    func startIfNeeded() {
+        guard !isPlaying else { return }
+        // One second of original silent 8-bit PCM. Keep the actual audio player
+        // above the presentation so a gesture only changes the presented view.
+        var bytes = Data("RIFF".utf8)
+        func word<T: FixedWidthInteger>(_ value: T) {
+            var little = value.littleEndian
+            withUnsafeBytes(of: &little) { bytes.append(contentsOf: $0) }
+        }
+        word(UInt32(8036)); bytes.append(contentsOf: "WAVEfmt ".utf8)
+        word(UInt32(16)); word(UInt16(1)); word(UInt16(1)); word(UInt32(8000))
+        word(UInt32(8000)); word(UInt16(1)); word(UInt16(8))
+        bytes.append(contentsOf: "data".utf8); word(UInt32(8000))
+        bytes.append(Data(repeating: 128, count: 8000))
+        player = try? AVAudioPlayer(data: bytes)
+        player?.numberOfLoops = -1
+        if player?.play() == true { startCount += 1 }
+    }
+}
+
 private struct InteractionPlayerSwipeFixture: View {
     @State private var showPlayer = false
     @State private var closeCount = 0
+    @StateObject private var playback = FixturePlayback()
     var body: some View {
         NavigationStack {
             VStack(spacing: 24) {
@@ -167,12 +207,14 @@ private struct InteractionPlayerSwipeFixture: View {
                 Text("Player binding: \(showPlayer ? "true" : "false")")
                     .accessibilityIdentifier("smoke.interaction.player-binding")
                 Text("Closed: \(closeCount)").accessibilityIdentifier("smoke.interaction.player-close-count")
-                Button("Open player") { showPlayer = true }
+                Text(verbatim: playback.isPlaying ? "Playing; starts=\(playback.startCount)" : "Stopped")
+                    .accessibilityIdentifier("smoke.interaction.audio-state")
+                Button("Open player") { playback.startIfNeeded(); showPlayer = true }
                     .accessibilityIdentifier("smoke.interaction.open-player")
             }
             .navigationTitle("Library fixture")
             .fullScreenCover(isPresented: $showPlayer, onDismiss: { closeCount += 1 }) {
-                InteractionPlayerSwipeSurface()
+                InteractionPlayerSwipeSurface(regularLyrics: !closeCount.isMultiple(of: 2))
             }
         }
     }

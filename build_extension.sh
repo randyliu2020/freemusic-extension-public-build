@@ -70,7 +70,7 @@ for name in ["FMTrackMetadata.m", "FMTrackMetadata.h", "FMJSDownloadCoordinator.
     manifest["source_sha256"][name] = hashlib.sha256((source_dir / name).read_bytes()).hexdigest()
 for name in ["FMSettingsMigration.m", "FMSettingsMigration.h", "FMPlaybackSequence.m", "FMPlaybackSequence.h", "FMArtworkSelection.h", "FMArtworkSelection.m", "FMLXMCLocalStore.h", "FMLXMCLocalStore.m", "FMLXMCLocalProtocol.h", "FMLXMCLocalProtocol.m"]:
     manifest["source_sha256"][name] = hashlib.sha256((source_dir / name).read_bytes()).hexdigest()
-for name in ["FMReplayCache.h", "FMReplayCache.m", "FMReplayMedia.h", "FMReplayMedia.m", "FMPlaylistEditor.h", "FMPlaylistEditor.m", "FMDownloadArtwork.h", "FMDownloadArtwork.m", "FMDownloadArtworkIntegration.h", "FMDownloadArtworkIntegration.m", "FMTrackCover.h", "FMNativeDownloadCoverDisplay.h", "FMNativeDownloadCoverDisplay.m", "FMNativeDownloadCoverModel.swift"]:
+for name in ["FMReplayCache.h", "FMReplayCache.m", "FMReplayMedia.h", "FMReplayMedia.m", "FMPlaylistEditor.h", "FMPlaylistEditor.m", "FMDownloadArtwork.h", "FMDownloadArtwork.m", "FMDownloadArtworkIntegration.h", "FMDownloadArtworkIntegration.m", "FMTrackCover.h", "FMNativeDownloadCoverDisplay.h", "FMNativeDownloadCoverDisplay.m", "FMNativeDownloadCoverModel.swift", "FMLyricGesture.swift"]:
     manifest["source_sha256"][name] = hashlib.sha256((source_dir / name).read_bytes()).hexdigest()
 (output_dir / "build-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 print("DONE " + str(output_dir / "FMExtension.dylib"))

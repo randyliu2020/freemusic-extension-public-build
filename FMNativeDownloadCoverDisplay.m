@@ -31,7 +31,7 @@ static void FMDCIdentify(void) {
        header->ncmds>1024 || header->sizeofcmds>65536)return;
     const uint8_t uuid[]={0x21,0x2e,0x31,0x08,0x9a,0x0c,0x33,0x09,0xbe,0xdc,0x7e,0x99,0x6e,0x81,0x99,0xd1};
     const uint8_t *cursor=(const uint8_t *)(header+1),*end=cursor+header->sizeofcmds;
-    BOOL sameUUID=NO,textRange=NO,dataRange=NO;
+    BOOL sameUUID=NO,textRange=NO,dataRange=NO,metadataRange=NO;
     for(uint32_t i=0;i<header->ncmds;i++){
         if((size_t)(end-cursor)<sizeof(struct load_command))return;
         const struct load_command *cmd=(const void *)cursor;
@@ -41,13 +41,16 @@ static void FMDCIdentify(void) {
         if(cmd->cmd==LC_SEGMENT_64 && cmd->cmdsize>=sizeof(struct segment_command_64)){
             const struct segment_command_64 *seg=(const void *)cmd;
             if(!strncmp(seg->segname,"__TEXT",16))textRange=seg->vmaddr==0x100000000ULL && seg->fileoff==0 && seg->vmsize>=0x4b9200;
+            if(!strncmp(seg->segname,"__DATA_CONST",16))metadataRange=seg->vmaddr==0x10050c000ULL && seg->vmsize>=0x92cc;
             if(!strncmp(seg->segname,"__DATA",16))dataRange=seg->vmaddr==0x10053c000ULL && seg->vmsize>=0x5ecf0;
         }
         cursor+=cmd->cmdsize;
     }
-    if(!sameUUID||!textRange||!dataRange||cursor!=end)return;
+    if(!sameUUID||!textRange||!dataRange||!metadataRange||cursor!=end)return;
     const uint8_t *b=(const void *)header;
     if(!FMDCMatch(b+0x418888,0x50,"3b5f35f043c5a675c46c90dab574b78dd5cfc94fa5e066057c10be7a5237e449") ||
+       !FMDCMatch(b+0x43f4d0,28,"3be7f8dffbdec8f9808b5181b17552ecb540dc88b8fc7909871b52a544b39e1f") ||
+       !FMDCMatch(b+0x515298,52,"66124e698f82ed5d62da7963956d85bdf5285fcb275a6ffe604d9e7232e0f1b4") ||
        !FMDCMatch(b+0x7d518,0x50,"c1dec576cc72e508d2d396b4c2ce646e4130fb9f9d047fc0b48eab00a074bb94") ||
        !FMDCMatch(b+0x8b580,0x28,"5981defa70556eb69abd65e1f73c53d7c0ef9e7f9449db0b822d3e530a3e6f56") ||
        !FMDCMatch(b+0x7f7ec,0x70,"b2929de462ca3f57f8288b29fab95e21f6519be802eb795f08814c0eb814fce8") ||

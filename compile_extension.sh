@@ -33,7 +33,7 @@ done
 xcrun --sdk "$sdk" swiftc -target "$target" -sdk "$sdk_path" \
   -parse-as-library -emit-library -module-name FMExtension \
   -O "${swift_flags[@]}" "${objects[@]}" \
-  "$source_dir/FMAdaptivePlaybackBridge.swift" "$source_dir/FMPlaybackQualityBridge.swift" "$source_dir/FMNativeDownloadCoverModel.swift" \
+  "$source_dir/FMAdaptivePlaybackBridge.swift" "$source_dir/FMPlaybackQualityBridge.swift" "$source_dir/FMNativeDownloadCoverModel.swift" "$source_dir/FMLyricGesture.swift" \
   -Xlinker -install_name -Xlinker '@executable_path/Frameworks/FMExtension.dylib' \
   -Xlinker -current_version -Xlinker 1.5.0 \
   -Xlinker -compatibility_version -Xlinker 1.0.0 \

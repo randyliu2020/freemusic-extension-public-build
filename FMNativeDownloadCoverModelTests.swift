@@ -15,6 +15,20 @@ private final class Library: ObservableObject {
     var unrelated: [Track] = []
     init(_ rows: [Track]) { downloaded = rows }
 }
+private struct ImmutableCover {
+    let server: String
+    let id: String
+    let cover: String?
+}
+private struct NumericCover {
+    let server: String
+    let id: String
+    var cover: Int?
+}
+private final class OtherLayouts {
+    var locked = [ImmutableCover(server: "wy", id: "2", cover: nil)]
+    var numeric = [NumericCover(server: "wy", id: "2", cover: nil)]
+}
 @main struct NativeCoverTests {
     static func main() throws {
         var checks: [String] = []
@@ -71,6 +85,11 @@ private final class Library: ObservableObject {
         check(FMRefreshDownloadCoverModel(model, path, changes, expectedRowType: "Unrelated.Track") == 0 &&
               FMRefreshDownloadCoverModel(Token(), path, changes, expectedRowType: type) == 0,
               "foreign_row_and_owner_types_rejected")
+        let invalid = OtherLayouts()
+        check(FMRefreshDownloadCoverModel(invalid, \OtherLayouts.locked, changes, expectedRowType: String(reflecting: ImmutableCover.self)) == 0 &&
+              FMRefreshDownloadCoverModel(invalid, \OtherLayouts.numeric, changes, expectedRowType: String(reflecting: NumericCover.self)) == 0 &&
+              invalid.locked[0].cover == nil && invalid.numeric[0].cover == nil,
+              "immutable_and_wrong_typed_cover_storage_rejected")
         let result: [String: Any] = ["passed": true, "checks": checks, "evidence": [
             "native_style_published_rows_updated": changed, "batch_notifications": 1,
             "matched_by_platform_and_id": true, "old_file_url_revised": true,

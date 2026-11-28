@@ -135,16 +135,43 @@ final class InteractionUITests: XCTestCase {
         XCTAssertTrue(visible.waitForExistence(timeout: 5))
         firstLine.tap()
         XCTAssertEqual(visible.label, "Selected lyric 0")
-        let lyricStart = lyrics.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15))
-        lyricStart.press(forDuration: 0.05, thenDragTo: lyricStart.withOffset(CGVector(dx: 0, dy: 60)))
-        XCTAssertTrue(visible.exists, "Short lyric scrolling leaves the player open")
-        let lyricMiddle = lyrics.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4))
-        lyricMiddle.press(forDuration: 0.05, thenDragTo: lyricMiddle.withOffset(CGVector(dx: 3, dy: 175)))
-        XCTAssertTrue(open.waitForExistence(timeout: 5))
-        expectation(for: NSPredicate(format: "label == %@", "Closed: 3"),
-                    evaluatedWith: app.staticTexts["smoke.interaction.player-close-count"])
-        waitForExpectations(timeout: 5)
-        XCTAssertEqual(app.staticTexts["smoke.interaction.player-binding"].label, "Player binding: false")
-        record("downward drag from the lyrics returns through the player presentation", app: app)
+        // Start on a short line, then on a wrapped lyric. Large downward text
+        // drags must deliver real scrolling too, including at the top boundary.
+        let short = app.staticTexts["smoke.interaction.scroll-lyric.2"]
+        let shortStart = short.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        shortStart.press(forDuration: 0.05, thenDragTo: shortStart.withOffset(CGVector(dx: 0, dy: 160)))
+        XCTAssertTrue(visible.exists)
+        let wrappedStart = firstLine.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        wrappedStart.press(forDuration: 0.05, thenDragTo: wrappedStart.withOffset(CGVector(dx: 8, dy: 180)))
+        XCTAssertTrue(visible.exists)
+        let middle = lyrics.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.82))
+        middle.press(forDuration: 0.05, thenDragTo: middle.withOffset(CGVector(dx: 0, dy: -155)))
+        XCTAssertFalse(firstLine.isHittable)
+        let above = lyrics.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15))
+        // Scroll back until the first row becomes hittable, proving downward
+        // motion travels to the scroll view instead of just suppressing close.
+        for _ in 0..<8 where !firstLine.isHittable {
+            above.press(forDuration: 0.05, thenDragTo: above.withOffset(CGVector(dx: 0, dy: 175)))
+            XCTAssertTrue(visible.exists)
+        }
+        XCTAssertTrue(firstLine.isHittable)
+
+        for (index, right) in [false, true].enumerated() {
+            let top = lyrics.coordinate(withNormalizedOffset: CGVector(dx: right ? 1 : 0, dy: 0.13))
+            // Second opening uses regular lyrics. 28pt from the right is
+            // inside that style's 32pt gutter, outside the compact 24pt gutter.
+            let side = top.withOffset(CGVector(dx: right ? -28 : 18, dy: 0))
+            side.press(forDuration: 0.05, thenDragTo: side.withOffset(CGVector(dx: 1, dy: 55)))
+            XCTAssertTrue(visible.exists, "A short gutter drag must not dismiss")
+            side.press(forDuration: 0.05, thenDragTo: side.withOffset(CGVector(dx: right ? -24 : 24, dy: 172)))
+            XCTAssertTrue(open.waitForExistence(timeout: 5), "Start in the side gutter, end over the lyrics")
+            let count = app.staticTexts["smoke.interaction.player-close-count"]
+            expectation(for: NSPredicate(format: "label == %@", "Closed: \(3 + index)"), evaluatedWith: count)
+            waitForExpectations(timeout: 5)
+            XCTAssertEqual(app.staticTexts["smoke.interaction.player-binding"].label, "Player binding: false")
+            XCTAssertEqual(app.staticTexts["smoke.interaction.audio-state"].label, "Playing; starts=1")
+            if !right { open.tap(); XCTAssertTrue(visible.waitForExistence(timeout: 5)) }
+        }
+        record("both lyric gutters return to the library with the same audio still playing", app: app)
     }
 }

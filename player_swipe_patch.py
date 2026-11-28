@@ -17,24 +17,35 @@ CAVE = 0x509740  # after the lyric patch's 0x509720..0x509734 allocation
 ORIGINAL_CONDITION = 0x1ABB1C
 NATIVE_DISMISS = 0x1ABB44
 TRANSLATION_GETTER = 0x404DE4
+LYRIC_CHANGE_SITE = 0x1CD614
 LYRIC_END_SITE = 0x1CD628
 LYRIC_END_CAVE = 0x50BE00
+LYRIC_NATIVE_CHANGED = 0x1BD56C
 LYRIC_NATIVE_ENDED = 0x1BD608
 FULL_PLAYER_SEEK = 0x1C6660
 FULL_PLAYER_DRAG = 0x1C6608
 
-# The original LyricsScroller attaches simultaneous DragGesture.onChanged.onEnded.
-# Its thunk passes the original gesture value (x0) and borrowed LyricsScroller (x1).
-# Run its original end action, preserving completion of a normal scroll. Only the
-# FullPlayer onSeek closure holds the validated native FullPlayer value, the same
-# capture layout as the top-bar gesture. Passing its capture and the original
-# DragGesture.Value invokes the ordinary host dismissal, with native ARC ownership.
+# These two callbacks preserve the original scroll bookkeeping. Only the original
+# FullPlayer seek closure identifies a player owner suitable for dismissal. Its
+# native lyric row layout supplies the same style used by the Swift gesture policy.
 LYRIC_END_ASSEMBLY = """
-stp x19, x20, [sp, #-32]!
-stp x21, x30, [sp, #16]
+mov w2, #1
+b common
+changed:
+mov w2, #0
+common:
+stp x19, x20, [sp, #-48]!
+stp x21, x22, [sp, #16]
+str x30, [sp, #32]
 mov x19, x0
 mov x21, x1
+mov w22, w2
+cbz w22, moved
 bl 0x1bd608
+b original_done
+moved:
+bl 0x1bd56c
+original_done:
 ldr x9, [x21, #24]
 adrp x8, 0x1c6000
 add x8, x8, #0x660
@@ -42,25 +53,31 @@ cmp x9, x8
 b.ne finished
 ldr x8, [x21, #32]
 cbz x8, finished
-mov x20, x19
-bl 0x404de4
-mov x8, #0x4062000000000000
-fmov d2, x8
-fcmp d1, d2
-b.le finished
-fabs d2, d0
-fadd d2, d2, d2
-fcmp d1, d2
-b.le finished
+mov x0, #-2
+adr x1, symbol
+bl 0x40821c
+cbz x0, finished
+mov x8, x0
+ldr x0, [x21, #32]
+mov x1, x19
+mov w2, w22
+ldrb w3, [x21, #18]
+blr x8
+cbz w22, finished
+cbz w0, finished
 mov x0, x19
 ldr x20, [x21, #32]
 bl 0x1c6608
 finished:
-ldp x21, x30, [sp, #16]
-ldp x19, x20, [sp], #32
+ldr x30, [sp, #32]
+ldp x21, x22, [sp, #16]
+ldp x19, x20, [sp], #48
 ret
+symbol:
 """
-LYRIC_END_HEX = "f353bea9f57b01a9f30300aaf50301aafec5f297a90e40f9c8e5fff0088119913f0108eb01020054a81240f9c80100b4f40313aaece3fb97480ce8d20201679e2020621e0d01005402c0601e4228621e2020621e8d000054e00313aab41240f9eae9f297f57b41a9f353c2a8c0035fd6"
+LYRIC_POLICY_SYMBOL = b"FMXLyricGutterDismiss\0"
+LYRIC_END_HEX = "220080520200001402008052f353bda9f55b01a9fe1300f9f30300aaf50301aaf603022a76000034f8c5f29702000014cfc5f297a90e40f9c8e5fff0088119913f0108eb41020054a81240f9080200b42000809241020010f1f0fb97800100b4e80300aaa01240f9e10313aae203162aa34a403900013fd6b600003480000034e00313aab41240f9e0e9f297fe1340f9f55b41a9f353c3a8c0035fd6"
+LYRIC_CHANGE_REDIRECT = bytes.fromhex("e21900d042203891")
 LYRIC_END_REDIRECT = bytes.fromhex("e21900d042003891")
 
 # The original onEnded has saved LR and all callee-saved FP registers already.
@@ -102,16 +119,32 @@ CONTEXTS = {
     0x1AA918: "28008052e84a0039e800009008811991e8d601a9",
 }
 
+# Only fingerprints of the additional native layout and drag callback context
+# are distributed. The actual bytes are checked against the owner's local IPA.
+LYRIC_LAYOUT_DIGESTS = {
+    0x1BC380: (16, "9678302bf1e5d7995ca74d828e49c5fdf97142938ad8c1c4912eccb1ff0664e4"),  # local DragGesture
+    0x1BD1D8: (8, "728874b26822ceda7c8baf5121216250232a63707dfe8f2392f5454730bff2da"),  # scroller style
+    0x1BD2CC: (8, "d55abeb56a2e24d24e7c8145ebbf86b21bce0f399741d2b5401fbbaef3d5fe6d"),  # row's style field
+    0x1BE4AC: (12, "6485fc0890f27fc24382cd6641d5d6e2990fda30dd922581e08c2454c2c91d9e"),
+    0x1BE4DC: (16, "130cc9f912ae505edda01c6f29c059894fa56155d420f169d86cb86e9a98f774"),  # 24pt or 32pt
+    0x1BE5B4: (16, "65c3ade73b4aa3ece6165cf94638b1f1eb76e5955f9176e4efbb01b45a948ed1"),  # horizontal edges
+    0x1CD60C: (20, "dce106b63a43a51c07bf0b7767a7cb1335c030b4cc2439d8c65873635fb2818c"),
+    LYRIC_NATIVE_CHANGED: (20, "9dbc66e5c362ed090fd36a7d922e4708da54dbf6debd2743f15c45cd866a17ed"),
+}
+
 
 def patch_plan(original: bytes) -> list[Change]:
     """Plan against the immutable original; parent merges disjoint changes."""
     if len(original) != ORIGINAL_BINARY_SIZE or sha256(original) != ORIGINAL_BINARY_SHA256:
         raise InteractionPatchError("Original FreeMusic 4.2.9 executable SHA256 mismatch")
     trampoline = bytes.fromhex(TRAMPOLINE_HEX)
-    lyric_end = bytes.fromhex(LYRIC_END_HEX)
+    lyric_end = bytes.fromhex(LYRIC_END_HEX) + LYRIC_POLICY_SYMBOL
     # The shared validator checks the complete zero-padding interval, executable
     # __TEXT permissions, no section overlap, and absence of encryption.
     _verify_cave(original, LYRIC_END_CAVE + len(lyric_end) - LYRIC_CAVE)
+    for offset, (length, digest) in LYRIC_LAYOUT_DIGESTS.items():
+        if sha256(original[offset:offset + length]) != digest:
+            raise InteractionPatchError(f"Native lyric layout context mismatch at {offset:#x}")
     for offset, expected_hex in CONTEXTS.items():
         expected = bytes.fromhex(expected_hex)
         if original[offset:offset + len(expected)] != expected:
@@ -124,10 +157,11 @@ def patch_plan(original: bytes) -> list[Change]:
                "extend native top-bar dismissal with left-swipe condition"),
         Change(CAVE, bytes(len(trampoline)), trampoline,
                "left threshold OR unmodified native downward dismissal"),
-        Change(LYRIC_END_SITE, original[LYRIC_END_SITE:LYRIC_END_SITE+8], LYRIC_END_REDIRECT,
-               "extend the existing lyric scroll-ended action"),
+        Change(LYRIC_CHANGE_SITE, original[LYRIC_CHANGE_SITE:LYRIC_END_SITE+8],
+               LYRIC_CHANGE_REDIRECT + original[LYRIC_CHANGE_SITE+8:LYRIC_END_SITE] + LYRIC_END_REDIRECT,
+               "observe the start in the existing lyric scroll, then classify the ended drag"),
         Change(LYRIC_END_CAVE, bytes(len(lyric_end)), lyric_end,
-               "deliberate downward FullPlayer lyric drag invokes its native dismissal"),
+               "downward drag from a verified lyric gutter invokes native FullPlayer dismissal"),
     ]
 
 
@@ -138,7 +172,7 @@ def patch_binary(original: bytes) -> tuple[bytes, dict]:
         "original_sha256": sha256(original), "patched_sha256": sha256(result),
         "version": "FreeMusic 4.2.9 (4381)", "requires_resigning": True,
         "scope": "existing FullPlayer top gestures and FullPlayer-owned lyric scroller",
-        "lyric_down_condition": "dy > 144 and dy > 2 * abs(dx)",
+        "lyric_down_condition": "start in live viewport side padding (24/32 pt), dy > 144, dy > 2 * abs(dx)",
         "left_condition": "dx < -80 and -dx > 1.5 * abs(dy)",
         "original_downward_condition_preserved": True,
         "native_presentation_binding_preserved": True,
