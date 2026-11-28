@@ -56,6 +56,39 @@ static UIDeferredMenuElement *FMPlayerClearAction(void) {
     return element;
 }
 
+static UIMenuElement *FMOriginalItemWithTitle(UIMenuElement *element, NSString *title) {
+    // A copied SwiftUI menu action retains its hosted label, even after its
+    // public title changes. Give UIKit a plain presentation and dispatch the
+    // original action so its selected row or Toggle binding stays intact.
+    if ([element isKindOfClass:UIAction.class]) {
+        UIAction *original = (UIAction *)element;
+        UIAction *item = [UIAction actionWithTitle:title image:original.image identifier:original.identifier
+                                            handler:^(UIAction *sender) {
+            UIControl *control = [sender.sender isKindOfClass:UIControl.class] ? sender.sender : [UIControl new];
+            [control sendAction:original];
+        }];
+        item.state = original.state;
+        item.attributes = original.attributes;
+        item.subtitle = original.subtitle;
+        item.discoverabilityTitle = original.discoverabilityTitle;
+        item.accessibilityLabel = title;
+        return item;
+    }
+    // A selector-based command can use the same responder action and payload.
+    // Preserve a key command's hardware key and modifiers if one is supplied.
+    UICommand *command = (UICommand *)element;
+    UICommand *item = ([command isKindOfClass:UIKeyCommand.class] || command.alternates.count) ? [command copy] :
+        [UICommand commandWithTitle:title image:command.image action:command.action
+                       propertyList:command.propertyList];
+    item.title = title;
+    item.subtitle = command.subtitle;
+    item.discoverabilityTitle = command.discoverabilityTitle;
+    item.attributes = command.attributes;
+    item.state = command.state;
+    item.accessibilityLabel = title;
+    return item;
+}
+
 static NSArray<UIMenuElement *> *FMDecorateChildren(NSArray<UIMenuElement *> *original, BOOL presenting) {
     UIMenuElement *marker = nil;
     NSArray<NSString *> *identity = nil;
@@ -85,11 +118,8 @@ static NSArray<UIMenuElement *> *FMDecorateChildren(NSArray<UIMenuElement *> *or
                 children[i] = [child menuByReplacingChildren:updated];
             }
         } else if (element == marker) {
-            UIMenuElement *clean = [marker copy];
-            if ([clean isKindOfClass:UIAction.class]) ((UIAction *)clean).title = identity[0];
-            else ((UICommand *)clean).title = identity[0];
             if (!children) children = original.mutableCopy;
-            children[i] = clean;
+            children[i] = FMOriginalItemWithTitle(marker, identity[0]);
         }
     }
     if (marker && !installed) {
