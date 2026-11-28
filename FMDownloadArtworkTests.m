@@ -19,9 +19,22 @@ static NSMutableDictionary<NSString *,id> *responses;
     NSData *data; NSInteger status;
     @synchronized (requests) {
         [requests addObject:url];
-        id fixture = responses[url.absoluteString] ?: responses[url.path];
+        // NSURL.path returns a filesystem-style path; on Darwin it drops the
+        // trailing slash. Match the HTTP resource path and both decoded query
+        // values as transmitted, without treating other URLs as this endpoint.
+        id fixture = responses[url.absoluteString];
+        NSURLComponents *wire = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+        if ([wire.scheme isEqual:@"https"] && [wire.host isEqual:@"music.163.com"] &&
+            [wire.percentEncodedPath isEqual:@"/api/song/detail/"] && wire.queryItems.count == 2) {
+            for (NSString *identifier in @[@"14",@"99"]) {
+                NSArray *expected = @[[NSURLQueryItem queryItemWithName:@"id" value:identifier],
+                                      [NSURLQueryItem queryItemWithName:@"ids" value:[NSString stringWithFormat:@"[%@]",identifier]]];
+                if ([wire.queryItems isEqual:expected]) fixture = responses[@"exact-detail"];
+            }
+        }
         data = [fixture isKindOfClass:NSData.class] ? fixture : [NSData data];
         status = fixture ? 200 : 404;
+        if (!fixture) NSLog(@"Unmatched authored request %@, wire path %@, parameters %@", url, wire.percentEncodedPath, wire.queryItems);
     }
     NSHTTPURLResponse *r = [[NSHTTPURLResponse alloc] initWithURL:url statusCode:status HTTPVersion:@"HTTP/1.1" headerFields:@{}];
     [self.client URLProtocol:self didReceiveResponse:r cacheStoragePolicy:NSURLCacheStorageNotAllowed];
@@ -121,16 +134,19 @@ int main(int argc, const char **argv) { @autoreleasepool {
     NSURL *remote = [NSURL URLWithString:image];
     NSURL *netFile = [downloads URLByAppendingPathComponent:@"wy_14.flac"];
     [plain writeToURL:netFile atomically:YES];
-    responses[@"/api/song/detail/"] = [NSJSONSerialization dataWithJSONObject:@{@"songs":@[
+    responses[@"exact-detail"] = [NSJSONSerialization dataWithJSONObject:@{@"songs":@[
         @{@"id":@15,@"al":@{@"picUrl":@"https://p9.music.126.net/wrong-song.jpg"}},
         @{@"id":@14,@"album":@{@"picUrl":@"http://p3.music.126.net/fixture/known.jpg"}}]} options:0 error:nil];
     responses[image] = png;
     __block NSUInteger delivered=0; __block NSURL *resolved;
     for (NSUInteger i=0;i<5;i++) [store resolvePlatform:@"wy" trackID:@"14" audioFile:netFile coverURL:nil completion:^(NSURL *url){resolved=url;delivered++;}];
-    Check(Wait(^BOOL{return delivered==5;}) && [FMDownloadArtwork isUsableJPEGAtURL:resolved],@"coalesced real JPEG from exact album metadata");
+    BOOL completed = Wait(^BOOL{return delivered==5;});
+    if (!completed || !resolved) NSLog(@"Authored network responses: requests %@, callbacks %lu, result %@", requests, (unsigned long)delivered, resolved);
+    Check(completed && [FMDownloadArtwork isUsableJPEGAtURL:resolved],@"coalesced real JPEG from exact album metadata");
     Check(requests.count==2 && [requests.lastObject isEqual:remote],@"only exact song id/image fetched and HTTPS used");
     NSURLComponents *first = [NSURLComponents componentsWithURL:requests.firstObject resolvingAgainstBaseURL:NO];
-    Check([first.queryItems containsObject:[NSURLQueryItem queryItemWithName:@"ids" value:@"[14]"]],@"bounded detail query by ID");
+    Check([first.percentEncodedPath isEqual:@"/api/song/detail/"] && [first.queryItems isEqual:@[
+        [NSURLQueryItem queryItemWithName:@"id" value:@"14"],[NSURLQueryItem queryItemWithName:@"ids" value:@"[14]"]]],@"exact HTTP endpoint and bounded two-parameter detail query by ID");
     Check([Resolve(openStore(),@"wy",@"14",netFile,nil) isEqual:resolved] && requests.count==2,@"offline persisted result");
     NSURL *badFile = [downloads URLByAppendingPathComponent:@"wy_99.flac"];
     [plain writeToURL:badFile atomically:YES];
