@@ -17,6 +17,14 @@ stage="verify_preinstalled_self_authored_host"
 finalize() {
   status=$?
   trap - EXIT
+  if [[ -d "$output_dir/interaction.xcresult" ]]; then
+    xcrun simctl spawn "$device_id" log show --style compact --info --debug --last 30m \
+      --predicate 'eventMessage BEGINSWITH "FMXSongMenu"' > "$output_dir/menu-adapter.log" 2>&1 || true
+    if [[ "$status" != 0 ]]; then
+      xcrun xcresulttool export attachments --path "$output_dir/interaction.xcresult" \
+        --output-path "$output_dir/failure-attachments" --only-failures > "$output_dir/attachments-export.log" 2>&1 || true
+    fi
+  fi
   python3 - "$stage" "$status" "$device_id" <<'PY'
 import json,os,pathlib,sys
 out=pathlib.Path(os.environ['FMX_INTERACTION_UI_OUTPUT'])

@@ -237,14 +237,35 @@ final class InteractionUITests: XCTestCase {
     }
 
     @MainActor
+    private func menuItem(_ title: String, in app: XCUIApplication, openedFrom control: XCUIElement,
+                          file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
+        // Require the actual menu button, not matching text elsewhere on screen.
+        let match = app.buttons.matching(NSPredicate(format: "label == %@", title)).firstMatch
+        guard match.waitForExistence(timeout: 6), match.isHittable else {
+            let state = "Expected visible menu item " + title + ", opened from " + control.debugDescription
+                + "\nAPP TREE\n" + app.debugDescription
+            print(state)
+            let tree = XCTAttachment(string: state)
+            tree.name = "missing-menu-action-view-hierarchy"
+            tree.lifetime = .keepAlways
+            add(tree)
+            record("missing menu entry " + title, app: app)
+            XCTFail("Menu item " + title + " was not actionable", file: file, line: line)
+            return match
+        }
+        return match
+    }
+
+    @MainActor
     func testPlayerMoreFreezesTheTrackAtOpeningAndKeepsTranslationToggle() throws {
         let app = app("song-menu")
         defer { app.terminate() }
         let more = app.buttons["song.menu.player"]
         XCTAssertTrue(more.waitForExistence(timeout: 10))
+        XCTAssertTrue(more.isHittable, more.debugDescription)
+        print("Opening actual menu control " + more.debugDescription)
         more.tap()
-        let clear = app.buttons["清除缓存"].firstMatch
-        XCTAssertTrue(clear.waitForExistence(timeout: 5))
+        let clear = menuItem("清除缓存", in: app, openedFrom: more)
 
         // Synchronize on the application's own read-back of the new public
         // system metadata. Neither process can call the extension action here.
@@ -270,14 +291,12 @@ final class InteractionUITests: XCTestCase {
         wait(for: [first], timeout: 5)
 
         more.tap()
-        XCTAssertTrue(clear.waitForExistence(timeout: 5))
-        clear.tap()
+        menuItem("清除缓存", in: app, openedFrom: more).tap()
         let next = expectation(for: NSPredicate(format: "label == %@", "clear-wy-b"), evaluatedWith: result)
         wait(for: [next], timeout: 5)
 
         more.tap()
-        let translation = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "显示翻译")).firstMatch
-        XCTAssertTrue(translation.waitForExistence(timeout: 5))
+        let translation = menuItem("显示翻译", in: app, openedFrom: more)
         translation.tap()
         let toggle = app.staticTexts["song.menu.translation"]
         let changedToggle = expectation(for: NSPredicate(format: "label == %@", "translation-on"), evaluatedWith: toggle)
@@ -291,21 +310,21 @@ final class InteractionUITests: XCTestCase {
         defer { app.terminate() }
         let more = app.buttons["song.menu.B"]
         XCTAssertTrue(more.waitForExistence(timeout: 10))
+        XCTAssertTrue(more.isHittable, more.debugDescription)
+        print("Opening actual menu control " + more.debugDescription)
         more.tap()
-        let clear = app.buttons["清除缓存"].firstMatch
-        XCTAssertTrue(clear.waitForExistence(timeout: 5))
+        let clear = menuItem("清除缓存", in: app, openedFrom: more)
         clear.tap()
         let status = app.staticTexts["song.clear.result"]
         expectation(for: NSPredicate(format: "label == %@", "clear-qq-B"), evaluatedWith: status)
         waitForExpectations(timeout: 5)
-        app.staticTexts["song.title.A"].press(forDuration: 1)
-        XCTAssertTrue(clear.waitForExistence(timeout: 5))
-        clear.tap()
+        let longPress = app.staticTexts["song.title.A"]
+        longPress.press(forDuration: 1)
+        menuItem("清除缓存", in: app, openedFrom: longPress).tap()
         expectation(for: NSPredicate(format: "label == %@", "clear-wy-A"), evaluatedWith: status)
         waitForExpectations(timeout: 5)
         more.tap()
-        let next = app.buttons["下一首播放"].firstMatch
-        XCTAssertTrue(next.waitForExistence(timeout: 5))
+        let next = menuItem("下一首播放", in: app, openedFrom: more)
         next.tap()
         expectation(for: NSPredicate(format: "label == %@", "queue-B"), evaluatedWith: app.staticTexts["song.queue.result"])
         waitForExpectations(timeout: 5)
