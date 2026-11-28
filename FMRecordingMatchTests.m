@@ -127,6 +127,10 @@ int main(int argc, const char **argv) {
         EncodedSound(oldFile,NO); Registry(index,@[old]);
         Check([[store lookupServer:@"qq" trackID:@"MiD"] isEqual:oldFile], @"registered legacy MusicCache AAC found by native filename alias");
         Check(![store lookupServer:@"qq" trackID:@"mid"], @"case-distinct QQ recording never inherits legacy file");
+        Registry(index,@[old,With(old,@{@"id":@"mid"})]);
+        Check([[store lookupServer:@"qq" trackID:@"MiD"] isEqual:oldFile] &&
+              ![store lookupServer:@"qq" trackID:@"mid"],
+              @"case-distinct registered QQ MIDs cannot share a differently spelled audio file");
         NSURL *unregistered = [legacyAudio URLByAppendingPathComponent:@"qq_absent.wav"]; Sound(unregistered,3);
         Check(![store lookupServer:@"qq" trackID:@"absent"], @"unregistered legacy automatic file cannot act as manual download");
         NSURL *sidecar = [assets URLByAppendingPathComponent:@"qq_MiD_playback.caf"]; EncodedSound(sidecar,YES);

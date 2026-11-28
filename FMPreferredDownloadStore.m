@@ -66,7 +66,7 @@ static BOOL FMReadAudioEnds(NSURL *URL, id declaredSeconds) {
     NSURL *_lastIndex;
     NSArray *_indexStamp, *_registeredRows;
     NSDictionary *_byID, *_byAlias;
-    NSCache *_matches, *_audioChecks;
+    NSCache *_matches, *_audioChecks, *_directoryNames;
     NSMutableDictionary<NSURL *,NSArray *> *_rejected;
     NSUInteger _playbackSelection;
 }
@@ -92,6 +92,7 @@ static BOOL FMReadAudioEnds(NSURL *URL, id declaredSeconds) {
         _assets = [support URLByAppendingPathComponent:@"DownloadAssets" isDirectory:YES];
         _matches = [NSCache new]; _matches.countLimit = 512;
         _audioChecks = [NSCache new]; _audioChecks.countLimit = 512;
+        _directoryNames = [NSCache new]; _directoryNames.countLimit = 8;
         _rejected = [NSMutableDictionary dictionary];
     }
     return self;
@@ -134,9 +135,27 @@ static BOOL FMReadAudioEnds(NSURL *URL, id declaredSeconds) {
     _byAlias = aliases.copy;
 }
 
+// A case-insensitive volume can open an opaque QQ MID using a different
+// spelling. Check the actual directory entry, and let the caller try the
+// explicitly allowed alternate spellings of a 32-digit Kugou hash.
+- (BOOL)hasExactFilename:(NSURL *)file {
+    NSURL *directory = file.URLByDeletingLastPathComponent;
+    struct stat stamp;
+    if (lstat(directory.fileSystemRepresentation,&stamp) || !S_ISDIR(stamp.st_mode)) return NO;
+    NSArray *key = @[directory, FMFileStamp(stamp), @(stamp.st_ctimespec.tv_sec), @(stamp.st_ctimespec.tv_nsec)];
+    NSSet *names = [_directoryNames objectForKey:key];
+    if (!names) {
+        NSArray *entries = [NSFileManager.defaultManager contentsOfDirectoryAtPath:directory.path error:nil];
+        if (!entries) return NO;
+        names = [NSSet setWithArray:entries];
+        [_directoryNames setObject:names forKey:key];
+    }
+    return [names containsObject:file.lastPathComponent];
+}
+
 - (BOOL)validate:(NSURL *)file duration:(id)duration {
     struct stat stamp;
-    if (!FMDARegular(file, &stamp)) return NO;
+    if (!FMDARegular(file, &stamp) || ![self hasExactFilename:file]) return NO;
     NSArray *version = FMFileStamp(stamp);
     if ([_rejected[file] isEqual:version]) return NO;
     [_rejected removeObjectForKey:file];

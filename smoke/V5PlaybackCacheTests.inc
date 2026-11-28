@@ -146,6 +146,8 @@
                 NSData *data = [NSJSONSerialization dataWithJSONObject:[existingRows arrayByAddingObject:row] options:0 error:nil];
                 Check([data writeToURL:registry atomically:YES], @"Install an authored row with a separate song identity");
             };
+            NSString *mixedMID = [@"MiD_" stringByAppendingString:NSUUID.UUID.UUIDString];
+            NSURL *mixedFile = [nativeFolder URLByAppendingPathComponent:[NSString stringWithFormat:@"qq_%@.mp3",mixedMID]];
             @try {
                 writeRow();
                 Check([[@"registered" dataUsingEncoding:NSUTF8StringEncoding] writeToURL:target atomically:YES],
@@ -156,10 +158,24 @@
                 writeRow();
                 Check(clearTrack(nativeServer,song,&removed) && removed==1 && ![files fileExistsAtPath:target.path],
                       @"A conflicting registration platform does not claim unrelated automatic media");
+                row[@"server"] = @"qq"; row[@"id"] = mixedMID;
+                [row removeObjectForKey:@"song_id"];
+                writeRow();
+                Check([automaticBytes writeToURL:mixedFile atomically:YES], @"Prepare a registered QQ file with an opaque mixed-case ID");
+                Check(clearTrack(@"qq",mixedMID.lowercaseString,&removed) && removed==0 &&
+                      [[NSData dataWithContentsOfURL:mixedFile] isEqualToData:automaticBytes],
+                      @"Clearing a QQ MID cannot unlink a different registered MID via case-insensitive filesystem lookup");
+                row[@"id"] = NSUUID.UUID.UUIDString;
+                writeRow();
+                Check(clearTrack(@"qq",mixedMID.lowercaseString,&removed) && removed==0 &&
+                      [files fileExistsAtPath:mixedFile.path], @"The differently spelled automatic QQ file is also isolated");
+                Check(clearTrack(@"qq",mixedMID,&removed) && removed==1 && ![files fileExistsAtPath:mixedFile.path],
+                      @"The exact unregistered QQ cache remains clearable");
             } @finally {
                 if (hadRegistry) [original writeToURL:registry atomically:YES];
                 else [files removeItemAtURL:registry error:nil];
                 [files removeItemAtURL:target error:nil];
+                [files removeItemAtURL:mixedFile error:nil];
             }
             void (*deferRetry)(NSString *,NSString *) = dlsym(self.extensionHandle,"FMPlaybackCacheDeferDownloadRetry");
             void (*beginRetry)(void) = dlsym(self.extensionHandle,"FMPlaybackCacheBeginSelection");

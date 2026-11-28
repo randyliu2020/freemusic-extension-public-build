@@ -265,6 +265,14 @@ static NSArray *FMNativeFileStamp(struct stat stat) {
     return @[@(stat.st_dev), @(stat.st_ino), @(stat.st_size), @(stat.st_mtimespec.tv_sec), @(stat.st_mtimespec.tv_nsec)];
 }
 
+// On a case-insensitive volume, lstat/unlink of a constructed QQ MID may
+// resolve to another opaque MID. Compare with real directory entry names.
+static NSSet<NSString *> *FMNativeCacheNames(NSURL *directory) {
+    if (!FMDADirectory(directory)) return nil;
+    NSArray *entries = [NSFileManager.defaultManager contentsOfDirectoryAtPath:directory.path error:nil];
+    return entries ? [NSSet setWithArray:entries] : nil;
+}
+
 static void FMPersistDeferred(void) {
     NSMutableDictionary *files=[NSMutableDictionary dictionary];
     for (NSString *path in FMCacheDeferredFiles) files[path.lastPathComponent]=FMCacheDeferredFiles[path];
@@ -276,11 +284,12 @@ static void FMCleanPreviousPlaybackFiles(void) {
     if (!saved.count) return;
     NSURL *caches=[NSFileManager.defaultManager URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask].firstObject;
     NSURL *dir=[caches URLByAppendingPathComponent:@"MusicCache" isDirectory:YES];
-    if (!FMDADirectory(dir)) return;
+    NSSet *actualNames=FMNativeCacheNames(dir);
+    if (!actualNames) return;
     @synchronized(FMCacheLock) {
         for (id name in saved) {
             if (![name isKindOfClass:NSString.class] || ![[name pathExtension] isEqual:@"mp3"] ||
-                ![[name lastPathComponent] isEqual:name]) continue;
+                ![[name lastPathComponent] isEqual:name] || ![actualNames containsObject:name]) continue;
             NSString *base=FMCanonicalCacheName([name stringByDeletingPathExtension]);
             if (!base) continue;
             NSURL *url=[dir URLByAppendingPathComponent:name];
@@ -303,8 +312,10 @@ static void FMCleanPreviousPlaybackFiles(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         struct stat current;
         BOOL retry=NO;
-        if (FMDADirectory(url.URLByDeletingLastPathComponent) && FMDARegular(url,&current) &&
-            [stamp isEqual:FMNativeFileStamp(current)] && FMNativeRegistration(base)==FMNativeFileUnregistered)
+        NSSet *actualNames=FMNativeCacheNames(url.URLByDeletingLastPathComponent);
+        if (!actualNames) retry=YES;
+        else if ([actualNames containsObject:url.lastPathComponent] && FMDARegular(url,&current) &&
+                 [stamp isEqual:FMNativeFileStamp(current)] && FMNativeRegistration(base)==FMNativeFileUnregistered)
             retry=unlink(url.fileSystemRepresentation) && errno!=ENOENT;
         @synchronized(FMCacheLock) {
             if (!retry && [FMCacheDeferredFiles[url.path] isEqual:stamp]) {
@@ -342,9 +353,13 @@ BOOL FMPlaybackCacheClearTrack(NSString *server, NSString *trackID, NSUInteger *
     if (lstat(dir.fileSystemRepresentation,&root)) return errno==ENOENT;
     if (!S_ISDIR(root.st_mode)) return NO;
     FMNativeFileOwner registration=FMNativeRegistration(base);
+    NSSet *actualNames=FMNativeCacheNames(dir);
+    if (!actualNames) return NO;
     BOOL success=YES;
     for (NSString *name in names) {
-        NSURL *file=[dir URLByAppendingPathComponent:[name stringByAppendingPathExtension:@"mp3"]];
+        NSString *filename=[name stringByAppendingPathExtension:@"mp3"];
+        if (![actualNames containsObject:filename]) continue;
+        NSURL *file=[dir URLByAppendingPathComponent:filename];
         struct stat st;
         if (lstat(file.fileSystemRepresentation,&st)) {
             if (errno!=ENOENT) success=NO;
