@@ -24,7 +24,7 @@ private final class LyricViewport {
 
     func isBlankBesideText(at point: CGPoint) -> Bool? {
         guard let scroll, visible.contains(point), scroll.bounds.contains(point),
-              scroll.convert(scroll.bounds, to: nil).equalTo(frameInWindow) else { return nil }
+              scroll.convert(scroll.bounds, to: nil) == frameInWindow else { return nil }
         // SwiftUI may emit separate layouts for the individual karaoke words.
         // Gaps between those words belong to the same visual line.
         var row = CGRect.null
@@ -32,7 +32,11 @@ private final class LyricViewport {
             row = row.union(rect)
         }
         guard !row.isNull else { return nil }
-        return point.x < row.minX - 10 || point.x > row.maxX + 10
+        if point.x >= row.minX && point.x <= row.maxX { return false }
+        // Allow the native 24/32-point gutter to decide near an uncertain
+        // typographic edge; interior touches there continue to scroll.
+        if point.x > row.minX - 10 && point.x < row.maxX + 10 { return nil }
+        return true
     }
 }
 
@@ -42,13 +46,18 @@ private final class LyricGeometryView: UIView, UIGestureRecognizerDelegate {
     private var rectangles: [CGRect] = []
     private var measuredSize = CGSize.zero
     private var viewports: [LyricViewport] = []
-    private weak var sampledScroll: UIScrollView?
-    private var sampledOrigin = CGPoint.zero
-    private var sampledSide: Bool?
+    private struct Sample {
+        weak var scroll: UIScrollView?
+        let origin: CGPoint
+        let side: Bool
+    }
+    private var samples: [Sample] = []
     private var measuredBounds = CGRect.null
     private var recognizer: UITapGestureRecognizer?
 
     func update(rectangles: [CGRect], size: CGSize) {
+        guard rectangles != self.rectangles || size != measuredSize
+                || measuredBounds != bounds || !viewports.contains(where: { $0.scroll?.window != nil }) else { return }
         self.rectangles = rectangles
         measuredSize = size
         measure()
@@ -59,8 +68,7 @@ private final class LyricGeometryView: UIView, UIGestureRecognizerDelegate {
         if let recognizer { recognizer.view?.removeGestureRecognizer(recognizer) }
         recognizer = nil
         Self.probes.remove(self)
-        sampledScroll = nil
-        sampledSide = nil
+        samples.removeAll()
         viewports.removeAll()
         guard let window else { return }
         Self.probes.add(self)
@@ -101,32 +109,31 @@ private final class LyricGeometryView: UIView, UIGestureRecognizerDelegate {
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        sampledScroll = nil
-        sampledSide = nil
+        samples.removeAll()
         guard window != nil, bounds.contains(touch.location(in: self)) else { return false }
-        var ancestor = touch.view
-        while let view = ancestor {
-            if let scroll = view as? UIScrollView,
-               let viewport = viewports.first(where: { $0.scroll === scroll }) {
-                let point = touch.location(in: scroll)
-                sampledScroll = scroll
-                sampledOrigin = CGPoint(x: point.x - scroll.bounds.minX, y: point.y - scroll.bounds.minY)
-                sampledSide = viewport.isBlankBesideText(at: point)
-                break
+        // A SwiftUI hosting view can be the UIKit hit target for sibling
+        // subtrees. The native drag will identify the actual scrolling view.
+        for viewport in viewports {
+            guard let scroll = viewport.scroll, scroll.window === window else { continue }
+            let point = touch.location(in: scroll)
+            if let side = viewport.isBlankBesideText(at: point) {
+                let origin = CGPoint(x: point.x - scroll.bounds.minX, y: point.y - scroll.bounds.minY)
+                samples.append(Sample(scroll: scroll, origin: origin, side: side))
             }
-            ancestor = view.superview
         }
         return false
     }
 
     static func sample(in scroll: UIScrollView, origin: CGPoint) -> (LyricGeometryView, Bool)? {
-        let matches = probes.allObjects.filter {
-            $0.window === scroll.window && $0.sampledScroll === scroll
-                && abs($0.sampledOrigin.x - origin.x) <= 5 && abs($0.sampledOrigin.y - origin.y) <= 8
-                && $0.sampledSide != nil
+        var result: (LyricGeometryView, Bool)?
+        for probe in probes.allObjects where probe.window === scroll.window {
+            guard let sample = probe.samples.first(where: {
+                $0.scroll === scroll && abs($0.origin.x - origin.x) <= 5 && abs($0.origin.y - origin.y) <= 8
+            }) else { continue }
+            guard result == nil else { return nil }
+            result = (probe, sample.side)
         }
-        guard matches.count == 1, let probe = matches.first, let side = probe.sampledSide else { return nil }
-        return (probe, side)
+        return result
     }
 }
 
@@ -164,6 +171,7 @@ public func attachLyricTextLayout(_ storage: UnsafeMutableRawPointer?) {
                 }
             }
             LyricLayoutObserver(rectangles: lines, size: proxy.size)
+                .frame(width: proxy.size.width, height: proxy.size.height)
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
@@ -180,7 +188,7 @@ private final class LyricDragOrigin {
     private weak var scroll: UIScrollView?
     private var owner: UnsafeRawPointer?
     private var start = CGPoint.zero
-    private var width: CGFloat = 0
+    private var viewportAtStart = CGRect.null
     private var inset: CGFloat = 0
     private weak var probe: LyricGeometryView?
     private var blankBesideLine: Bool?
@@ -226,7 +234,7 @@ private final class LyricDragOrigin {
         if !ended {
             if scroll == nil, let target = matchingScroll(at: drag.location) {
                 scroll = target
-                width = target.bounds.width
+                viewportAtStart = target.convert(target.bounds, to: nil)
                 if let (observer, isBlank) = LyricGeometryView.sample(in: target, origin: origin) {
                     probe = observer
                     blankBesideLine = isBlank
@@ -235,7 +243,8 @@ private final class LyricDragOrigin {
             return false
         }
         defer { owner = nil; scroll = nil; probe = nil; blankBesideLine = nil }
-        guard let target = scroll, target.window != nil, width == target.bounds.width,
+        let width = viewportAtStart.width
+        guard let target = scroll, target.window != nil, target.convert(target.bounds, to: nil) == viewportAtStart,
               width > 2 * padding, origin.x >= 0, origin.x <= width,
               origin.y >= 0, origin.y <= target.bounds.height else { return false }
         let delta = drag.translation
