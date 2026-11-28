@@ -793,8 +793,14 @@ static NSDictionary *SmokeLocalPlaylistRoutes(
     Check(Until(^BOOL{stable=[manager.playbackStatus isEqual:expectedStatus]?stable+1:0;return stable>=4;},3),@"Successful JS parsing remains reported as returned URL after protocol cleanup");
     __block NSArray<NSString *> *statuses;__block NSString *status;
     Main(^{statuses=observedStatuses.copy;status=manager.playbackStatus;});
-    Check([statuses containsObject:[label stringByAppendingString:@"：正在从最高支持音质查找歌曲"]],@"Actual handler invocation reports lookup independently of source");
-    if(cached)Check(![statuses containsObject:[label stringByAppendingString:@"：正在尝试 JS 音质 128k"]],@"Cached playback avoids executing musicUrl again");
+    NSUInteger lookup = [statuses indexOfObject:[label stringByAppendingString:@"：正在检查本地下载和播放缓存"]];
+    NSUInteger result = [statuses indexOfObject:expectedStatus];
+    Check(lookup != NSNotFound && result != NSNotFound && lookup < result,
+          @"Playback reports the local lookup before its final source");
+    NSString *attempt = [label stringByAppendingString:@"：正在尝试 JS 音质 "];
+    BOOL reportedJS = NO;
+    for (NSString *entry in statuses) if ([entry hasPrefix:attempt]) reportedJS = YES;
+    Check(reportedJS == !cached, @"Only a real resolver attempt reports trying a JS quality");
     Check([statuses containsObject:expectedStatus],@"Actual returned URL produces a platform-specific result state");
     for(NSString *entry in statuses) for(NSString *privateValue in @[identifier,expected,@"fixture.invalid",@"http://",@"https://",@"FIXTURE_NOT_FOR_SCRIPT"])
         Check(![entry containsString:privateValue],@"Playback diagnostics must not disclose fixture identifiers, URLs, or credentials");
