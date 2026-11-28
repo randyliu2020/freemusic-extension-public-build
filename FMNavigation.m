@@ -80,6 +80,9 @@ static void FMNVisit(UIViewController *controller,NSUInteger depth) {
                 if (FMNRole(tabs.selectedTab.title, @"library"))
                     FMNAttachLibraryEditor(tabs.selectedViewController, 0);
             }
+        } else if (FMNRole(tabs.selectedViewController.tabBarItem.title, @"library")) {
+            // Older systems expose the selected tab through its UITabBarItem.
+            FMNAttachLibraryEditor(tabs.selectedViewController, 0);
         }
     }
     for(UIViewController *child in controller.childViewControllers)FMNVisit(child,depth+1);

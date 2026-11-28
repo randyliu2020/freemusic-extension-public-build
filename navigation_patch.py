@@ -1,9 +1,10 @@
-"""Three local, version-locked FreeMusic 4.2.9 navigation changes.
+"""Version-locked FreeMusic 4.2.9 navigation changes.
 
 Apply after load-command/signature rewriting, using the separately verified
 original executable as provenance. No Swift functions are called from foreign
 code. The original initializer only changes its Tab value from home(0) to
 library(2); two existing optional-view branches select their existing nil path.
+The existing native Downloads row becomes the first child of the Library List.
 """
 from __future__ import annotations
 import argparse
@@ -11,6 +12,7 @@ import hashlib
 import json
 from pathlib import Path
 import struct
+import download_order_patch
 
 ORIGINAL_SHA256 = "59bb22eb6fb7a62bf574e8b42c9a16f1b3774368bda484a41ce9bea4b8af992f"
 ORIGINAL_SIZE = 6160080
@@ -78,7 +80,9 @@ def patch_binary(current: bytes, original: bytes) -> tuple[bytes, dict]:
             raise NavigationPatchError(f"Navigation instruction context changed at {offset:#x}")
     result = bytearray(current)
     changes = []
-    for offset, (old, new, purpose) in PATCHES.items():
+    plan = [(offset, *entry) for offset, entry in PATCHES.items()]
+    plan.extend(download_order_patch.changes(current))
+    for offset, old, new, purpose in plan:
         if current[offset:offset+len(old)] != old:
             raise NavigationPatchError(f"Navigation patch location is occupied at {offset:#x}")
         result[offset:offset+len(new)] = new
@@ -91,6 +95,7 @@ def patch_binary(current: bytes, original: bytes) -> tuple[bytes, dict]:
         "initial_tab":"library", "profile_sections":"native optional nil branches",
         "reserved_header_range":[STUB_OFFSET,STUB_END], "changes":changes,
         "startup_destination":"library_root", "favorites_navigation":"manual",
+        "library_first_row":"native_local_downloads", "library_second_row":"native_recent_plays",
         "discover_visibility":"handled by public UITab placement filters, model order retained",
     }
 

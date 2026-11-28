@@ -260,7 +260,9 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
     if ([[NSFileManager defaultManager] removeItemAtURL:[manager.directory URLByAppendingPathComponent:name] error:&error]) {
         BOOL retired=[manager.selectedFile isEqual:name] || [manager.loadingFile isEqual:name];
         if (retired) [manager retireRuntime];
-        if ([[NSUserDefaults.standardUserDefaults stringForKey:FMXSelected] isEqual:name]) {
+        BOOL removedSavedChoice=[[NSUserDefaults.standardUserDefaults stringForKey:FMXSelected] isEqual:name];
+        if (retired || (removedSavedChoice && !manager.runtime)) [[FMReplayCache sharedCache] selectSourceFile:nil script:nil];
+        if (removedSavedChoice) {
             [NSUserDefaults.standardUserDefaults removeObjectForKey:FMXSelected];
             if (!manager.runtime) [NSUserDefaults.standardUserDefaults removeObjectForKey:FMXActivationPending];
             [NSUserDefaults.standardUserDefaults synchronize];
