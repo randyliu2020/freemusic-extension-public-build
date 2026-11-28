@@ -85,13 +85,13 @@ private struct InteractionSearchFixture: View {
     }
 }
 
-// This reproduces the inspected native gesture topology: an onEnded attached
-// only to the top bar, and PresentationMode.dismiss writing the parent cover's
-// binding. It does not pretend to execute the original compiled application.
+// Matches the native top bar and the simultaneous LyricsScroller drag-ended
+// action, sharing the parent presentation/binding dismissal.
 private struct InteractionPlayerSwipeSurface: View {
     @Environment(\.presentationMode) private var presentationMode
     @State private var progress = 0.5
     @State private var volume = 0.5
+    @State private var selectedLine: Int?
 
     private func closeIfRequested(_ value: DragGesture.Value) {
         let dx = value.translation.width, dy = value.translation.height
@@ -117,17 +117,26 @@ private struct InteractionPlayerSwipeSurface: View {
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("smoke.interaction.player-topbar")
 
-            Text("Playback surface").accessibilityIdentifier("smoke.interaction.player-visible")
+            Text(selectedLine.map { "Selected lyric \($0)" } ?? "Playback surface")
+                .accessibilityIdentifier("smoke.interaction.player-visible")
             ScrollView {
                 VStack(spacing: 16) {
                     ForEach(0..<30, id: \.self) { index in
                         Text("Self-authored scrolling lyric \(index)")
                             .frame(maxWidth: .infinity, minHeight: 36)
+                            .contentShape(Rectangle())
+                            .onTapGesture { selectedLine = index }
                             .accessibilityIdentifier("smoke.interaction.scroll-lyric.\(index)")
                     }
                 }
             }
             .frame(height: 220)
+            .simultaneousGesture(DragGesture(minimumDistance: 8).onEnded { value in
+                let delta = value.translation
+                if delta.height > 144 && delta.height > 2 * abs(delta.width) {
+                    closeIfRequested(value)
+                }
+            })
             .accessibilityIdentifier("smoke.interaction.player-lyrics")
             Slider(value: $progress)
                 .accessibilityIdentifier("smoke.interaction.player-progress")

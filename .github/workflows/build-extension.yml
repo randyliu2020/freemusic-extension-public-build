@@ -77,6 +77,18 @@ jobs:
             LXSourceRuntime.m FMQualityResolver.m LXQualityRuntimeTests.m -o quality-runtime-tests
           ./quality-runtime-tests LXBootstrap.js
 
+      - name: Test replay cache, native audio reuse and playlist editing
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p v9-validation
+          xcrun clang -fobjc-arc -fblocks -framework Foundation FMReplayCache.m FMReplayCacheTests.m -o replay-cache-tests
+          ./replay-cache-tests v9-validation/replay-cache-tests.json
+          xcrun clang -fobjc-arc -fblocks -DFMX_REPLAY_MEDIA_TESTING=1 -framework Foundation -framework AVFoundation -framework AudioToolbox -framework CoreMedia FMReplayCache.m FMQualityResolver.m FMJSDownloadCoordinator.m FMReplayMedia.m FMReplayMediaTests.m -o replay-media-tests
+          ./replay-media-tests v9-validation/replay-media-tests.json
+          xcrun clang -fobjc-arc -fblocks -framework Foundation FMLXMC.m FMLXMCLocalStore.m FMPlaylistEditTests.m -lz -o playlist-edit-tests
+          ./playlist-edit-tests v9-validation/playlist-edit-tests.json
+
       - name: Test request interception on macOS
         shell: bash
         run: |
@@ -196,6 +208,11 @@ jobs:
         if: always()
         shell: bash
         run: python3 record_v8_validation.py v8-validation smoke-artifact
+
+      - name: Collect replay and playlist test results
+        if: success()
+        shell: bash
+        run: cp v9-validation/{replay-cache,replay-media,playlist-edit}-tests.json smoke-artifact/
 
       - name: Upload simulator validation evidence
         if: always()

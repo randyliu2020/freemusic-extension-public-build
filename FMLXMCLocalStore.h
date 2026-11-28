@@ -16,6 +16,15 @@ FOUNDATION_EXPORT NSNotificationName const FMLXMCLocalImportDidFinish;
 /// Returns nil only for an unrelated request. All owned failures remain local.
 - (nullable NSDictionary *)responseForAction:(NSString *)action parameters:(NSDictionary<NSString *,NSString *> *)parameters importRequest:(nullable NSURLRequest *)request;
 - (NSDictionary *)mergePlaylistList:(nullable NSDictionary *)response;
+/// Library editor works on ordinary native responses. A cloud override is
+/// applied only to its original account/list identity on this device.
+- (NSArray<NSDictionary *> *)editorPlaylists;
+- (nullable NSArray<NSDictionary *> *)editorTracks:(NSString *)playlistKey;
+- (BOOL)renameEditorPlaylist:(NSString *)key title:(NSString *)title error:(NSError **)error;
+- (BOOL)saveEditorListOrder:(NSArray<NSString *> *)keys error:(NSError **)error;
+- (BOOL)saveEditorTracks:(NSArray<NSString *> *)desired replacing:(NSArray<NSString *> *)observed
+                 playlist:(NSString *)key error:(NSError **)error;
+- (NSDictionary *)mergeTracks:(NSDictionary *)response playlistID:(NSString *)identifier;
 - (BOOL)ownsPlaylistID:(nullable NSString *)identifier;
 - (BOOL)ownsRecordID:(nullable NSString *)identifier;
 - (NSDictionary *)diagnostics;

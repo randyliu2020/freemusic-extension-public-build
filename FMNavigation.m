@@ -1,4 +1,5 @@
 #import "FMNavigation.h"
+#import "FMPlaylistEditor.h"
 #import <objc/runtime.h>
 
 static IMP FMNOriginalSetTabs;
@@ -57,12 +58,29 @@ BOOL FMNavigationConfigureTabController(UITabBarController *controller) {
     } @finally { objc_setAssociatedObject(controller,&FMNApplyingKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
     return NO;
 }
+static void FMNAttachLibraryEditor(UIViewController *controller, NSUInteger depth) {
+    if (!controller || depth > 12 || !controller.viewIfLoaded.window || controller.presentedViewController) return;
+    if ([controller isKindOfClass:UINavigationController.class]) {
+        UINavigationController *navigation = (UINavigationController *)controller;
+        UIViewController *root = navigation.viewControllers.firstObject;
+        if (root && root == navigation.topViewController && FMNRole(root.navigationItem.title, @"library"))
+            FMPlaylistEditorAttach(root);
+        return;
+    }
+    for (UIViewController *child in controller.childViewControllers) FMNAttachLibraryEditor(child, depth + 1);
+}
 static void FMNVisit(UIViewController *controller,NSUInteger depth) {
     if(!controller || depth>12)return;
     if(controller.presentedViewController) { FMNVisit(controller.presentedViewController,depth+1);return; }
     if([controller isKindOfClass:UITabBarController.class]) {
         UITabBarController *tabs=(UITabBarController *)controller;
-        if(FMNavigationConfigureTabController(tabs))FMNRecognizedControllers++;
+        if (FMNavigationConfigureTabController(tabs)) {
+            FMNRecognizedControllers++;
+            if (@available(iOS 18.0, *)) {
+                if (FMNRole(tabs.selectedTab.title, @"library"))
+                    FMNAttachLibraryEditor(tabs.selectedViewController, 0);
+            }
+        }
     }
     for(UIViewController *child in controller.childViewControllers)FMNVisit(child,depth+1);
 }

@@ -571,8 +571,17 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
         @"isolated_worker_observed":@(pendingWorker!=nil),@"worker_resources_before":workerBefore ?: @{},@"worker_resources_after":workerAfter ?: @{},@"production_update_alert_forwarding_added":@NO};
 }
 - (NSDictionary *)parseServer:(NSString *)server {
+    NSString *unique=[NSUUID.UUID.UUIDString stringByReplacingOccurrencesOfString:@"-" withString:@""];
+    NSString *identifier=[server isEqual:@"kg"] ? unique : [@"fixture-" stringByAppendingString:unique];
+    NSDictionary *fresh=[self parseServer:server identifier:identifier expectCached:NO];
+    NSDictionary *replay=[self parseServer:server identifier:identifier expectCached:YES];
+    Check([fresh[@"url"] isEqual:replay[@"url"]],@"A second production playback request returns the same cached URL");
+    NSMutableDictionary *report=[fresh mutableCopy];
+    report[@"second_request_cached_address"]=@YES;
+    return report;
+}
+- (NSDictionary *)parseServer:(NSString *)server identifier:(NSString *)identifier expectCached:(BOOL)cached {
     BOOL kugou=[server isEqual:@"kg"];
-    NSString *identifier=kugou ? @"0123456789ABCDEF0123456789ABCDEF" : [@"fixture-" stringByAppendingString:server];
     NSString *endpoint=kugou ? [@"https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=" stringByAppendingString:identifier] : @"https://aacert.com/ms/api.php?action=parse&_t=1";
     NSMutableURLRequest *request=[NSMutableURLRequest requestWithURL:[NSURL URLWithString:endpoint]];
     request.HTTPMethod=kugou ? @"GET" : @"POST";
@@ -609,12 +618,13 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
     NSString *actual=kugou ? payload[@"url"] : payload[@"data"][@"url"];
     Check([actual isEqual:expected],@"LX source/id/quality mapping");
     NSString *label=@{@"wy":@"网易云",@"qq":@"QQ",@"kg":@"酷狗"}[server];
-    NSString *expectedStatus=[label stringByAppendingString:@"：JS 已返回播放地址，实际音质将在播放后确认"];
+    NSString *expectedStatus=[label stringByAppendingString:cached ? @"：已复用当前音源的播放地址" : @"：JS 已返回播放地址，实际音质将在播放后确认"];
     __block NSUInteger stable=0;
     Check(Until(^BOOL{stable=[manager.playbackStatus isEqual:expectedStatus]?stable+1:0;return stable>=4;},3),@"Successful JS parsing remains reported as returned URL after protocol cleanup");
     __block NSArray<NSString *> *statuses;__block NSString *status;
     Main(^{statuses=observedStatuses.copy;status=manager.playbackStatus;});
-    Check([statuses containsObject:[label stringByAppendingString:@"：正在通过 JS 从最高支持音质解析"]],@"Actual handler invocation produces the parsing state");
+    Check([statuses containsObject:[label stringByAppendingString:@"：正在从最高支持音质查找歌曲"]],@"Actual handler invocation reports lookup independently of source");
+    if(cached)Check(![statuses containsObject:[label stringByAppendingString:@"：正在尝试 JS 音质 128k"]],@"Cached playback avoids executing musicUrl again");
     Check([statuses containsObject:expectedStatus],@"Actual returned URL produces a platform-specific result state");
     for(NSString *entry in statuses) for(NSString *privateValue in @[identifier,expected,@"fixture.invalid",@"http://",@"https://",@"FIXTURE_NOT_FOR_SCRIPT"])
         Check(![entry containsString:privateValue],@"Playback diagnostics must not disclose fixture identifiers, URLs, or credentials");

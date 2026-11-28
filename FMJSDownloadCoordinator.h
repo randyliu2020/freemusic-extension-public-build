@@ -19,6 +19,11 @@ typedef void (^FMJSDownloadCompletion)(NSURL * _Nullable fileURL,
     NSHTTPURLResponse * _Nullable response, NSString * _Nullable requestedQuality,
     NSError * _Nullable error);
 
+/// Decode a completed replay transfer through EOF. Called on a utility queue.
+/// The verified file is available only during the synchronous completion block.
+FOUNDATION_EXPORT dispatch_block_t FMJSValidateReplayAudio(NSURL *file, NSHTTPURLResponse *response,
+    void (^completion)(NSURL * _Nullable verifiedFile, NSString * _Nullable fileExtension));
+
 /// One explicit manual-download operation. Never intercepts unrelated NSURLSession
 /// tasks. The resolver must be NEW and exclusively owned by this download; do not
 /// reuse a playback resolver or an unrelated download's state based on URL equality.

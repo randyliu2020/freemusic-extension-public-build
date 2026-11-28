@@ -53,6 +53,7 @@
         observeMetadata(@{@"server":@"qq",@"id":@"highest",@"title":@"Fixture",@"singer":@"Authored",@"album":@"Fixture Album",@"albumId":@42,@"albumMid":@"fixture-album-mid",@"strMediaMid":@"fixture-media-mid",@"songId":@123,@"duration":@125,@"types":@[@{@"type":@"flac",@"size":@123456,@"ext":@"flac",@"auth":@"PRIVATE_FIXTURE_QUALITY"}],@"src_cookie":@"PRIVATE_FIXTURE_CACHED_COOKIE",@"src_api":@"PRIVATE_FIXTURE_CACHED_API"});
         __block LXSourceRuntime *runtime; Main(^{runtime=manager.runtime;});
         NSMutableArray *results=NSMutableArray.array;
+        NSMutableURLRequest *replayRequest = nil;
         for(NSString *identifier in @[@"highest",@"down",@"all-fail",@"audit"]) {
             NSMutableURLRequest *request=[NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://aacert.com/ms/api.php?action=parse&_t=6"] cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:6];
             request.HTTPMethod=@"POST";
@@ -62,6 +63,7 @@
             NSString *body=[NSString stringWithFormat:@"server=qq&id=%@&level=hires&qmc=1&title=Fixture&singer=Authored&src_cookie=PRIVATE_FIXTURE_SOURCE_COOKIE&src_api=PRIVATE_FIXTURE_API&key=PRIVATE_FIXTURE_KEY",identifier];
             request.HTTPBody=[body dataUsingEncoding:NSUTF8StringEncoding];
             Check([NSClassFromString(@"FMExtensionProtocol") canInitWithRequest:request],@"qmc-marked original parse request enters the production handler");
+            if ([identifier isEqual:@"highest"]) replayRequest = [request mutableCopy];
             NSDictionary *payload=FetchSearchFixture(request);
             if([identifier isEqual:@"all-fail"]) {
                 Check([payload[@"code"] integerValue]==502 && !payload[@"data"][@"url"],@"All qualities fail explicitly without returning a native preview URL");
@@ -89,7 +91,29 @@
         Check([attempts isEqual:expectedAttempts] && requests.count==9,@"Actual JS HTTP attempts prove highest-first order, one attempt per quality, complete exhaustion and a later independent success");
         Check(nativeRequests==0,@"No parse request falls through or retries the native backend");
         Check(Until(^BOOL{ return manager.runtime==runtime && runtime.manifest!=nil; },2),@"Per-quality failures do not disable the responsive source");
-        return @{@"scenarios":results,@"qmc_request_uses_JS":@YES,@"highest_first":@YES,@"all_qualities_attempted_once":@YES,@"unverified_quality_label":@"未知",@"native_origin_requests":@(nativeRequests),@"credential_metadata_allowlist":@YES,@"enriched_album_media_quality_metadata":@YES,@"isolated_workers":@YES,@"observed_JS_HTTP_attempts":attempts,@"observed_JS_HTTP_requests":@(requests.count-nativeRequests),@"real_network_used":@NO};
+        NSUInteger (^requestCount)(void) = ^NSUInteger{
+            @synchronized (SmokeSearchTransport.class) { return SmokeSearchRequests.count; }
+        };
+        NSString *addressA = @"https://fixture.invalid/v7-quality/highest/flac24bit";
+        NSUInteger beforeReplay = requestCount();
+        Check([FetchSearchFixture(replayRequest)[@"data"][@"url"] isEqual:addressA] &&
+              requestCount() == beforeReplay, @"Same source and quality replay uses the saved URL without JS network traffic");
+        NSString *otherName = @"V9ReplayOther.js";
+        NSURL *otherFile = [directory URLByAppendingPathComponent:otherName];
+        NSString *otherScript = @"lx.on('request',()=>Promise.resolve('https://fixture.invalid/source-b'));lx.send('inited',{sources:{tx:{type:'music',actions:['musicUrl'],qualitys:['flac24bit']}}});";
+        Check([otherScript writeToURL:otherFile atomically:YES encoding:NSUTF8StringEncoding error:nil], @"Write second authored source");
+        @try {
+            Main(^{ [manager activate:@{@"file":otherName, @"name":otherName}]; });
+            Check(Until(^BOOL{return [manager.selectedFile isEqual:otherName] && manager.runtime.manifest != nil;},8), @"Source B is selected");
+            Check([FetchSearchFixture(replayRequest)[@"data"][@"url"] isEqual:@"https://fixture.invalid/source-b"], @"Source B resolves its own URL for the identical song and quality");
+            Main(^{ [manager activate:@{@"file":filename, @"name":filename}]; });
+            Check(Until(^BOOL{return [manager.selectedFile isEqual:filename] && manager.runtime.manifest != nil;},8), @"Return to source A");
+            NSUInteger beforeReturn = requestCount();
+            Check([FetchSearchFixture(replayRequest)[@"data"][@"url"] isEqual:addressA] &&
+                  requestCount() == beforeReturn + 1, @"Returning A after B requires a fresh JS address");
+        } @finally { [NSFileManager.defaultManager removeItemAtURL:otherFile error:nil]; }
+        return @{@"same_source_replay_without_js":@YES, @"source_switch_gets_own_url":@YES,
+                 @"switching_back_resolves_again":@YES, @"scenarios":results,@"qmc_request_uses_JS":@YES,@"highest_first":@YES,@"all_qualities_attempted_once":@YES,@"unverified_quality_label":@"未知",@"native_origin_requests":@(nativeRequests),@"credential_metadata_allowlist":@YES,@"enriched_album_media_quality_metadata":@YES,@"isolated_workers":@YES,@"observed_JS_HTTP_attempts":attempts,@"observed_JS_HTTP_requests":@(requests.count-nativeRequests),@"real_network_used":@NO};
     } @finally {
         Main(^{ [manager disable]; });
         method_setImplementation(sessionFactory,previousSessionFactory);imp_removeBlock(fixtureSessionFactory);

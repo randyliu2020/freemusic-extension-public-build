@@ -2,6 +2,15 @@
 #import <dispatch/dispatch.h>
 
 NS_ASSUME_NONNULL_BEGIN
+@class AVPlayer;
+typedef NS_ENUM(NSUInteger, FMQualityCandidateOrigin) {
+    FMQualityCandidateFromJS,
+    FMQualityCandidateFromAddressCache,
+    FMQualityCandidateFromAudioCache,
+};
+typedef NSURL * _Nullable (^FMQualityCacheLookup)(NSString *quality, FMQualityCandidateOrigin origin);
+typedef void (^FMQualityCacheMutation)(NSString *quality, NSURL *URL);
+typedef void (^FMQualityPlayerBinding)(AVPlayer *player, NSURL *URL, NSString *quality);
 FOUNDATION_EXPORT NSString * const FMQualityResolverErrorDomain;
 typedef NS_ENUM(NSInteger, FMQualityResolverErrorCode) {
     FMQualityResolverNoSupportedQuality = 1,
@@ -35,6 +44,16 @@ typedef void (^FMQualityResolutionCompletion)(NSURL * _Nullable URL,
                        isCurrent:(BOOL (^)(void))isCurrent
                          resolve:(FMQualityAttemptResolver)resolve NS_DESIGNATED_INITIALIZER;
 - (instancetype)init NS_UNAVAILABLE;
+/// Configure a playback session on main before its first next call. Download
+/// sessions without these callbacks keep their independent JS quality ladder.
+- (void)setReplayLookup:(FMQualityCacheLookup)lookup
+            saveAddress:(FMQualityCacheMutation)saveAddress
+          discardFailed:(FMQualityCacheMutation)discardFailed;
+@property(nonatomic,readonly) FMQualityCandidateOrigin lastCandidateOrigin;
+/// Invoked on main before handing a current remote playback candidate to the host.
+@property(nonatomic,copy,nullable) FMQualityCacheMutation willUseRemoteURL;
+/// Called by the verified playback binding, also on recovery to a later URL.
+@property(nonatomic,copy,nullable) FMQualityPlayerBinding didBindPlayer;
 /// Call initially, or again after the previous returned URL fails to play/download.
 /// Only successful candidate delivery renews the budget for a later next call;
 /// metadata failures and duplicate URLs within one call share its original limit.

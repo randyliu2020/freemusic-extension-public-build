@@ -257,7 +257,7 @@ class ActualIPATests(unittest.TestCase):
             close = player_swipe_patch.NATIVE_DISMISS
             self.assertEqual(actual[close:close + len(bytes.fromhex(player_swipe_patch.NATIVE_DISMISS_HEX))], bytes.fromhex(player_swipe_patch.NATIVE_DISMISS_HEX))
             self.assertTrue(report["player_left_swipe_enabled"])
-            self.assertEqual(len(report["v3_report"]["player_swipe_changes"]), 2)
+            self.assertEqual(len(report["v3_report"]["player_swipe_changes"]), len(player_swipe_patch.patch_plan(original)))
 
     def test_repacking_modified_ipa_is_rejected(self):
         with self.assertRaisesRegex(package.PackageError, "SHA256 mismatch"):

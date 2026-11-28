@@ -61,6 +61,51 @@ def execute(dx, dy, patched):
 
 
 class PlayerSwipe(unittest.TestCase):
+    def test_lyric_drag_calls_original_once_and_closes_only_matching_full_player(self):
+        ks=Ks(KS_ARCH_ARM64,KS_MODE_LITTLE_ENDIAN)
+        self.assertEqual(bytes(ks.asm(p.LYRIC_END_ASSEMBLY,p.LYRIC_END_CAVE)[0]),bytes.fromhex(p.LYRIC_END_HEX))
+        self.assertEqual(bytes(ks.asm('adrp x2, 0x50b000; add x2, x2, #0xe00',p.LYRIC_END_SITE)[0]),p.LYRIC_END_REDIRECT)
+        for dx,dy,match,owner,close in [(5,160,True,True,True),(0,144,True,True,False),
+                (80,160,True,True,False),(1,-220,True,True,False),(0,200,False,True,False),
+                (0,200,True,False,False),(0,float('nan'),True,True,False)]:
+            with self.subTest(dx=dx,dy=dy,match=match,owner=owner):
+                base=p.BASE+0x2000000
+                vm=Uc(UC_ARCH_ARM64,UC_MODE_ARM);vm.mem_map(base,0x600000);vm.mem_map(0x200000,0x10000)
+                for at in [0x1cd620,0x1c771c,p.FULL_PLAYER_DRAG]:
+                    vm.mem_write(base+at,bytes.fromhex(p.CONTEXTS[at]))
+                vm.mem_write(base+p.LYRIC_END_SITE,p.LYRIC_END_REDIRECT)
+                vm.mem_write(base+p.LYRIC_END_CAVE,bytes.fromhex(p.LYRIC_END_HEX))
+                gesture,lyric_context,player_context=0x201000,0x202000,0x203000
+                metadata,witnesses,stop=0x204000,0x205000,base+0x550000
+                vm.mem_write(metadata-8,struct.pack('<Q',witnesses))
+                vm.mem_write(witnesses+0x50,b'\x0f')
+                vm.mem_write(lyric_context+16+24,struct.pack('<QQ',base+p.FULL_PLAYER_SEEK if match else 0,
+                                                              player_context if owner else 0))
+                initial={r.UC_ARM64_REG_SP:0x20f000,r.UC_ARM64_REG_X19:0x123,r.UC_ARM64_REG_X20:lyric_context,
+                         r.UC_ARM64_REG_X21:0x456,r.UC_ARM64_REG_X29:0x789,r.UC_ARM64_REG_LR:stop}
+                for reg,value in initial.items():vm.reg_write(reg,value)
+                vm.reg_write(r.UC_ARM64_REG_X0,gesture)
+                events=[]
+                def hook(machine,address,size,user):
+                    offset=address-base
+                    if offset in (0x1c505c,0x1c1168): machine.reg_write(r.UC_ARM64_REG_X0,metadata)
+                    elif offset==p.LYRIC_NATIVE_ENDED:
+                        events.append('scroll-end')
+                        self.assertEqual(machine.reg_read(r.UC_ARM64_REG_X0),gesture)
+                        self.assertEqual(machine.reg_read(r.UC_ARM64_REG_X1),lyric_context+16)
+                    elif offset==p.TRANSLATION_GETTER:
+                        self.assertEqual(machine.reg_read(r.UC_ARM64_REG_X20),gesture)
+                        machine.reg_write(r.UC_ARM64_REG_D0,bits(dx));machine.reg_write(r.UC_ARM64_REG_D1,bits(dy))
+                    elif offset==0x1aba84:
+                        events.append('full-player-gesture')
+                        self.assertEqual(machine.reg_read(r.UC_ARM64_REG_X0),gesture)
+                        self.assertEqual(machine.reg_read(r.UC_ARM64_REG_X1),player_context+16)
+                    else:return
+                    machine.reg_write(r.UC_ARM64_REG_PC,machine.reg_read(r.UC_ARM64_REG_LR))
+                vm.hook_add(UC_HOOK_CODE,hook);vm.emu_start(base+0x1cd620,stop,count=200)
+                self.assertEqual(vm.reg_read(r.UC_ARM64_REG_PC),stop)
+                self.assertEqual(events,['scroll-end']+(['full-player-gesture'] if close else []))
+                for reg,value in initial.items():self.assertEqual(vm.reg_read(reg),value)
     def test_encoded_instructions_and_all_branch_destinations(self):
         assembled, _ = Ks(KS_ARCH_ARM64, KS_MODE_LITTLE_ENDIAN).asm(p.TRAMPOLINE_ASSEMBLY, addr=p.CAVE)
         self.assertEqual(bytes(assembled), bytes.fromhex(p.TRAMPOLINE_HEX))
@@ -97,13 +142,13 @@ class PlayerSwipe(unittest.TestCase):
         self.assertEqual(value,b'0000BBBBDDDD')
         with self.assertRaises(p.InteractionPatchError): p.apply_verified_plan(value,[a])
 
-    def test_local_original_exact_fingerprint_and_only_two_ranges(self):
+    def test_local_original_exact_fingerprint_and_only_four_ranges(self):
         original=ROOT.parent/'private'/'429.bin'
         if not original.exists(): self.skipTest('Original remains local; never upload to CI')
         data=original.read_bytes(); output,report=p.patch_binary(data)
         self.assertEqual(len(output),len(data))
         changes=p.patch_plan(data)
-        self.assertEqual(len(changes),2)
+        self.assertEqual(len(changes),4)
         allowed={i for c in changes for i in range(c.offset,c.offset+len(c.after))}
         self.assertTrue(all(a==b or i in allowed for i,(a,b) in enumerate(zip(data,output))))
         self.assertEqual(output[p.NATIVE_DISMISS:p.NATIVE_DISMISS+len(bytes.fromhex(p.NATIVE_DISMISS_HEX))],bytes.fromhex(p.NATIVE_DISMISS_HEX))

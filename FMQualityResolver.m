@@ -24,9 +24,23 @@ static BOOL FMQValidURL(NSURL *URL) {
     dispatch_block_t _cancelAttempt;
     dispatch_source_t _timer;
     NSMutableSet<NSString *> *_returnedURLs;
+    FMQualityCacheLookup _lookup;
+    FMQualityCacheMutation _saveAddress, _discardFailed;
+    NSString *_lastQuality, *_resumeQuality;
+    NSURL *_lastURL;
+    FMQualityCandidateOrigin _lastCandidateOrigin;
+    BOOL _lastWasRefresh;
     NSError *_terminalError;
     BOOL _attemptActive, _deliveryPending, _renewBudget;
 }
+- (void)setReplayLookup:(FMQualityCacheLookup)lookup saveAddress:(FMQualityCacheMutation)saveAddress
+          discardFailed:(FMQualityCacheMutation)discardFailed {
+    NSAssert(NSThread.isMainThread && !_nextIndex && !_completion, @"Configure replay before starting on main");
+    _lookup = [lookup copy];
+    _saveAddress = [saveAddress copy];
+    _discardFailed = [discardFailed copy];
+}
+- (FMQualityCandidateOrigin)lastCandidateOrigin { return _lastCandidateOrigin; }
 + (NSArray<NSString *> *)orderedQualitiesForPlatform:(NSString *)platform supportedQualities:(NSArray<NSString *> *)supportedQualities {
     NSArray *order;
     if ([platform isEqualToString:@"kg"]) order = @[@"128k"];
@@ -77,7 +91,10 @@ static BOOL FMQValidURL(NSURL *URL) {
             // A later next means this candidate failed during actual media IO.
             // Give remaining qualities a fresh bounded call, without resetting
             // the index/deduplication or refreshing failures within this call.
-            if(URL && !finalError)self->_renewBudget=YES;
+            if (URL && !finalError) {
+                self->_renewBudget = YES;
+                if (self.willUseRemoteURL && FMQValidURL(URL)) self.willUseRemoteURL(quality,URL);
+            }
             completion(finalError ? nil : URL, finalError ? nil : quality, finalError);
         });
     }
@@ -94,10 +111,30 @@ static BOOL FMQValidURL(NSURL *URL) {
             dispatch_async(dispatch_get_main_queue(), ^{ completion(nil,nil,FMQError(FMQualityResolverBusy,@"A quality attempt is already in progress")); });
             return;
         }
-        if(self->_renewBudget && !self->_terminalError){self->_remaining=self->_resolutionBudget;self->_renewBudget=NO;}
+        if (self->_renewBudget && !self->_terminalError) {
+            self->_remaining = self->_resolutionBudget;
+            self->_renewBudget = NO;
+            if (self->_lookup && [self sourceIsCurrent]) {
+                if (self->_discardFailed) self->_discardFailed(self->_lastQuality,self->_lastURL);
+                // First failure of a cached file falls through to the remote
+                // tiers at this quality. A remote failure gets one forced JS
+                // refresh, whether the original URL came from disk or JS.
+                if (!self->_lastWasRefresh) self->_resumeQuality = self->_lastQuality;
+            }
+        }
         self->_completion = [completion copy];
         [self attemptNext];
     });
+}
+- (void)deliverCandidate:(NSURL *)URL quality:(NSString *)quality origin:(FMQualityCandidateOrigin)origin
+                refreshed:(BOOL)refreshed {
+    _lastURL = URL;
+    _lastQuality = [quality copy];
+    _lastCandidateOrigin = origin;
+    _lastWasRefresh = refreshed;
+    [_returnedURLs addObject:URL.absoluteString];
+    if (_saveAddress && origin == FMQualityCandidateFromJS) _saveAddress(quality,URL);
+    [self completeURL:URL quality:quality error:nil];
 }
 - (void)attemptNext {
     if (!_completion) return;
@@ -105,12 +142,27 @@ static BOOL FMQValidURL(NSURL *URL) {
     if (![self sourceIsCurrent]) { [self terminate:FMQError(FMQualityResolverSourceChanged,@"Source or playback generation changed")]; return; }
     if (!_qualities.count || !_resolve) { [self terminate:FMQError(FMQualityResolverNoSupportedQuality,@"No supported common quality")]; return; }
     if (_remaining <= 0.001) { [self terminate:FMQError(NSURLErrorTimedOut,@"Total quality resolution time exhausted")]; return; }
-    if (_nextIndex >= _qualities.count) { [self terminate:FMQError(FMQualityResolverExhausted,@"All supported qualities failed or returned a previously failed URL")]; return; }
+    if (!_resumeQuality && _nextIndex >= _qualities.count) { [self terminate:FMQError(FMQualityResolverExhausted,@"All supported qualities failed or returned a previously failed URL")]; return; }
+    BOOL resuming = _resumeQuality != nil;
+    BOOL refresh = resuming && _lastCandidateOrigin != FMQualityCandidateFromAudioCache;
+    NSString *quality = _resumeQuality ?: _qualities[_nextIndex++];
+    _resumeQuality = nil;
+    if (_lookup && !refresh) {
+        NSURL *local = resuming ? nil : _lookup(quality,FMQualityCandidateFromAudioCache);
+        if (local.isFileURL && ![_returnedURLs containsObject:local.absoluteString]) {
+            [self deliverCandidate:local quality:quality origin:FMQualityCandidateFromAudioCache refreshed:NO];
+            return;
+        }
+        NSURL *remote = _lookup(quality,FMQualityCandidateFromAddressCache);
+        if (FMQValidURL(remote) && ![_returnedURLs containsObject:remote.absoluteString]) {
+            [self deliverCandidate:remote quality:quality origin:FMQualityCandidateFromAddressCache refreshed:NO];
+            return;
+        }
+    }
     // Match LX mobile's userApi request ceiling. The enclosing call's shorter
     // budget still wins; several slow qualities cannot each consume 20 seconds
     // inside a single 35-second host request.
     NSTimeInterval budget = MIN(20, _remaining);
-    NSString *quality = _qualities[_nextIndex++];
     NSUInteger token = ++_attemptToken;
     _attemptStarted = NSProcessInfo.processInfo.systemUptime; _attemptActive = YES;
     _timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
@@ -134,9 +186,9 @@ static BOOL FMQValidURL(NSURL *URL) {
                 if (error && (error.code == NSURLErrorCancelled || error.code == NSUserCancelledError)) {
                     [self terminate:FMQError(NSURLErrorCancelled,@"Quality resolution cancelled")]; return;
                 }
-                if (!error && FMQValidURL(URL) && ![self->_returnedURLs containsObject:URL.absoluteString]) {
-                    [self->_returnedURLs addObject:URL.absoluteString];
-                    [self completeURL:URL quality:quality error:nil];
+                BOOL refreshedSameURL = refresh && [URL.absoluteString isEqual:self->_lastURL.absoluteString];
+                if (!error && FMQValidURL(URL) && (refreshedSameURL || ![self->_returnedURLs containsObject:URL.absoluteString])) {
+                    [self deliverCandidate:URL quality:quality origin:FMQualityCandidateFromJS refreshed:refresh];
                 } else [self attemptNext];
             });
         });

@@ -1,4 +1,5 @@
 #import "FMAdaptivePlayback.h"
+#import "FMReplayMedia.h"
 #import "FMQualityResolver.h"
 #import "FMPlaybackQualityDisplay.h"
 #import "FMPlaybackSequence.h"
@@ -206,6 +207,7 @@ static void FMRetire(FMAdaptiveBinding *binding,BOOL cancel) {
 }
 void FMAdaptivePlaybackSelectionWillChange(id manager) {
     FMState();if(!NSThread.isMainThread||!manager)return;
+    [FMReplayMedia playbackSelectionWillChange];
     FMAdaptiveBinding *binding=[FMBindings objectForKey:manager];
     if(binding){FMRetire(binding,YES);[FMBindings removeObjectForKey:manager];FMCanceledCount++;}
 }
@@ -239,6 +241,7 @@ void FMAdaptiveNativeDidSetup(id manager,AVPlayer *player) {
     binding.quality=entry.quality;binding.trackKey=entry.trackKey;binding.retired=NO;binding.recovering=NO;binding.revision++;
     [FMBindings setObject:binding forKey:manager];
     objc_setAssociatedObject(player,FMBindingKey,binding,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (entry.session.didBindPlayer && !URL.isFileURL) entry.session.didBindPlayer(player,URL,entry.quality);
     __weak FMAdaptiveBinding *weak=binding;
     binding.timer=[player addPeriodicTimeObserverForInterval:CMTimeMakeWithSeconds(0.5,600) queue:dispatch_get_main_queue() usingBlock:^(CMTime time){
         FMAdaptiveBinding *current=weak;if(!current||!FMStillCurrent(current))return;

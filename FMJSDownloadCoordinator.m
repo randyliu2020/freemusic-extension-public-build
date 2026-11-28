@@ -52,10 +52,52 @@ static NSString *FMJDMIMEExtension(NSString *mime) {
         @"audio/aiff":@"aiff",@"audio/x-aiff":@"aiff",@"audio/x-caf":@"caf"}[mime];
 }
 
+static NSString *FMJDInspectPayload(NSURL *file, NSHTTPURLResponse *response, uint64_t *byteCount, NSError **outError) {
+    NSError *failure=nil;NSNumber *size=nil;
+    [file getResourceValue:&size forKey:NSURLFileSizeKey error:&failure];
+    uint64_t bytes=size.unsignedLongLongValue;
+    if(!failure && (!response || response.statusCode<200 || response.statusCode>=300))failure=FMJDError(FMJSDownloadInvalidResponse,@"Download server returned an unsuccessful HTTP response");
+    if(!failure && (bytes<16 || bytes>FMJSMaximumFileBytes))failure=FMJDError(bytes>FMJSMaximumFileBytes?FMJSDownloadSizeLimit:FMJSDownloadIncompleteFile,@"Downloaded file size is invalid");
+    NSString *encoding=FMJDHeader(response,@"Content-Encoding");
+    if(!failure && (!encoding.length || [encoding caseInsensitiveCompare:@"identity"]==NSOrderedSame) && response.expectedContentLength>=0 && (uint64_t)response.expectedContentLength!=bytes)
+        failure=FMJDError(FMJSDownloadIncompleteFile,@"Downloaded bytes do not match Content-Length");
+    if(!failure && response.statusCode==206){
+        NSString *range=FMJDHeader(response,@"Content-Range");unsigned long long first=0,last=0,total=0;
+        if(!range || sscanf(range.UTF8String,"bytes %llu-%llu/%llu",&first,&last,&total)!=3 || first!=0 || last+1!=total || total!=bytes)
+            failure=FMJDError(FMJSDownloadIncompleteFile,@"Partial response is not a complete audio file");
+    }
+    NSString *mime=response.MIMEType.lowercaseString ?: @"";NSString *extension=nil;
+    // WAV explicitly declares its container size. Reject a truncated file even
+    // when a server incorrectly labels its shortened payload as a complete 200.
+    if(!failure){
+        NSFileHandle *handle=[NSFileHandle fileHandleForReadingFromURL:file error:&failure];
+        NSData *prefix=[handle readDataUpToLength:512 error:&failure];[handle closeAndReturnError:nil];
+        extension=FMJDAudioExtension(prefix);
+        NSString *text=[[NSString alloc] initWithData:prefix encoding:NSUTF8StringEncoding];
+        text=[[text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] lowercaseString];
+        if([text hasPrefix:@"#extm3u"] || [text hasPrefix:@"[playlist]"] || [text hasPrefix:@"<?xml"] || [text hasPrefix:@"<mpd"])
+            failure=FMJDError(FMJSDownloadInvalidAudio,@"A streaming manifest is not a downloaded audio file");
+        if(prefix.length>=12 && !memcmp(prefix.bytes,"RIFF",4) && !memcmp((const uint8_t *)prefix.bytes+8,"WAVE",4)){
+            const uint8_t *p=prefix.bytes;uint64_t declared=(uint64_t)p[4]|((uint64_t)p[5]<<8)|((uint64_t)p[6]<<16)|((uint64_t)p[7]<<24);
+            if(declared+8>bytes)failure=FMJDError(FMJSDownloadIncompleteFile,@"WAV container is truncated");
+        }
+        // Real audio bytes take precedence over misleading response metadata.
+        // HTML/JSON carrying an audio MIME still proceeds only to a full decoder
+        // check, which rejects it; a MIME value alone never proves audio validity.
+        if(!failure && !extension && ([mime hasPrefix:@"text/"] || [mime containsString:@"json"] || [mime containsString:@"html"] || [mime containsString:@"xml"] || [mime containsString:@"mpegurl"]))
+            failure=FMJDError(FMJSDownloadInvalidAudio,@"Server returned a document instead of audio");
+        if(!extension)extension=FMJDMIMEExtension(mime);
+    }
+    if (byteCount) *byteCount = bytes;
+    if (outError) *outError = failure;
+    return extension;
+}
+
 /// Validation really reads decoded audio from the completed local file. It does
 /// not trust the extension, MIME type or source's requested quality label.
 @interface FMJSDownloadValidation : NSObject
 - (void)validate:(NSURL *)file completion:(void (^)(NSError *))completion;
+- (void)validate:(NSURL *)file audioOnly:(BOOL)audioOnly completion:(void (^)(NSError *))completion;
 - (void)cancel;
 @end
 @implementation FMJSDownloadValidation {
@@ -71,6 +113,9 @@ static NSString *FMJDMIMEExtension(NSString *mime) {
     [asset cancelLoading];[reader cancelReading];
 }
 - (void)validate:(NSURL *)file completion:(void (^)(NSError *))completion {
+    [self validate:file audioOnly:NO completion:completion];
+}
+- (void)validate:(NSURL *)file audioOnly:(BOOL)audioOnly completion:(void (^)(NSError *))completion {
     AVURLAsset *asset=[AVURLAsset URLAssetWithURL:file options:nil];
     [_lock lock];_asset=asset;BOOL cancelled=_cancelled;[_lock unlock];
     if(cancelled){completion(FMJDCancelled());return;}
@@ -81,6 +126,9 @@ static NSString *FMJDMIMEExtension(NSString *mime) {
                 if([self isCancelled]){completion(FMJDCancelled());return;}
                 for(NSString *key in @[@"tracks",@"duration",@"playable"]){
                     if([asset statusOfValueForKey:key error:&error]!=AVKeyValueStatusLoaded){completion(FMJDValidationError(error,[@"asset_load_" stringByAppendingString:key]));return;}
+                }
+                if(audioOnly && (asset.hasProtectedContent || [asset tracksWithMediaType:AVMediaTypeVideo].count)){
+                    completion(FMJDError(FMJSDownloadInvalidAudio,@"Expected unprotected progressive audio"));return;
                 }
                 NSArray<AVAssetTrack *> *tracks=[asset tracksWithMediaType:AVMediaTypeAudio];
                 double duration=CMTimeGetSeconds(asset.duration);
@@ -112,6 +160,27 @@ static NSString *FMJDMIMEExtension(NSString *mime) {
     }];
 }
 @end
+
+// The caller owns this unique staging file until completion. Give the decoder a
+// filename with the real container extension; leave cleanup of the source to its owner.
+dispatch_block_t FMJSValidateReplayAudio(NSURL *file, NSHTTPURLResponse *response,
+    void (^completion)(NSURL *, NSString *)) {
+    FMJSDownloadValidation *validation=[FMJSDownloadValidation new];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0), ^{
+        NSError *error=nil;
+        NSString *ext=FMJDInspectPayload(file,response,NULL,&error);
+        if(error || !ext.length){completion(nil,nil);return;}
+        NSURL *hint=[file.URLByDeletingLastPathComponent URLByAppendingPathComponent:[NSUUID.UUID.UUIDString stringByAppendingPathExtension:ext]];
+        if(![NSFileManager.defaultManager linkItemAtURL:file toURL:hint error:&error]){
+            completion(nil,nil);return;
+        }
+        [validation validate:hint audioOnly:YES completion:^(NSError *decodeError){
+            if(decodeError)completion(nil,nil); else completion(hint,ext);
+            [NSFileManager.defaultManager removeItemAtURL:hint error:nil];
+        }];
+    });
+    return ^{[validation cancel];};
+}
 
 // A task owns this immutable destination/revision and its delegate-queue result.
 // didFinish must adopt Foundation's temporary file before returning; only the
@@ -251,41 +320,8 @@ static const void *FMJDTransferKey=&FMJDTransferKey;
     if(!_suspended)[task resume];
 }
 - (void)inspectFile:(NSURL *)file response:(NSHTTPURLResponse *)response revision:(NSUInteger)revision {
-    NSError *failure=nil;NSNumber *size=nil;
-    [file getResourceValue:&size forKey:NSURLFileSizeKey error:&failure];
-    uint64_t bytes=size.unsignedLongLongValue;
-    if(!failure && (!response || response.statusCode<200 || response.statusCode>=300))failure=FMJDError(FMJSDownloadInvalidResponse,@"Download server returned an unsuccessful HTTP response");
-    if(!failure && (bytes<16 || bytes>FMJSMaximumFileBytes))failure=FMJDError(bytes>FMJSMaximumFileBytes?FMJSDownloadSizeLimit:FMJSDownloadIncompleteFile,@"Downloaded file size is invalid");
-    NSString *encoding=FMJDHeader(response,@"Content-Encoding");
-    if(!failure && (!encoding.length || [encoding caseInsensitiveCompare:@"identity"]==NSOrderedSame) && response.expectedContentLength>=0 && (uint64_t)response.expectedContentLength!=bytes)
-        failure=FMJDError(FMJSDownloadIncompleteFile,@"Downloaded bytes do not match Content-Length");
-    if(!failure && response.statusCode==206){
-        NSString *range=FMJDHeader(response,@"Content-Range");unsigned long long first=0,last=0,total=0;
-        if(!range || sscanf(range.UTF8String,"bytes %llu-%llu/%llu",&first,&last,&total)!=3 || first!=0 || last+1!=total || total!=bytes)
-            failure=FMJDError(FMJSDownloadIncompleteFile,@"Partial response is not a complete audio file");
-    }
-    NSString *mime=response.MIMEType.lowercaseString ?: @"";NSString *extension=nil;
-    // WAV explicitly declares its container size. Reject a truncated file even
-    // when a server incorrectly labels its shortened payload as a complete 200.
-    if(!failure){
-        NSFileHandle *handle=[NSFileHandle fileHandleForReadingFromURL:file error:&failure];
-        NSData *prefix=[handle readDataUpToLength:512 error:&failure];[handle closeAndReturnError:nil];
-        extension=FMJDAudioExtension(prefix);
-        NSString *text=[[NSString alloc] initWithData:prefix encoding:NSUTF8StringEncoding];
-        text=[[text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] lowercaseString];
-        if([text hasPrefix:@"#extm3u"] || [text hasPrefix:@"[playlist]"] || [text hasPrefix:@"<?xml"] || [text hasPrefix:@"<mpd"])
-            failure=FMJDError(FMJSDownloadInvalidAudio,@"A streaming manifest is not a downloaded audio file");
-        if(prefix.length>=12 && !memcmp(prefix.bytes,"RIFF",4) && !memcmp((const uint8_t *)prefix.bytes+8,"WAVE",4)){
-            const uint8_t *p=prefix.bytes;uint64_t declared=(uint64_t)p[4]|((uint64_t)p[5]<<8)|((uint64_t)p[6]<<16)|((uint64_t)p[7]<<24);
-            if(declared+8>bytes)failure=FMJDError(FMJSDownloadIncompleteFile,@"WAV container is truncated");
-        }
-        // Real audio bytes take precedence over misleading response metadata.
-        // HTML/JSON carrying an audio MIME still proceeds only to a full decoder
-        // check, which rejects it; a MIME value alone never proves audio validity.
-        if(!failure && !extension && ([mime hasPrefix:@"text/"] || [mime containsString:@"json"] || [mime containsString:@"html"] || [mime containsString:@"xml"] || [mime containsString:@"mpegurl"]))
-            failure=FMJDError(FMJSDownloadInvalidAudio,@"Server returned a document instead of audio");
-        if(!extension)extension=FMJDMIMEExtension(mime);
-    }
+    NSError *failure=nil;uint64_t bytes=0;
+    NSString *extension=FMJDInspectPayload(file,response,&bytes,&failure);
     if(failure){[self recordPhase:@"file_validation" error:failure response:response bytes:bytes];_lastError=failure;++_validationFailures;[self removeCandidate];[self next];return;}
     if(extension.length && ![file.pathExtension isEqualToString:extension]){
         NSURL *identified=[[file URLByDeletingPathExtension] URLByAppendingPathExtension:extension];NSError *moveError=nil;

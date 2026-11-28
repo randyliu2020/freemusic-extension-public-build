@@ -14,7 +14,54 @@ static NSError *Failure(void) { return [NSError errorWithDomain:@"Fixture" code:
 static FMQualityResolver *Session(NSArray *qualities, NSTimeInterval budget, BOOL (^current)(void), FMQualityAttemptResolver resolve) {
     return [[FMQualityResolver alloc] initWithPlatform:@"tx" supportedQualities:qualities timeout:budget isCurrent:current resolve:resolve];
 }
+static NSURL *NextURL(FMQualityResolver *session, NSString *quality) {
+    __block BOOL finished=NO; __block NSURL *candidate;
+    [session nextWithCompletion:^(NSURL *url,NSString *q,NSError *error){
+        Check(quality ? (url && !error && [quality isEqual:q]) : (!url && error!=nil),@"next returns expected quality or exhaustion");
+        candidate=url; finished=YES;
+    }];
+    Check(Wait(^BOOL{return finished;},2),@"replay resolution completed");
+    return candidate;
+}
+static void TestReplayOrdering(void) {
+    NSURL *file=[NSURL fileURLWithPath:@"/tmp/authored-replay.fixture"];
+    NSURL *upper=URL(@"upper"), *lower=URL(@"lower");
+    NSMutableDictionary *files=[@{@"flac":file} mutableCopy], *links=[@{@"flac":upper, @"128k":lower} mutableCopy];
+    NSMutableArray *attempts=NSMutableArray.array, *failuresSeen=NSMutableArray.array, *handoffs=NSMutableArray.array;
+    __block BOOL current=YES;
+    FMQualityResolver *session=Session(@[@"flac",@"128k"],2,^BOOL{return current;},^dispatch_block_t(NSString *q,NSTimeInterval timeout,FMQualityAttemptCompletion done){
+        [attempts addObject:q]; done([q isEqual:@"flac"]?upper:nil,nil); return nil;
+    });
+    [session setReplayLookup:^NSURL *(NSString *q,FMQualityCandidateOrigin origin){
+        return origin==FMQualityCandidateFromAudioCache ? files[q] : links[q];
+    } saveAddress:^(NSString *q,NSURL *url){links[q]=url;} discardFailed:^(NSString *q,NSURL *url){
+        [failuresSeen addObject:url];NSMutableDictionary *store=url.isFileURL?files:links;
+        if([store[q] isEqual:url])[store removeObjectForKey:q];
+    }];
+    session.willUseRemoteURL=^(NSString *q,NSURL *url){[handoffs addObject:url];};
+    Check([NextURL(session,@"flac") isEqual:file] && session.lastCandidateOrigin==FMQualityCandidateFromAudioCache && !attempts.count && !handoffs.count,@"complete audio hits before remote cache and JS");
+    Check([NextURL(session,@"flac") isEqual:upper] && session.lastCandidateOrigin==FMQualityCandidateFromAddressCache && !files.count && !attempts.count,@"damaged complete file falls through to same-quality cached address");
+    Check([NextURL(session,@"flac") isEqual:upper] && session.lastCandidateOrigin==FMQualityCandidateFromJS && [attempts isEqual:@[@"flac"]] && [links[@"flac"] isEqual:upper],@"forced JS refresh may return the same address once");
+    Check([NextURL(session,@"128k") isEqual:lower] && [attempts isEqual:@[@"flac"]] && !links[@"flac"],@"failure after refresh bypasses that quality and can hit a lower cached address");
+    Check(!NextURL(session,nil) && [attempts isEqual:@[@"flac",@"128k"]],@"last cached quality refreshes once then exhausts");
+    Check([failuresSeen isEqual:@[file,upper,upper,lower]] && [handoffs isEqual:@[upper,upper,lower]],@"each actual candidate failure and remote handoff is reported exactly once");
+
+    [attempts removeAllObjects];[links removeAllObjects];
+    __block FMQualityAttemptCompletion pending;
+    session=Session(@[@"flac",@"128k"],2,^BOOL{return current;},^dispatch_block_t(NSString *q,NSTimeInterval t,FMQualityAttemptCompletion done){
+        [attempts addObject:q];if(attempts.count==1)done(upper,nil);else pending=[done copy];return nil;
+    });
+    [session setReplayLookup:^NSURL *(NSString *q,FMQualityCandidateOrigin origin){return nil;}
+        saveAddress:^(NSString *q,NSURL *url){links[q]=url;}
+        discardFailed:^(NSString *q,NSURL *url){if([links[q] isEqual:url])[links removeObjectForKey:q];}];
+    Check([NextURL(session,@"flac") isEqual:upper]&&[links[@"flac"] isEqual:upper],@"a fresh JS result populates the exact quality");
+    __block NSError *failed;[session nextWithCompletion:^(NSURL *u,NSString *q,NSError *e){failed=e;}];
+    Check([attempts isEqual:@[@"flac",@"flac"]]&&pending&&!links.count,@"real failure of a freshly obtained URL retries the same quality");
+    current=NO;if(pending)pending(URL(@"late"),nil);
+    Check(Wait(^BOOL{return failed!=nil;},2)&&failed.code==FMQualityResolverSourceChanged&&!links.count&&attempts.count==2,@"retired refresh cannot write cache or continue lower qualities");
+}
 int main(void) { @autoreleasepool {
+    TestReplayOrdering();
     NSArray *all=@[@"128k",@"flac",@"320k",@"flac24bit",@"unsupported",@"flac"];
     Check([[FMQualityResolver orderedQualitiesForPlatform:@"qq" supportedQualities:all] isEqual:@[@"flac24bit",@"flac",@"320k",@"128k"]],@"quality intersection is unique highest to lowest");
     Check([[FMQualityResolver orderedQualitiesForPlatform:@"kg" supportedQualities:all] isEqual:@[@"128k"]],@"Kugou is standard only");

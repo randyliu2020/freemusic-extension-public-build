@@ -12,6 +12,8 @@
 #import "FMNavigation.h"
 #import "FMPlaybackCache.h"
 #import "FMQualityResolver.h"
+#import "FMReplayCache.h"
+#import "FMReplayMedia.h"
 #import "FMAdaptivePlayback.h"
 #import "FMTrackMetadata.h"
 #import "FMDownloadIntegration.h"
@@ -58,6 +60,7 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
 @property (nonatomic, copy) NSArray<NSDictionary *> *files;
 @property (nonatomic, copy) NSString *selectedFile;
 @property (nonatomic, copy) NSString *loadingFile;
+@property (nonatomic, copy) NSString *replayNamespace;
 @property (nonatomic) NSUInteger generation;
 + (instancetype)shared;
 - (NSURL *)directory;
@@ -90,17 +93,20 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
     // Advance the native cache namespace before retiring requests. A completed
     // old request may still run its host callback after this transition.
     FMPlaybackCacheSourceTransition(FMXCacheServers(self.runtime.manifest));
+    [FMReplayMedia sourceDidChange];
     FMAdaptivePlaybackSourceTransition();
     FMPlaybackSequenceSourceTransition();
     FMDownloadIntegrationSourceTransition();
     self.generation++;
     LXSourceRuntime *old = self.runtime; self.runtime = nil; [old invalidate];
     self.selectedFile = nil;
+    self.replayNamespace = nil;
     self.loadingFile = nil;
     self.playbackRequest = nil; self.playbackStatus = nil;
 }
 - (void)disable {
     [self retireRuntime];
+    [[FMReplayCache sharedCache] selectSourceFile:nil script:nil];
     [NSUserDefaults.standardUserDefaults removeObjectForKey:FMXSelected];
     [NSUserDefaults.standardUserDefaults removeObjectForKey:FMXActivationPending];
     [NSUserDefaults.standardUserDefaults synchronize];
@@ -136,6 +142,7 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
         self.status = @"无法保存音源启用状态，原选择已保留"; [self changed]; return;
     }
     [self retireRuntime];
+    self.replayNamespace = [[FMReplayCache sharedCache] selectSourceFile:filename script:script];
     NSUInteger generation = self.generation;
     LXSourceRuntime *runtime = [[LXSourceRuntime alloc] initWithBootstrapScript:bootstrap];
     self.runtime = runtime;
@@ -157,6 +164,8 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
         NSArray *sources = FMXRoutableSourceNames(manifest);
         if (error || !sources.count) {
             self.runtime = nil; self.selectedFile = nil; [runtime invalidate];
+            self.replayNamespace = nil;
+            [[FMReplayCache sharedCache] selectSourceFile:nil script:nil];
             FMPlaybackCacheSourceTransition(NSSet.set);
             self.status = error ? [@"初始化失败：" stringByAppendingString:error.localizedDescription]
                 : @"此音源没有本版可用平台：仅支持网易云、QQ 和酷狗基础音源，酷狗须含标准音质。";
@@ -200,7 +209,7 @@ static NSSet<NSString *> *FMXCacheServers(NSDictionary *manifest) {
     if (section == 1) return @"支持网易云、QQ 和酷狗的基础洛雪音源。酷狗 JS 使用标准音质；部分脚本需要额外歌曲信息或尚未支持的功能。仅启用你信任的脚本。";
     if (section == 2) return @"用当前封面在手机上生成轻微缩放的循环动画。系统需要时才生成；低电量或减少动态效果开启时显示静态封面。需要 iOS 26 或更高版本。";
     if (section == 4) return @"按实际听歌记录查看月度、年度偏好，只保存在本机。";
-    return @"扩展 v8。启用 JS 后，播放和下载优先尝试支持的最高音质；失败继续尝试剩余档位。播放页的小音质标识以音频实际信息为准。换源后重新解析，已下载文件保留。";
+    return @"扩展 v9。播放时优先复用同音源、同音质的完整歌曲或播放地址。换源后重新解析，手动下载保留。";
 }
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)path {
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
@@ -365,17 +374,47 @@ __attribute__((constructor)) static void FMXInitialize(void) {
                 // Native auth, cookies, QMC keys and custom API settings are not
                 // passed to user scripts. Only the documented song metadata is.
                 NSDictionary *info = FMTrackMetadataForParameters(parameters,source);
+                NSString *trackID = parameters[@"id"];
+                FMReplayCache *cache = [FMReplayCache sharedCache];
+                NSString *namespaceID = [FMXManager shared].replayNamespace;
+                NSString *(^cacheKey)(NSString *) = ^NSString *(NSString *quality) {
+                    return [cache keyForNamespace:namespaceID platform:source trackID:trackID quality:quality];
+                };
+                BOOL (^currentSource)(void) = ^BOOL {
+                    return [FMXManager shared].runtime == runtime && runtime.manifest != nil;
+                };
                 NSString *diagnosticID = NSUUID.UUID.UUIDString;
                 selectedRuntime = runtime; selectedSource = source; diagnostic = diagnosticID;
-                FMXPlaybackStatus(runtime, diagnosticID, source, @"正在通过 JS 从最高支持音质解析", YES);
+                FMXPlaybackStatus(runtime, diagnosticID, source, @"正在从最高支持音质查找歌曲", YES);
                 NSTimeInterval budget = MIN(35, request.timeoutInterval > 0 ? MAX(1, request.timeoutInterval - 1) : 35);
                 session = [[FMQualityResolver alloc] initWithPlatform:source supportedQualities:qualities timeout:budget
-                    isCurrent:^BOOL { return [FMXManager shared].runtime == runtime && runtime.manifest != nil; }
+                    isCurrent:currentSource
                     resolve:^dispatch_block_t(NSString *quality, NSTimeInterval timeout, FMQualityAttemptCompletion resolved) {
                         FMXPlaybackStatus(runtime, diagnosticID, source, [NSString stringWithFormat:@"正在尝试 JS 音质 %@", quality], NO);
                         NSString *identifier = [runtime resolveIsolatedMusicURLForSource:source musicInfo:info quality:quality timeout:timeout completion:resolved];
                         return ^{ [runtime cancelRequestWithIdentifier:identifier]; };
                     }];
+                [session setReplayLookup:^NSURL *(NSString *quality, FMQualityCandidateOrigin origin) {
+                    NSString *key = cacheKey(quality);
+                    if (!key) return nil;
+                    return origin == FMQualityCandidateFromAudioCache ? [cache audioForKey:key] : [cache addressForKey:key];
+                } saveAddress:^(NSString *quality, NSURL *url) {
+                    NSString *key = cacheKey(quality);
+                    if (key) [cache saveAddress:url forKey:key];
+                } discardFailed:^(NSString *quality, NSURL *url) {
+                    NSString *key = cacheKey(quality);
+                    if (!key) return;
+                    if (url.isFileURL) [cache discardAudio:url forKey:key];
+                    else [cache discardAddress:url forKey:key];
+                }];
+                session.willUseRemoteURL = ^(NSString *quality, NSURL *url) {
+                    NSString *key = cacheKey(quality);
+                    if (key) [FMReplayMedia registerRemoteURL:url key:key];
+                };
+                session.didBindPlayer = ^(AVPlayer *player, NSURL *url, NSString *quality) {
+                    NSString *key = cacheKey(quality);
+                    if (key) [FMReplayMedia observePlayer:player remoteURL:url key:key isCurrent:currentSource];
+                };
                 [session nextWithCompletion:^(NSURL *url, NSString *requestedQuality, NSError *error) {
                     if (cancelled) return;
                     if (error || !url) {
@@ -404,7 +443,13 @@ __attribute__((constructor)) static void FMXInitialize(void) {
                                     return ^{[runtime cancelRequestWithIdentifier:identifier];};
                                 }];
                         },^BOOL{return [FMXManager shared].runtime==runtime&&runtime.manifest!=nil;});
-                    FMXPlaybackStatus(runtime, diagnosticID, source, @"JS 已返回播放地址，实际音质将在播放后确认", NO);
+                    NSString *status;
+                    switch (session.lastCandidateOrigin) {
+                        case FMQualityCandidateFromAudioCache: status=@"已命中当前音源的本地歌曲缓存"; break;
+                        case FMQualityCandidateFromAddressCache: status=@"已复用当前音源的播放地址"; break;
+                        default: status=@"JS 已返回播放地址，实际音质将在播放后确认"; break;
+                    }
+                    FMXPlaybackStatus(runtime, diagnosticID, source, status, NO);
                     // Plain URL responses deliberately contain no QMC metadata.
                     // The original decoder's nil-QMC branch passes them directly
                     // to the player even when the user's selected level sent qmc=1.

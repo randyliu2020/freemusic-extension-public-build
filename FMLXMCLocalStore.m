@@ -4,6 +4,7 @@
 #import <sys/stat.h>
 #import <unistd.h>
 #import <errno.h>
+#import <CommonCrypto/CommonDigest.h>
 
 NSNotificationName const FMLXMCLocalImportDidFinish=@"FMX.LXMC.LocalImportDidFinish";
 static const NSUInteger FMStoreLimit=32*1024*1024;
@@ -32,6 +33,70 @@ static NSDictionary *FMNativeSingleTrack(NSDictionary *parameters){
     if(!source)return nil;
     return FMNativeTrack(@{@"server":source,@"id":parameters[@"song_id"]?:@"",@"title":parameters[@"title"]?:@"",@"singer":parameters[@"artist"]?:@"",@"cover":parameters[@"cover"]?:@""});
 }
+static NSString *FMEditDigest(NSArray *parts) {
+    NSData *bytes = [NSPropertyListSerialization dataWithPropertyList:parts format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
+    if (!bytes || bytes.length > UINT32_MAX) return nil;
+    unsigned char hash[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(bytes.bytes, (CC_LONG)bytes.length, hash);
+    char hex[65];
+    for (NSUInteger i=0; i<sizeof(hash); i++) snprintf(hex+i*2, 3, "%02x", hash[i]);
+    return [NSString stringWithUTF8String:hex];
+}
+static NSString *FMEditListKey(NSDictionary *row) {
+    if (![row isKindOfClass:NSDictionary.class]) return nil;
+    NSNumber *identifier = FMInteger([row[@"id"] description]);
+    if (!identifier || identifier.longLongValue == 0) return nil;
+    NSString *owner = [row[@"user_id"] description] ?: @"";
+    return FMEditDigest(@[identifier.longLongValue < 0 ? @"local" : @"cloud", owner, identifier.stringValue]);
+}
+static NSString *FMEditTrackKey(NSDictionary *track) {
+    if (![track isKindOfClass:NSDictionary.class]) return nil;
+    NSNumber *record = FMInteger([track[@"record_id"] description]);
+    if (record && record.longLongValue != 0) return FMEditDigest(@[@"record", record.stringValue]);
+    NSString *server = [track[@"server"] description], *identifier = [track[@"id"] description];
+    return (server.length && identifier.length) ? FMEditDigest(@[@"track", server, identifier]) : nil;
+}
+static BOOL FMEditUnique(NSArray *ids, NSUInteger maximum) {
+    if (![ids isKindOfClass:NSArray.class] || ids.count > maximum) return NO;
+    for (id key in ids) if (![key isKindOfClass:NSString.class] || [key length]!=64) return NO;
+    return [NSSet setWithArray:ids].count == ids.count;
+}
+static BOOL FMEditMetadataValid(id metadata) {
+    if (!metadata) return YES;
+    if (![metadata isKindOfClass:NSDictionary.class] || !FMEditUnique(metadata[@"order"]?:@[], 1500)) return NO;
+    NSDictionary *lists = metadata[@"lists"] ?: @{};
+    if (![lists isKindOfClass:NSDictionary.class] || lists.count > 1500) return NO;
+    for (id key in lists) {
+        NSDictionary *item=lists[key];
+        if (![key isKindOfClass:NSString.class] || [key length]!=64 || ![item isKindOfClass:NSDictionary.class]) return NO;
+        if (item[@"title"] && !FMText(item[@"title"],256).length) return NO;
+        if (!FMEditUnique(item[@"hidden"]?:@[],20000) || !FMEditUnique(item[@"order"]?:@[],20000)) return NO;
+    }
+    return YES;
+}
+static NSArray *FMEditOrder(NSArray *rows, NSArray *order, NSSet *hidden, NSString *(^identity)(NSDictionary *)) {
+    if (!order.count && !hidden.count) return rows;
+    NSMutableDictionary *indexed = [NSMutableDictionary dictionary];
+    for (NSDictionary *row in rows) {
+        NSString *key=identity(row);
+        if (key && indexed[key]) return rows; // Ambiguous data remains in the native order.
+        if (key) indexed[key]=row;
+    }
+    NSMutableArray *out=[NSMutableArray array];
+    NSMutableSet *emitted=[NSMutableSet set];
+    for (NSString *key in order) if (indexed[key] && ![hidden containsObject:key] && ![emitted containsObject:key]) {
+        [out addObject:indexed[key]]; [emitted addObject:key];
+    }
+    for (NSDictionary *row in rows) {
+        NSString *key=identity(row);
+        if (!key || (![hidden containsObject:key] && ![emitted containsObject:key])) [out addObject:row];
+    }
+    return out;
+}
+static BOOL FMEditFail(NSError **error, NSString *message) {
+    if (error) *error=FMLocalError(55,message);
+    return NO;
+}
 @interface FMLXMCLocalStore ()
 @property(nonatomic,strong) NSURL *directory;
 @property(nonatomic,strong) NSRecursiveLock *lock;
@@ -40,6 +105,8 @@ static NSDictionary *FMNativeSingleTrack(NSDictionary *parameters){
 @property(nonatomic,strong) NSMutableDictionary<NSString *,NSMutableDictionary *> *plans;
 @property(nonatomic) int64_t nextReservation;
 @property(nonatomic) NSUInteger commits,failedCommits,cancelled,overwrites,copies;
+@property(nonatomic,copy) NSArray<NSDictionary *> *editorCloudLists;
+@property(nonatomic,strong) NSCache<NSString *, NSArray *> *editorCloudTracks;
 @end
 @implementation FMLXMCLocalStore
 + (instancetype)sharedStore{
@@ -63,11 +130,13 @@ static NSDictionary *FMNativeSingleTrack(NSDictionary *parameters){
         id decoded=valid?[NSJSONSerialization JSONObjectWithData:data options:0 error:nil]:nil;
         if([self validateState:decoded])_state=decoded;else error=FMLocalError(41,@"本机歌单数据无法读取；为保护原数据，本次不写入。");
     }
-    _loadError=error;_nextReservation=[_state[@"nextPlaylist"] longLongValue];return self;
+    _loadError=error;_nextReservation=[_state[@"nextPlaylist"] longLongValue];
+    _editorCloudTracks=[NSCache new];_editorCloudTracks.totalCostLimit=40000;_editorCloudLists=@[];return self;
 }
 - (BOOL)ownsPlaylistID:(NSString *)identifier{NSNumber *number=FMInteger(identifier);return number&&number.longLongValue<=FMFirstPlaylist&&number.longLongValue>FMFirstRecord;}
 - (BOOL)ownsRecordID:(NSString *)identifier{NSNumber *number=FMInteger(identifier);return number&&number.longLongValue<=FMFirstRecord&&number.longLongValue>INT64_MIN/2;}
 - (BOOL)validateState:(id)state{
+    if (![state isKindOfClass:NSDictionary.class] || !FMEditMetadataValid(state[@"editor"])) return NO;
     if(![state isKindOfClass:NSDictionary.class]||![state[@"schema"] isEqual:@1]||![state[@"playlists"] isKindOfClass:NSArray.class]||[state[@"playlists"] count]>300||![state[@"revision"] isKindOfClass:NSNumber.class]||![self ownsPlaylistID:[state[@"nextPlaylist"] description]]||![self ownsRecordID:[state[@"nextRecord"] description]])return NO;
     NSMutableSet *ids=[NSMutableSet set],*records=[NSMutableSet set];NSUInteger total=0;
     for(id row in state[@"playlists"]){
@@ -130,7 +199,7 @@ static NSDictionary *FMNativeSingleTrack(NSDictionary *parameters){
     self.state=[state copy];self.commits++;return YES;
 }
 - (NSDictionary *)commitRows:(NSArray *)rows nextRecord:(int64_t)nextRecord error:(NSError **)error{
-    NSDictionary *updated=@{@"schema":@1,@"revision":@([self.state[@"revision"] unsignedLongLongValue]+1),@"nextPlaylist":@(MIN(self.nextReservation,[self.state[@"nextPlaylist"] longLongValue])),@"nextRecord":@(nextRecord),@"playlists":rows};
+    NSMutableDictionary *updated=[self.state mutableCopy];updated[@"revision"]=@([self.state[@"revision"] unsignedLongLongValue]+1);updated[@"nextPlaylist"]=@(MIN(self.nextReservation,[self.state[@"nextPlaylist"] longLongValue]));updated[@"nextRecord"]=@(nextRecord);updated[@"playlists"]=rows;
     if(![self persist:updated error:error]){self.failedCommits++;return nil;}return updated;
 }
 - (void)notifyPlan:(NSDictionary *)plan error:(NSError *)error{
@@ -207,9 +276,179 @@ static NSDictionary *FMNativeSingleTrack(NSDictionary *parameters){
     NSMutableDictionary *replacement=[row mutableCopy];replacement[@"tracks"]=tracks;replacement[@"revision"]=@([row[@"revision"] unsignedLongLongValue]+1);[replacement removeObjectForKey:@"contentFingerprint"];
     NSMutableArray *rows=[self.state[@"playlists"] mutableCopy];[rows replaceObjectAtIndex:[rows indexOfObjectIdenticalTo:row] withObject:replacement];NSError *error=nil;[self commitRows:rows nextRecord:nextRecord error:&error];return FMReply(!error,nil,error.localizedDescription);
 }
-- (NSDictionary *)mergePlaylistList:(NSDictionary *)response{
-    NSArray *cloud=[response[@"code"] integerValue]==200&&[response[@"data"] isKindOfClass:NSArray.class]?response[@"data"]:@[];
-    NSMutableArray *rows=[cloud mutableCopy];[rows addObjectsFromArray:self.nativePlaylists];NSMutableDictionary *result=[response isKindOfClass:NSDictionary.class]?[response mutableCopy]:[NSMutableDictionary dictionary];result[@"code"]=@200;result[@"data"]=rows;return result;
+- (NSArray *)orderedLibrary:(NSArray *)nativeRows {
+    NSDictionary *meta = self.state[@"editor"] ?: @{};
+    NSMutableArray *rows=[NSMutableArray arrayWithCapacity:nativeRows.count];
+    for (id raw in nativeRows) {
+        NSString *key=FMEditListKey(raw);
+        if (!key) { [rows addObject:raw]; continue; }
+        NSDictionary *prefs=meta[@"lists"][key];
+        if (!prefs) { [rows addObject:raw]; continue; }
+        NSMutableDictionary *row=[raw mutableCopy];
+        if (prefs[@"title"]) row[@"title"]=prefs[@"title"];
+        NSArray *observed=[self.editorCloudTracks objectForKey:key];
+        if (observed && prefs[@"hidden"]) {
+            NSSet *hidden=[NSSet setWithArray:prefs[@"hidden"]];
+            NSUInteger excluded=0;
+            for (NSDictionary *track in observed) if ([hidden containsObject:track[@"key"]]) excluded++;
+            row[@"count"]=@(observed.count-excluded);
+        }
+        [rows addObject:row];
+    }
+    return FMEditOrder(rows,meta[@"order"],nil,^NSString *(NSDictionary *row){ return FMEditListKey(row); });
+}
+- (NSDictionary *)mergePlaylistList:(NSDictionary *)response {
+    [self.lock lock];
+    @try {
+        NSArray *cloud=[response[@"code"] integerValue]==200&&[response[@"data"] isKindOfClass:NSArray.class]?response[@"data"]:@[];
+        NSMutableArray *safe=[NSMutableArray array];
+        for (id row in cloud) {
+            if (!FMEditListKey(row)) continue;
+            NSNumber *identifier=FMInteger([row[@"id"] description]);
+            NSString *title=FMText(row[@"title"],256);
+            if (identifier.longLongValue<=0 || !title.length) continue;
+            [safe addObject:@{@"id":identifier,@"title":title,@"user_id":[row[@"user_id"] description]?:@"",@"count":@([row[@"count"] integerValue])}];
+        }
+        self.editorCloudLists=safe;
+        NSArray *native=[cloud arrayByAddingObjectsFromArray:self.nativePlaylists];
+        NSMutableDictionary *result=[response isKindOfClass:NSDictionary.class]?[response mutableCopy]:[NSMutableDictionary dictionary];
+        result[@"code"]=@200; result[@"data"]=[self orderedLibrary:native];
+        return result;
+    } @finally { [self.lock unlock]; }
+}
+- (NSArray *)editorPlaylists {
+    [self.lock lock];
+    @try {
+        NSArray *sorted=[self orderedLibrary:[self.editorCloudLists arrayByAddingObjectsFromArray:self.nativePlaylists]];
+        NSMutableArray *out=[NSMutableArray array];
+        for (NSDictionary *row in sorted) {
+            NSString *key=FMEditListKey(row);
+            if (key) [out addObject:@{@"key":key,@"id":row[@"id"],@"title":row[@"title"],@"count":row[@"count"]?:@0}];
+        }
+        return out;
+    } @finally { [self.lock unlock]; }
+}
+- (NSDictionary *)editorList:(NSString *)key {
+    for (NSDictionary *row in self.editorPlaylists) if ([row[@"key"] isEqual:key]) return row;
+    return nil;
+}
+- (NSArray *)editorTrackRows:(NSArray *)native {
+    if (![native isKindOfClass:NSArray.class] || native.count>20000) return nil;
+    NSMutableSet *keys=[NSMutableSet set]; NSMutableArray *out=[NSMutableArray arrayWithCapacity:native.count];
+    for (id row in native) {
+        NSString *key=FMEditTrackKey(row);
+        if (!key || [keys containsObject:key]) return nil;
+        [keys addObject:key];
+        [out addObject:@{@"key":key,@"title":FMText(row[@"title"],1024)?:@"未知歌曲",
+            @"singer":FMText(row[@"singer"],2048)?:FMText(row[@"artist"],2048)?:@""}];
+    }
+    return out;
+}
+- (NSArray *)editorTracks:(NSString *)key {
+    [self.lock lock];
+    @try {
+        NSDictionary *row=[self editorList:key];
+        if (!row) return nil;
+        if ([row[@"id"] longLongValue]<0) return [self editorTrackRows:[self row:row[@"id"]][@"tracks"]];
+        NSArray *raw=[self.editorCloudTracks objectForKey:key];
+        if (!raw) return nil;
+        NSDictionary *prefs=self.state[@"editor"][@"lists"][key];
+        return FMEditOrder(raw,prefs[@"order"],[NSSet setWithArray:prefs[@"hidden"]?:@[]],^NSString *(NSDictionary *entry){ return entry[@"key"]; });
+    } @finally { [self.lock unlock]; }
+}
+- (NSDictionary *)mergeTracks:(NSDictionary *)response playlistID:(NSString *)identifier {
+    if (![response isKindOfClass:NSDictionary.class] || [response[@"code"] integerValue]!=200 ||
+        ![response[@"data"] isKindOfClass:NSArray.class]) return response;
+    [self.lock lock];
+    @try {
+        for (NSDictionary *row in self.editorCloudLists) {
+            if (![[row[@"id"] description] isEqual:identifier]) continue;
+            NSString *key=FMEditListKey(row);
+            NSArray *raw=[self editorTrackRows:response[@"data"]];
+            if (!raw) { [self.editorCloudTracks removeObjectForKey:key]; return response; }
+            [self.editorCloudTracks setObject:raw forKey:key cost:MAX(1,raw.count)];
+            NSDictionary *prefs=self.state[@"editor"][@"lists"][key];
+            if (!prefs[@"hidden"] && !prefs[@"order"]) return response;
+            NSMutableDictionary *result=[response mutableCopy];
+            result[@"data"]=FMEditOrder(response[@"data"],prefs[@"order"],[NSSet setWithArray:prefs[@"hidden"]?:@[]],^NSString *(NSDictionary *entry){return FMEditTrackKey(entry);});
+            return result;
+        }
+        return response;
+    } @finally { [self.lock unlock]; }
+}
+- (BOOL)saveEdit:(NSDictionary *)prefs key:(NSString *)key order:(NSArray *)order error:(NSError **)error {
+    NSMutableDictionary *meta=[self.state[@"editor"] mutableCopy]?:[NSMutableDictionary dictionary];
+    if (key) {
+        NSMutableDictionary *lists=[meta[@"lists"] mutableCopy]?:[NSMutableDictionary dictionary];
+        lists[key]=prefs; meta[@"lists"]=lists;
+    }
+    if (order) meta[@"order"]=order;
+    NSMutableDictionary *next=[self.state mutableCopy];
+    next[@"editor"]=meta;
+    next[@"revision"]=@([self.state[@"revision"] unsignedLongLongValue]+1);
+    return [self persist:next error:error];
+}
+- (BOOL)renameEditorPlaylist:(NSString *)key title:(NSString *)title error:(NSError **)error {
+    [self.lock lock];
+    @try {
+        NSString *clean=[title stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (!FMText(clean,256).length) return FMEditFail(error,@"歌单名需为 1 至 256 个字符。");
+        NSDictionary *summary=[self editorList:key];
+        if (!summary) return FMEditFail(error,@"歌单已变化，请返回列表后重试。");
+        if ([summary[@"id"] longLongValue]<0) {
+            NSDictionary *row=[self row:summary[@"id"]];
+            NSMutableDictionary *copy=[row mutableCopy]; copy[@"title"]=clean;
+            copy[@"revision"]=@([row[@"revision"] unsignedLongLongValue]+1);
+            NSMutableArray *rows=[self.state[@"playlists"] mutableCopy];
+            rows[[rows indexOfObjectIdenticalTo:row]]=copy;
+            return [self commitRows:rows nextRecord:[self.state[@"nextRecord"] longLongValue] error:error]!=nil;
+        }
+        NSMutableDictionary *prefs=[self.state[@"editor"][@"lists"][key] mutableCopy]?:[NSMutableDictionary dictionary];
+        prefs[@"title"]=clean;
+        return [self saveEdit:prefs key:key order:nil error:error];
+    } @finally { [self.lock unlock]; }
+}
+- (BOOL)saveEditorListOrder:(NSArray *)keys error:(NSError **)error {
+    [self.lock lock];
+    @try {
+        NSArray *existing=[self.editorPlaylists valueForKey:@"key"];
+        if(!FMEditUnique(keys,1500) || keys.count!=existing.count ||
+           ![[NSSet setWithArray:keys] isEqualToSet:[NSSet setWithArray:existing]]) return FMEditFail(error,@"歌单列表已变化，请刷新后重试。");
+        // A cloud outage or a different account can temporarily hide lists.
+        // Reorder the visible slots, retaining the stored positions of others.
+        NSSet *visible=[NSSet setWithArray:keys];
+        NSMutableArray *merged=[NSMutableArray array];NSUInteger position=0;
+        for(NSString *previous in self.state[@"editor"][@"order"]) {
+            if ([visible containsObject:previous]) [merged addObject:keys[position++]];
+            else [merged addObject:previous];
+        }
+        while(position<keys.count) [merged addObject:keys[position++]];
+        return [self saveEdit:nil key:nil order:merged error:error];
+    } @finally { [self.lock unlock]; }
+}
+- (BOOL)saveEditorTracks:(NSArray *)desired replacing:(NSArray *)observed playlist:(NSString *)key error:(NSError **)error {
+    [self.lock lock];
+    @try {
+        NSDictionary *summary=[self editorList:key]; NSArray *current=[self editorTracks:key];
+        if (!summary || !current || ![[current valueForKey:@"key"] isEqual:observed] || !FMEditUnique(desired,20000))
+            return FMEditFail(error,@"歌单已变化，请重新打开后编辑。");
+        NSSet *remaining=[NSSet setWithArray:desired];
+        if (![remaining isSubsetOfSet:[NSSet setWithArray:observed]]) return FMEditFail(error,@"歌曲列表无效。");
+        if ([summary[@"id"] longLongValue]<0) {
+            NSDictionary *row=[self row:summary[@"id"]];
+            NSMutableDictionary *byKey=[NSMutableDictionary dictionary];
+            for(NSDictionary *track in row[@"tracks"]) byKey[FMEditTrackKey(track)]=track;
+            NSMutableArray *tracks=[NSMutableArray arrayWithCapacity:desired.count];
+            for(NSString *identifier in desired) [tracks addObject:byKey[identifier]];
+            NSDictionary *reply=[self updateRow:row tracks:tracks nextRecord:[self.state[@"nextRecord"] longLongValue]];
+            return [reply[@"code"] integerValue]==200 || FMEditFail(error,reply[@"msg"]?:@"歌单保存失败。");
+        }
+        NSMutableDictionary *prefs=[self.state[@"editor"][@"lists"][key] mutableCopy]?:[NSMutableDictionary dictionary];
+        NSMutableSet *hidden=[NSMutableSet setWithArray:prefs[@"hidden"]?:@[]];
+        for(NSString *record in observed) if(![remaining containsObject:record]) [hidden addObject:record];
+        prefs[@"hidden"]=[hidden.allObjects sortedArrayUsingSelector:@selector(compare:)]; prefs[@"order"]=desired;
+        return [self saveEdit:prefs key:key order:nil error:error];
+    } @finally { [self.lock unlock]; }
 }
 - (NSDictionary *)diagnostics{[self.lock lock];@try{return @{@"schema":@1,@"localPlaylists":@([self.state[@"playlists"] count]),@"pending":@(self.plans.count),@"commits":@(self.commits),@"failedCommits":@(self.failedCommits),@"overwrites":@(self.overwrites),@"copies":@(self.copies),@"cancelled":@(self.cancelled),@"loadFailed":@(self.loadError!=nil)};}@finally{[self.lock unlock];}}
 @end

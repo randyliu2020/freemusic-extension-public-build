@@ -130,5 +130,21 @@ final class InteractionUITests: XCTestCase {
         XCTAssertEqual(app.staticTexts["smoke.interaction.player-binding"].label, "Player binding: false")
         XCTAssertEqual(app.staticTexts["smoke.interaction.player-close-count"].label, "Closed: 2")
         record("reopened player preserves its original downward close", app: app)
+
+        open.tap()
+        XCTAssertTrue(visible.waitForExistence(timeout: 5))
+        firstLine.tap()
+        XCTAssertEqual(visible.label, "Selected lyric 0")
+        let lyricStart = lyrics.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15))
+        lyricStart.press(forDuration: 0.05, thenDragTo: lyricStart.withOffset(CGVector(dx: 0, dy: 60)))
+        XCTAssertTrue(visible.exists, "Short lyric scrolling leaves the player open")
+        let lyricMiddle = lyrics.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4))
+        lyricMiddle.press(forDuration: 0.05, thenDragTo: lyricMiddle.withOffset(CGVector(dx: 3, dy: 175)))
+        XCTAssertTrue(open.waitForExistence(timeout: 5))
+        expectation(for: NSPredicate(format: "label == %@", "Closed: 3"),
+                    evaluatedWith: app.staticTexts["smoke.interaction.player-close-count"])
+        waitForExpectations(timeout: 5)
+        XCTAssertEqual(app.staticTexts["smoke.interaction.player-binding"].label, "Player binding: false")
+        record("downward drag from the lyrics returns through the player presentation", app: app)
     }
 }

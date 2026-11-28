@@ -1,4 +1,5 @@
 #import "FMInteraction.h"
+#import "FMNavigation.h"
 #import <objc/runtime.h>
 
 @interface FMSearchScrollRegistration : NSObject
@@ -154,7 +155,10 @@ static void FMIListLayout(UIScrollView *self, SEL command) {
     }
 }
 static void FMIControllerAppeared(UIViewController *self, SEL command, BOOL animated) {
-    FMInteractionOriginalAppear(self, command, animated); [FMInteractions schedule];
+    FMInteractionOriginalAppear(self, command, animated);
+    [FMInteractions schedule];
+    // SwiftUI finishes installing the visible navigation item after appearance.
+    dispatch_async(dispatch_get_main_queue(), ^{ FMNavigationRefresh(); });
 }
 static void FMIControllerDisappeared(UIViewController *self, SEL command, BOOL animated) {
     FMInteractionOriginalDisappear(self, command, animated); [FMInteractions schedule];

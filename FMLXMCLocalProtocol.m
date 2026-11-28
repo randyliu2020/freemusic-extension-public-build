@@ -2,6 +2,7 @@
 #import "FMLXMCLocalStore.h"
 #import "FMTrackMetadata.h"
 static NSString *const FMLocalHandled=@"FMX.LXMC.LocalProtocolHandled";
+static NSURLRequest *FMEditorListRequest;
 static NSDictionary *FMParameters(NSString *string){
     NSMutableDictionary *values=[NSMutableDictionary dictionary];
     for(NSString *part in [string componentsSeparatedByString:@"&"]){NSRange equals=[part rangeOfString:@"="];if(equals.location==NSNotFound)continue;
@@ -17,12 +18,47 @@ static NSDictionary *FMParameters(NSString *string){
 @property(nonatomic,strong) NSURLResponse *response;
 @property(nonatomic,strong) NSMutableURLRequest *effective;
 @property(nonatomic,copy) NSString *action;
+@property(nonatomic,copy) NSString *playlistID;
+@property(nonatomic,copy) NSString *editorPlaylistKey;
+@property(nonatomic) BOOL directStream;
 @property(nonatomic,strong) dispatch_queue_t queue;
 @property(atomic) BOOL stopped;
 @property(atomic) BOOL finished;
 @property(atomic,strong) NSInputStream *bodyStream;
 @end
 @implementation FMLXMCLocalProtocol
++ (NSURLSessionDataTask *)loadEditorTracksForKey:(NSString *)key completion:(void (^)(NSError *))completion {
+    NSURLRequest *template;
+    @synchronized(FMLXMCLocalProtocol.class) { template=FMEditorListRequest; }
+    NSNumber *identifier=nil;
+    for(NSDictionary *row in FMLXMCLocalStore.sharedStore.editorPlaylists) if ([row[@"key"] isEqual:key]) { identifier=row[@"id"]; break; }
+    if(!template || identifier.longLongValue<=0) {
+        dispatch_async(dispatch_get_main_queue(),^{completion([NSError errorWithDomain:FMLXMCErrorDomain code:56 userInfo:@{NSLocalizedDescriptionKey:@"请先刷新资料库以载入当前账号的歌单。"}]);});
+        return nil;
+    }
+    NSURLComponents *url=[NSURLComponents componentsWithURL:template.URL resolvingAgainstBaseURL:NO];
+    NSMutableArray *query=[NSMutableArray array];
+    for(NSURLQueryItem *q in url.queryItems) if (![q.name isEqual:@"action"] && ![q.name isEqual:@"playlist_id"]) [query addObject:q];
+    [query addObject:[NSURLQueryItem queryItemWithName:@"action" value:@"playlist_get_tracks"]];
+    [query addObject:[NSURLQueryItem queryItemWithName:@"playlist_id" value:identifier.stringValue]];
+    url.queryItems=query;
+    NSMutableURLRequest *request=[template mutableCopy]; request.URL=url.URL; request.timeoutInterval=15;
+    request.cachePolicy=NSURLRequestReloadIgnoringLocalCacheData;
+    [NSURLProtocol removePropertyForKey:FMLocalHandled inRequest:request];
+    NSURLSession *session=[NSURLSession sessionWithConfiguration:NSURLSessionConfiguration.defaultSessionConfiguration];
+    NSURLSessionDataTask *task=[session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        [session finishTasksAndInvalidate];
+        id result = data.length && data.length <= 32*1024*1024 ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+        BOOL ok = [result isKindOfClass:NSDictionary.class] && [result[@"code"] integerValue]==200 && [result[@"data"] isKindOfClass:NSArray.class];
+        dispatch_async(dispatch_get_main_queue(),^{
+            NSError *problem=error;
+            if(!problem && (!ok || ![FMLXMCLocalStore.sharedStore editorTracks:key]))
+                problem=[NSError errorWithDomain:FMLXMCErrorDomain code:57 userInfo:@{NSLocalizedDescriptionKey:@"暂时无法读取这张歌单，请在资料库刷新后重试。"}];
+            completion(problem);
+        });
+    }];
+    [task resume]; return task;
+}
 + (BOOL)canInitWithRequest:(NSURLRequest *)request{
     NSURL *url=request.URL;if([NSURLProtocol propertyForKey:FMLocalHandled inRequest:request]||![url.scheme.lowercaseString isEqual:@"https"]||![url.host.lowercaseString isEqual:@"aacert.com"]||![url.path isEqual:@"/ms/api.php"]||url.user.length||url.password.length||(url.port&&url.port.integerValue!=443))return NO;
     NSString *action=FMParameters(url.query?:@"")[@"action"],*method=request.HTTPMethod.uppercaseString?:@"GET";
@@ -61,6 +97,12 @@ static NSDictionary *FMParameters(NSString *string){
         NSDictionary *bodyParameters=FMParameters([[NSString alloc]initWithData:body?:NSData.data encoding:NSUTF8StringEncoding]?:@"");
         if(!bodyParameters){[self fail:[NSError errorWithDomain:FMLXMCErrorDomain code:50 userInfo:@{NSLocalizedDescriptionKey:@"歌单请求含重复或无效字段，未转发。"}]];return;}
         self.effective=request;NSMutableDictionary *parameters=[FMParameters(request.URL.query?:@"") mutableCopy];self.action=parameters[@"action"]?:@"";[parameters addEntriesFromDictionary:bodyParameters];parameters[@"action"]=self.action;
+        self.playlistID=parameters[@"playlist_id"];
+        if ([self.action isEqual:@"playlist_get_tracks"]) {
+            for (NSDictionary *row in FMLXMCLocalStore.sharedStore.editorPlaylists) {
+                if ([[row[@"id"] description] isEqual:self.playlistID]) { self.editorPlaylistKey=row[@"key"]; break; }
+            }
+        }
         if(self.stopped)return;
         NSDictionary *result=[FMLXMCLocalStore.sharedStore responseForAction:self.action parameters:parameters importRequest:request];
         if(result){
@@ -97,19 +139,40 @@ static NSDictionary *FMParameters(NSString *string){
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveResponse:(NSURLResponse *)response completionHandler:(void (^)(NSURLSessionResponseDisposition))completionHandler{
     if(self.stopped||self.finished){completionHandler(NSURLSessionResponseCancel);return;}
     self.response=response;
-    if(![self.action isEqual:@"playlist_list"]&&!self.stopped)[self.client URLProtocol:self didReceiveResponse:response cacheStoragePolicy:NSURLCacheStorageNotAllowed];
+    if(![self.action isEqual:@"playlist_list"]&&![self.action isEqual:@"playlist_get_tracks"]&&!self.stopped)[self.client URLProtocol:self didReceiveResponse:response cacheStoragePolicy:NSURLCacheStorageNotAllowed];
     completionHandler(self.stopped?NSURLSessionResponseCancel:NSURLSessionResponseAllow);
 }
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)task didReceiveData:(NSData *)data{
     if(self.stopped||self.finished)return;
-    if([self.action isEqual:@"playlist_list"]){if(self.received.length+data.length>8*1024*1024){[self.task cancel];return;}[self.received appendData:data];}
+    if([self.action isEqual:@"playlist_get_tracks"] && !self.directStream){
+        if(self.received.length+data.length<=32*1024*1024){[self.received appendData:data];return;}
+        self.directStream=YES;
+        [self.client URLProtocol:self didReceiveResponse:self.response cacheStoragePolicy:NSURLCacheStorageNotAllowed];
+        [self.client URLProtocol:self didLoadData:self.received];[self.received setLength:0];
+        [self.client URLProtocol:self didLoadData:data];
+    }
+    else if([self.action isEqual:@"playlist_list"]){if(self.received.length+data.length>8*1024*1024){[self.task cancel];return;}[self.received appendData:data];}
     else[self.client URLProtocol:self didLoadData:data];
 }
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error{
     if(!self.stopped&&!self.finished){
         if([self.action isEqual:@"playlist_list"]){id response=!error?[NSJSONSerialization JSONObjectWithData:self.received options:0 error:nil]:nil;
-            if(FMLXMCLocalStore.sharedStore.nativePlaylists.count)[self deliver:[FMLXMCLocalStore.sharedStore mergePlaylistList:[response isKindOfClass:NSDictionary.class]?response:nil]];
-            else if(error)[self fail:error];else{self.finished=YES;[self.client URLProtocol:self didReceiveResponse:self.response cacheStoragePolicy:NSURLCacheStorageNotAllowed];[self.client URLProtocol:self didLoadData:self.received];[self.client URLProtocolDidFinishLoading:self];}
+            BOOL good=[response isKindOfClass:NSDictionary.class]&&[response[@"code"] integerValue]==200&&[response[@"data"] isKindOfClass:NSArray.class];
+            @synchronized(FMLXMCLocalProtocol.class){ FMEditorListRequest=good?[self.request copy]:nil; }
+            if(good || FMLXMCLocalStore.sharedStore.nativePlaylists.count)[self deliver:[FMLXMCLocalStore.sharedStore mergePlaylistList:good?response:nil]];
+            else { [FMLXMCLocalStore.sharedStore mergePlaylistList:nil]; if(error)[self fail:error];else{self.finished=YES;[self.client URLProtocol:self didReceiveResponse:self.response cacheStoragePolicy:NSURLCacheStorageNotAllowed];[self.client URLProtocol:self didLoadData:self.received];[self.client URLProtocolDidFinishLoading:self];} }
+        }else if([self.action isEqual:@"playlist_get_tracks"] && !self.directStream && !error){
+            id body=[NSJSONSerialization JSONObjectWithData:self.received options:0 error:nil];
+            if([body isKindOfClass:NSDictionary.class]&&[body[@"code"] integerValue]==200&&[body[@"data"] isKindOfClass:NSArray.class]) {
+                BOOL sameOwner=NO;
+                for(NSDictionary *row in FMLXMCLocalStore.sharedStore.editorPlaylists) if([row[@"key"] isEqual:self.editorPlaylistKey] &&
+                    [[row[@"id"] description] isEqual:self.playlistID]) { sameOwner=YES; break; }
+                NSDictionary *merged=sameOwner ? [FMLXMCLocalStore.sharedStore mergeTracks:body playlistID:self.playlistID] : body;
+                FMTrackMetadataObserveResponse(merged); [self deliver:merged];
+            } else {
+                self.finished=YES; [self.client URLProtocol:self didReceiveResponse:self.response cacheStoragePolicy:NSURLCacheStorageNotAllowed];
+                [self.client URLProtocol:self didLoadData:self.received];[self.client URLProtocolDidFinishLoading:self];
+            }
         }else if(error)[self fail:error];else{self.finished=YES;[self.client URLProtocolDidFinishLoading:self];}
     }[session finishTasksAndInvalidate];self.session=nil;
 }

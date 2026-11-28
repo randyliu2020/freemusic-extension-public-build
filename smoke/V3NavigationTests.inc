@@ -58,6 +58,20 @@ BOOL (^sameObjects)(NSArray *,NSArray *)=^BOOL(NSArray *a,NSArray *b) {
         [[NSJSONSerialization dataWithJSONObject:state options:NSJSONWritingPrettyPrinted error:nil] writeToURL:[self.output URLByAppendingPathComponent:@"navigation-startup.json"] atomically:YES];
         [self captureSurfaceDiagnostics:@"navigation-library-root-state"];
         [self screenshot:@"navigation-library-root.png"];
+        __block UIBarButtonItem *editorButton; __block UIViewController *editor;
+        Check(Until(^BOOL{
+            refresh();
+            for (UIBarButtonItem *button in AllToolbarItems(library.navigationItem))
+                if ([button.accessibilityIdentifier isEqual:@"FMX.library.editPlaylists"]) { editorButton=button; break; }
+            return editorButton.enabled && editorButton.target && editorButton.action;
+        },4),@"Recognized Library root exposes a working native playlist editor button");
+        Main(^{Check([UIApplication.sharedApplication sendAction:editorButton.action to:editorButton.target from:editorButton forEvent:nil],
+                      @"The actual Library toolbar item dispatches its registered action");});
+        Check(Until(^BOOL{editor=visibleTitle(@"管理歌单");return [editor isKindOfClass:UITableViewController.class]&&editor.navigationItem.leftBarButtonItem!=nil;},4),
+              @"Library action presents the real playlist editor");
+        Main(^{UIBarButtonItem *done=editor.navigationItem.leftBarButtonItem;
+            [UIApplication.sharedApplication sendAction:done.action to:done.target from:done forEvent:nil];});
+        Check(Until(^BOOL{return visibleTitle(@"资料库")==library;},4),@"Closing management returns to the same Library");
         Main(^{openFavorites();});
         Check(Until(^BOOL{
             favorites=visibleTitle(@"我喜欢");

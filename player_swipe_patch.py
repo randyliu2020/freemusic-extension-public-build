@@ -1,9 +1,4 @@
-"""Add left swipe to the ORIGINAL FullPlayer top-bar dismissal gesture.
-
-No UIKit modal is dismissed, no state is fabricated, and no gesture is installed
-over lyrics or controls. The original SwiftUI PresentationMode/Binding close
-path and its original downward condition remain intact. Input is never changed.
-"""
+"""Use FullPlayer's existing SwiftUI actions for top-bar and lyric dismissal."""
 from __future__ import annotations
 
 import argparse
@@ -22,6 +17,51 @@ CAVE = 0x509740  # after the lyric patch's 0x509720..0x509734 allocation
 ORIGINAL_CONDITION = 0x1ABB1C
 NATIVE_DISMISS = 0x1ABB44
 TRANSLATION_GETTER = 0x404DE4
+LYRIC_END_SITE = 0x1CD628
+LYRIC_END_CAVE = 0x50BE00
+LYRIC_NATIVE_ENDED = 0x1BD608
+FULL_PLAYER_SEEK = 0x1C6660
+FULL_PLAYER_DRAG = 0x1C6608
+
+# The original LyricsScroller attaches simultaneous DragGesture.onChanged.onEnded.
+# Its thunk passes the original gesture value (x0) and borrowed LyricsScroller (x1).
+# Run its original end action, preserving completion of a normal scroll. Only the
+# FullPlayer onSeek closure holds the validated native FullPlayer value, the same
+# capture layout as the top-bar gesture. Passing its capture and the original
+# DragGesture.Value invokes the ordinary host dismissal, with native ARC ownership.
+LYRIC_END_ASSEMBLY = """
+stp x19, x20, [sp, #-32]!
+stp x21, x30, [sp, #16]
+mov x19, x0
+mov x21, x1
+bl 0x1bd608
+ldr x9, [x21, #24]
+adrp x8, 0x1c6000
+add x8, x8, #0x660
+cmp x9, x8
+b.ne finished
+ldr x8, [x21, #32]
+cbz x8, finished
+mov x20, x19
+bl 0x404de4
+mov x8, #0x4062000000000000
+fmov d2, x8
+fcmp d1, d2
+b.le finished
+fabs d2, d0
+fadd d2, d2, d2
+fcmp d1, d2
+b.le finished
+mov x0, x19
+ldr x20, [x21, #32]
+bl 0x1c6608
+finished:
+ldp x21, x30, [sp, #16]
+ldp x19, x20, [sp], #32
+ret
+"""
+LYRIC_END_HEX = "f353bea9f57b01a9f30300aaf50301aafec5f297a90e40f9c8e5fff0088119913f0108eb01020054a81240f9c80100b4f40313aaece3fb97480ce8d20201679e2020621e0d01005402c0601e4228621e2020621e8d000054e00313aab41240f9eae9f297f57b41a9f353c2a8c0035fd6"
+LYRIC_END_REDIRECT = bytes.fromhex("e21900d042003891")
 
 # The original onEnded has saved LR and all callee-saved FP registers already.
 # translation returns dx/dy in d0/d1. Only caller-saved d2/d3/d4 and x8 are used;
@@ -55,6 +95,11 @@ CONTEXTS = {
     0x1D2574: "25d0ff17",
     0x1A4DB8: "216447f93d89f997e30300aa000100d000201891b50353f8e80315aae10313aab68354f8e20316aaf2850994",
     0x1A47B4: "216447f9be8af997e30300aa600100d000d01591a8c302d1130150f8e80313aae10317aaa94302d1380150f8e20318aa71870994",
+    0x1BC510: "800000b000801891a88302d1150150f8e80315aae10313aaa92302d1370150f8e20317aaf40316aa1c280994",
+    0x1CD620: "c1ffff902170019182ffff90422018913be8ff17",
+    0x1C771C: "ffc300d1f44f01a9fd7b02a9fd830091e20700f9f30300aa000080d220003fd608805ff808414139094100912801288a8102088be00313aae20740f9fd7b42a9f44f41a9ffc3009140001fd6",
+    LYRIC_NATIVE_ENDED: "fc6fbaa9fa6701a9f85f02a9f65703a9f44f04a9fd7b05a9fd430191",
+    0x1AA918: "28008052e84a0039e800009008811991e8d601a9",
 }
 
 
@@ -63,9 +108,10 @@ def patch_plan(original: bytes) -> list[Change]:
     if len(original) != ORIGINAL_BINARY_SIZE or sha256(original) != ORIGINAL_BINARY_SHA256:
         raise InteractionPatchError("Original FreeMusic 4.2.9 executable SHA256 mismatch")
     trampoline = bytes.fromhex(TRAMPOLINE_HEX)
+    lyric_end = bytes.fromhex(LYRIC_END_HEX)
     # The shared validator checks the complete zero-padding interval, executable
     # __TEXT permissions, no section overlap, and absence of encryption.
-    _verify_cave(original, CAVE + len(trampoline) - LYRIC_CAVE)
+    _verify_cave(original, LYRIC_END_CAVE + len(lyric_end) - LYRIC_CAVE)
     for offset, expected_hex in CONTEXTS.items():
         expected = bytes.fromhex(expected_hex)
         if original[offset:offset + len(expected)] != expected:
@@ -78,6 +124,10 @@ def patch_plan(original: bytes) -> list[Change]:
                "extend native top-bar dismissal with left-swipe condition"),
         Change(CAVE, bytes(len(trampoline)), trampoline,
                "left threshold OR unmodified native downward dismissal"),
+        Change(LYRIC_END_SITE, original[LYRIC_END_SITE:LYRIC_END_SITE+8], LYRIC_END_REDIRECT,
+               "extend the existing lyric scroll-ended action"),
+        Change(LYRIC_END_CAVE, bytes(len(lyric_end)), lyric_end,
+               "deliberate downward FullPlayer lyric drag invokes its native dismissal"),
     ]
 
 
@@ -87,13 +137,14 @@ def patch_binary(original: bytes) -> tuple[bytes, dict]:
     return result, {
         "original_sha256": sha256(original), "patched_sha256": sha256(result),
         "version": "FreeMusic 4.2.9 (4381)", "requires_resigning": True,
-        "scope": "existing FullPlayer top drag-handle and title-bar gestures only",
+        "scope": "existing FullPlayer top gestures and FullPlayer-owned lyric scroller",
+        "lyric_down_condition": "dy > 144 and dy > 2 * abs(dx)",
         "left_condition": "dx < -80 and -dx > 1.5 * abs(dy)",
         "original_downward_condition_preserved": True,
         "native_presentation_binding_preserved": True,
         "changes": [{"offset": hex(c.offset), "before": c.before.hex(),
                      "after": c.after.hex(), "reason": c.reason} for c in changes],
-        "limits": ["Does not add whole-screen swiping over lyrics or sliders.",
+        "limits": ["Only the existing lyric gesture with a verified FullPlayer seek owner can close the player.",
                    "Equivalent SwiftUI real-input tests do not execute the original IPA.",
                    "Original app requires device verification after valid re-signing."],
     }

@@ -4,6 +4,14 @@ Source-only build for a user-authorized modification of FreeMusic-Folia 4.2.9, b
 This repository does not contain the original application, signing identities,
 provisioning profiles, cookies, third-party music scripts, or music files.
 
+On FreeMusic 4.2.9 (4381), JS playback can reuse a verified local audio file
+or a previously resolved address for the same source, platform, track and
+quality. After an address fails, the player retries the resolver. Changing the
+selected script starts a new cache generation. Library playlist ordering,
+names, track ordering and removals are stored on the device. A deliberate
+downward drag in the lyrics can close the full player. Tapping a timed line
+continues to seek.
+
 The extension places 音源与扩展 inside the verified original Settings page and
 removes the global floating source button. Home search aggregation combines
 NetEase, Kugou, QQ and Qishui, retaining each result's real platform and ID.

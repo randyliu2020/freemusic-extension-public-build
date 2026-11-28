@@ -45,6 +45,7 @@
             __block AVPlayer *player=nil;
             __block NSMutableArray *attempts=NSMutableArray.array;
             __block BOOL current=YES;
+            __block NSUInteger discarded=0, bound=0;
             @try {
                 Main(^{
                     fixture=CFBridgingRelease(create());NSDictionary *state=CFBridgingRelease(copyState((__bridge void *)fixture));
@@ -53,11 +54,24 @@
                     bad=[NSURL URLWithString:state[@"bad"]];good=[NSURL URLWithString:state[@"good"]];
                     session=[[resolverClass alloc] initWithPlatform:@"wy" supportedQualities:@[@"128k",@"flac"] timeout:20 isCurrent:^BOOL{return current;} resolve:^dispatch_block_t(NSString *quality,NSTimeInterval budget,FMQualityAttemptCompletion completion){
                         [attempts addObject:quality];
-                        if([quality isEqual:@"flac"])completion(bad,nil);else lower=[completion copy];
+                        if([quality isEqual:@"flac"])completion(mode==2 ? nil : bad,nil);else lower=[completion copy];
                         return ^{};
                     }];
+                    if(mode==2) {
+                        [session setReplayLookup:^NSURL *(NSString *quality,FMQualityCandidateOrigin origin){
+                            return origin==FMQualityCandidateFromAddressCache&&[quality isEqual:@"flac"] ? bad : nil;
+                        } saveAddress:^(NSString *quality,NSURL *url){} discardFailed:^(NSString *quality,NSURL *url){
+                            Check([quality isEqual:@"flac"]&&[url isEqual:bad],@"Only the failing cached candidate is evicted");
+                            discarded++;
+                        }];
+                        session.didBindPlayer=^(AVPlayer *attached,NSURL *url,NSString *quality){
+                            Check(attached.currentItem!=nil,@"Replay receives the actual player item");
+                            bound++;
+                        };
+                    }
                     [session nextWithCompletion:^(NSURL *url,NSString *quality,NSError *error){
                         Check(url&&!error,@"Initial high-quality candidate resolves");
+                        if(mode==2)Check(attempts.count==0&&session.lastCandidateOrigin==FMQualityCandidateFromAddressCache,@"Host receives cached URL before JS");
                         registerURL(url,session,quality,@"wy:authored-adaptive");
                         if(mode==1)startPaused((__bridge void *)fixture,(__bridge void *)url);
                         else start((__bridge void *)fixture,(__bridge void *)url);
@@ -70,6 +84,7 @@
                     Check([state[@"actual_failures"] unsignedIntegerValue]>0 && [state[@"native_failures"] unsignedIntegerValue]==0,
                           @"Owned corrupt media reaches host failure callback before native skip");
                     Check([attempts isEqual:@[@"flac",@"128k"]],@"One highest attempt followed by one lower attempt");
+                    if(mode==2)Check(discarded==1&&bound==1,@"Real media failure evicts cached address, then refreshes its quality before downgrading");
                     player=CFBridgingRelease(copyPlayer((__bridge void *)fixture));
                     if(mode==2)[player pause];
                     FMQualityAttemptCompletion callback=lower;lower=nil;callback(good,nil);
@@ -83,6 +98,7 @@
                     Check([state[@"url"] isEqual:good.absoluteString],@"Swift URL bridge preserves exact escaped URL and genuine receiver");
                     Check([state[@"native_failures"] integerValue]==0,@"Native failure/skip is suppressed only while recovery succeeds");
                     player=CFBridgingRelease(copyPlayer((__bridge void *)fixture));
+                    if(mode==2)Check(bound==2,@"Replacement player also binds the replay observer");
                     if(mode>0){Check(player.rate==0,@"Initial pause and pause during resolution survive replacement");pausedChecks++;[player play];}
                     realFailures+=[state[@"actual_failures"] unsignedIntegerValue];
                 });
