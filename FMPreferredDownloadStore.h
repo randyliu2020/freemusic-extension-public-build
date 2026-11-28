@@ -7,7 +7,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (instancetype)initWithApplicationSupport:(NSURL *)support documents:(NSURL *)documents caches:(NSURL *)caches;
 - (nullable NSURL *)lookupTrack:(NSDictionary *)request;
 - (nullable NSURL *)lookupServer:(NSString *)server trackID:(NSString *)trackID;
-/// Suppress a failed version until a new file replaces it. Never removes a user's download.
-- (void)rejectURL:(NSURL *)URL;
+/// Begin one new user selection. Internal playback retries use the same selection.
+- (NSUInteger)beginPlaybackSelection;
+- (NSUInteger)playbackSelection;
+/// Retire a failed file revision for this selection. Stale callbacks are ignored.
+- (void)rejectURL:(NSURL *)URL forSelection:(NSUInteger)selection;
 @end
 NS_ASSUME_NONNULL_END

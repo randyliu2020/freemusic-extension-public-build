@@ -18,3 +18,16 @@ public func FMPlaybackQualityBridgeSetLabel(_ setter: UnsafeRawPointer,
         }
     }
 }
+
+// The native key builder already owns a complete Swift String at this call.
+@_silgen_name("FMPlaybackCacheCopySuffixForString")
+private func copySuffixForKey(_ key: UnsafeRawPointer) -> UnsafeRawPointer?
+
+@_cdecl("FMPlaybackCacheCopyKeySuffix")
+public func FMPlaybackCacheCopyKeySuffix(_ storage: UnsafeRawPointer?) -> UnsafeRawPointer? {
+    guard let storage else { return nil }
+    let string = storage.assumingMemoryBound(to: String.self).pointee as NSString
+    return withExtendedLifetime(string) {
+        copySuffixForKey(Unmanaged.passUnretained(string).toOpaque())
+    }
+}

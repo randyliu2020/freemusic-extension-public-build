@@ -3,11 +3,15 @@
 #import <TargetConditionals.h>
 NS_ASSUME_NONNULL_BEGIN
 FOUNDATION_EXPORT void FMPlaybackSequenceInstall(void);
+/// Snapshot of the actual current player item. No song identity or URL leaves the player.
+FOUNDATION_EXPORT NSNumber * _Nullable FMPlaybackSequenceIsLocalItem(void);
+FOUNDATION_EXPORT NSNotificationName const FMPlaybackItemDidChange;
 /// Exact host bridge: its original selection UUID has already been committed.
 FOUNDATION_EXPORT void FMPlaybackSequenceNativeSelection(id manager);
 FOUNDATION_EXPORT void FMPlaybackSequenceDidSetup(id manager, AVPlayer *player);
 FOUNDATION_EXPORT BOOL FMPlaybackSequenceSuppressOldFailure(id manager, AVPlayer * _Nullable player);
 FOUNDATION_EXPORT void FMPlaybackSequenceSourceTransition(void);
+FOUNDATION_EXPORT NSArray<AVPlayerItem *> *FMPlaybackSequencePlayingFile(NSURL *file);
 FOUNDATION_EXPORT NSDictionary *FMPlaybackSequenceDiagnostics(void);
 #if defined(FMX_ADAPTIVE_PLAYBACK_TESTING) && FMX_ADAPTIVE_PLAYBACK_TESTING && TARGET_OS_SIMULATOR
 FOUNDATION_EXPORT void FMPlaybackSequenceTestConfigure(void * _Nullable reconcile);

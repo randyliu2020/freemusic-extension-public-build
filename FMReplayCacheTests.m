@@ -22,6 +22,125 @@ static NSURL *Sample(NSURL *root, NSString *name, NSString *contents) {
     return url;
 }
 
+// The old on-disk format was an index keyed by a length-prefixed SHA-256 of
+// (platform, native ID, quality); rows contained no reversible song metadata.
+static void TestSongClear(NSURL *base, NSURL *sample, NSURL *one, NSURL *two) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSURL *root = [base URLByAppendingPathComponent:@"song-clear"];
+    FMReplayCache *store = Store(root, 4096, 64);
+    NSString *epoch = [store selectSourceFile:@"source.js" script:@"fixture"];
+    NSString *song = @"CaseMID";
+    NSArray *qualities = @[@"128k", @"320k", @"flac", @"flac24bit", @"future-format"];
+    NSMutableArray *keys = [NSMutableArray array], *files = [NSMutableArray array];
+    for (NSString *quality in qualities) {
+        NSString *key = [store keyForNamespace:epoch platform:@"tx" trackID:song quality:quality];
+        [store saveAddress:one forKey:key];
+        Check([store publishVerifiedAudio:sample fileExtension:@"wav" forKey:key], @"prepare one cached quality");
+        [keys addObject:key]; [files addObject:[store audioForKey:key]];
+    }
+    NSString *pending = [store keyForNamespace:epoch platform:@"tx" trackID:song quality:@"pending-only"];
+    NSString *otherPlatform = [store keyForNamespace:epoch platform:@"wy" trackID:song quality:@"320k"];
+    NSString *otherQQ = Key(store,epoch,@"casemid");
+    [store saveAddress:two forKey:otherPlatform];
+    Check([store publishVerifiedAudio:sample fileExtension:@"mp3" forKey:otherQQ], @"other QQ song shares audio contents");
+    NSURL *otherAudio = [store audioForKey:otherQQ];
+    NSUInteger removed = NSNotFound;
+    Check([store clearPlatform:@"qq" trackID:song removedEntries:&removed] && removed == qualities.count,
+          @"all qualities, including future formats, are removed by the native platform alias");
+    for (NSUInteger index=0; index<keys.count; index++)
+        Check(![store isCurrentKey:keys[index]] && ![store addressForKey:keys[index]] &&
+              ![fm fileExistsAtPath:[files[index] path]], @"original URL, complete audio and old token discarded");
+    Check([store isCurrentKey:otherPlatform] && [[store addressForKey:otherPlatform] isEqual:two] &&
+          [[store audioForKey:otherQQ] isEqual:otherAudio] && [fm fileExistsAtPath:sample.path],
+          @"other platforms, case-sensitive QQ identities and the original download survive");
+    Check(![store isCurrentKey:pending], @"unwritten in-flight request is retired");
+    dispatch_apply(8, dispatch_get_global_queue(QOS_CLASS_UTILITY,0), ^(size_t i){
+        NSString *old = i % 2 ? pending : keys[0];
+        [store saveAddress:two forKey:old];
+        [store publishVerifiedAudio:sample fileExtension:@"mp3" forKey:old];
+    });
+    NSString *fresh = [store keyForNamespace:epoch platform:@"tx" trackID:song quality:@"128k"];
+    Check([store isCurrentKey:fresh] && ![store audioForKey:fresh] && ![store addressForKey:fresh],
+          @"delayed resolver and transfer publications cannot repopulate a cleared song");
+    [store saveAddress:two forKey:fresh];
+    [store discardAddress:two forKey:keys[0]];
+    Check([[store addressForKey:fresh] isEqual:two], @"fresh playback can recache after clearing");
+    Check([store clearPlatform:@"tx" trackID:song removedEntries:&removed] && removed == 1 &&
+          [store clearPlatform:@"tx" trackID:song removedEntries:&removed] && removed == 0, @"repeat clear is idempotent");
+    NSString *coldArchiveKey = [store keyForNamespace:epoch platform:@"tx" trackID:song quality:@"new-after-restart"];
+    [store saveAddress:one forKey:coldArchiveKey];
+    FMReplayCache *cold = Store(root,4096,64);
+    Check([cold clearPlatform:@"qq" trackID:song removedEntries:&removed] && removed == 1,
+          @"persisted song digest permits clearing a new quality before selecting JS");
+    [cold selectSourceFile:@"source.js" script:@"fixture"];
+    Check(![cold addressForKey:[cold keyForNamespace:epoch platform:@"tx" trackID:song quality:@"new-after-restart"]] &&
+          [[cold audioForKey:Key(cold,epoch,@"casemid")] isEqual:otherAudio], @"cold clear is durable and targeted");
+    Check(![cold clearPlatform:@"qq" trackID:@"../Downloads/x" removedEntries:nil], @"malformed track never clears data");
+    NSURL *folder = [root URLByAppendingPathComponent:epoch];
+    Check([fm removeItemAtURL:folder error:nil], @"simulate an iOS disk cache purge");
+    Check([cold clearPlatform:@"qq" trackID:song removedEntries:&removed] && !removed &&
+          [[cold addressForKey:[cold keyForNamespace:epoch platform:@"wy" trackID:song quality:@"320k"]] isEqual:two],
+          @"clearing one song after an OS disk purge preserves unrelated live addresses");
+}
+
+static void TestPlayingFile(NSURL *base, NSURL *sample) {
+    FMReplayCache *store = Store([base URLByAppendingPathComponent:@"player-pins"],4096,64);
+    NSString *epoch = [store selectSourceFile:@"fixture.js" script:@"fixture"];
+    NSString *key = Key(store,epoch,@"playing");
+    Check([store publishVerifiedAudio:sample fileExtension:@"mp3" forKey:key], @"prepare current playback file");
+    NSURL *url = [store audioForKey:key];
+    @autoreleasepool {
+        __attribute__((objc_precise_lifetime)) NSObject *firstItem = [NSObject new];
+        [store protectAudio:url forPlaybackItem:firstItem];
+        [store protectAudio:url forPlaybackItem:firstItem];
+        @autoreleasepool {
+            __attribute__((objc_precise_lifetime)) NSObject *secondItem = [NSObject new];
+            [store protectAudio:url forPlaybackItem:secondItem];
+            NSUInteger removed = NSNotFound;
+            Check([store clearPlatform:@"qq" trackID:@"playing" removedEntries:&removed] && removed == 1 &&
+                  ![store audioForKey:Key(store,epoch,@"playing")] && ![store isCurrentKey:key],
+                  @"playing file is immediately undiscoverable for a later playback");
+            Check([[NSData dataWithContentsOfURL:url] isEqual:[NSData dataWithContentsOfURL:sample]],
+                  @"bound player items can reopen and seek the retired bytes");
+        }
+        Check([NSFileManager.defaultManager fileExistsAtPath:url.path], @"a second reader finishing does not interrupt the first");
+    }
+    Check(![NSFileManager.defaultManager fileExistsAtPath:url.path] && [NSFileManager.defaultManager fileExistsAtPath:sample.path],
+          @"last reader reclaims only the retired cache copy");
+}
+
+static void TestV11Clear(NSURL *base, BOOL beforeActivation, NSURL *sample, NSURL *address) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSURL *root = [base URLByAppendingPathComponent:beforeActivation ? @"v11-cold" : @"v11-open"];
+    FMReplayCache *seed = Store(root,4096,64);
+    NSString *epoch = [seed selectSourceFile:@"legacy.js" script:@"legacy source"];
+    NSURL *directory = [root URLByAppendingPathComponent:epoch isDirectory:YES];
+    NSURL *index = [directory URLByAppendingPathComponent:@"entries.plist"];
+    NSString *name = [NSUUID.UUID.UUIDString stringByAppendingPathExtension:@"wav"];
+    NSURL *audio = [directory URLByAppendingPathComponent:name];
+    Check([fm copyItemAtURL:sample toURL:audio error:nil], @"prepare previous-release audio");
+    NSString *target = @"a8afff1cd6e909debf6eb79b4f395783a91872de1ba0449eb9e28a9fb0a3bbe4", *second = @"5fad33831f0ac2e62f2e3b75433aaf420c5ab589fd4429ed269d375d0e5de6d4", *other = @"d1d4270046ee7a28ec1bfe66779d15a9385b136cf236b884c1e9b23389abbb28";
+    NSDictionary *legacy = @{target:@{@"url":address.absoluteString, @"file":name, @"bytes":@8, @"t":@1},
+                             second:@{@"url":address.absoluteString, @"t":@2},
+                             other:@{@"url":address.absoluteString, @"t":@3}};
+    Check([legacy writeToURL:index atomically:YES], @"write genuine v11 index shape");
+    FMReplayCache *store = Store(root,4096,64);
+    if (!beforeActivation) {
+        Check([[store selectSourceFile:@"legacy.js" script:@"legacy source"] isEqual:epoch], @"previous release epoch restored");
+        Check([[store audioForKey:Key(store,epoch,@"CaseMID")] isEqual:audio], @"v11 complete audio can be replayed before clearing");
+    }
+    NSUInteger removed = NSNotFound;
+    Check([store clearPlatform:@"qq" trackID:@"CaseMID" removedEntries:&removed] && removed == 2,
+          @"remove both previous-release qualities by their exact v11 digests");
+    Check(![fm fileExistsAtPath:audio.path] && [fm fileExistsAtPath:sample.path], @"only the old replay copy is unlinked");
+    NSDictionary *after = [NSDictionary dictionaryWithContentsOfURL:index];
+    Check(after.count == 1 && [after[other] isEqual:legacy[other]], @"other platform's original on-disk row survives unchanged");
+    [store selectSourceFile:@"legacy.js" script:@"legacy source"];
+    NSString *wy = [store keyForNamespace:epoch platform:@"wy" trackID:@"CaseMID" quality:@"320k"];
+    Check(![store addressForKey:Key(store,epoch,@"CaseMID")] && [[store addressForKey:wy] isEqual:address],
+          @"subsequent activation can see only the unrelated cache");
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         NSFileManager *fm = NSFileManager.defaultManager;
@@ -37,7 +156,7 @@ int main(int argc, const char *argv[]) {
         FMReplayCache *store = Store(root, 16, 4);
         NSString *epoch = [store selectSourceFile:file script:script];
         NSString *key = Key(store, epoch, @"private-fixture-song");
-        Check(epoch.length == 36 && key.length == 101, @"issue namespace-scoped key");
+        Check(epoch.length == 36 && [store isCurrentKey:key], @"issue namespace-scoped key");
         Check(![key containsString:@"private-fixture-song"], @"track identifiers are hashed");
         Check([Key(store, epoch, @"private-fixture-song") isEqual:key], @"same song source and quality use same key");
         Check(![Key(store, epoch, @"other-id") isEqual:key], @"another native id misses");
@@ -139,6 +258,10 @@ int main(int argc, const char *argv[]) {
         bounded = Store(secondRoot, 256, 2);
         [bounded selectSourceFile:@"test.js" script:@"return"];
         Check(![fm fileExistsAtPath:orphan.path] && [bounded addressForKey:x], @"orphan recovery preserves committed data");
+        TestSongClear(base,sample,one,two);
+        TestPlayingFile(base,sample);
+        TestV11Clear(base,YES,sample,one);
+        TestV11Clear(base,NO,sample,one);
         [fm removeItemAtURL:base error:nil];
         if (argc > 1) {
             NSDictionary *report = @{@"passed":@YES, @"assertion_count":@(checks), @"original_app_used":@NO};

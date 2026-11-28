@@ -1,5 +1,7 @@
 #import "FMPlaybackSequence.h"
 #import "FMAdaptivePlayback.h"
+#import "FMPlaybackCache.h"
+#import "FMPreferredDownloadStore.h"
 #import "FMPlaybackQualityDisplay.h"
 #import <CommonCrypto/CommonDigest.h>
 #import <mach-o/dyld.h>
@@ -30,6 +32,19 @@ typedef void (*FMNativeReconcile)(void * __attribute__((swift_context))) __attri
 @end
 static NSMapTable *FMSequenceWatches,*FMSequenceGenerations,*FMSequencePendingPlayers;
 static FMNativeReconcile FMSequenceReconcile;
+static __weak FMSequenceWatch *FMCurrentWatch;
+NSNotificationName const FMPlaybackItemDidChange = @"FMX.playbackItemChanged";
+NSNumber *FMPlaybackSequenceIsLocalItem(void) {
+    if (!NSThread.isMainThread) return nil;
+    FMSequenceWatch *watch = FMCurrentWatch;
+    if (!watch || watch.retired || !watch.owner || watch.player.currentItem != watch.item) return nil;
+    AVAsset *asset = watch.item.asset;
+    if (![asset isKindOfClass:AVURLAsset.class]) return nil;
+    NSURL *url = ((AVURLAsset *)asset).URL;
+    if (url.isFileURL) return @YES;
+    if ([@[@"http", @"https"] containsObject:url.scheme.lowercaseString ?: @""]) return @NO;
+    return nil;
+}
 static const uint8_t *FMSequenceBase;
 static BOOL FMSequenceAllowed,FMSequenceFixture;
 static NSUInteger FMSequenceSelections,FMSequenceCompensations,FMSequenceIgnored,FMSequenceExceptions;
@@ -102,6 +117,8 @@ void FMPlaybackSequenceNativeSelection(id manager) {
         FMSequenceState();if(!FMSequenceAllowed||!NSThread.isMainThread||!manager)return;
         NSUInteger generation=[[FMSequenceGenerations objectForKey:manager] unsignedIntegerValue]+1;
         [FMSequenceGenerations setObject:@(generation) forKey:manager];
+        [FMPreferredDownloadStore.sharedStore beginPlaybackSelection];
+        FMPlaybackCacheBeginSelection();
         FMSequenceWatch *old=[FMSequenceWatches objectForKey:manager];
         if(old.player) {
             [FMSequencePendingPlayers setObject:old.player forKey:manager];
@@ -118,6 +135,8 @@ void FMPlaybackSequenceDidSetup(id manager,AVPlayer *player) {
     FMSequenceWatch *watch=[FMSequenceWatch new];watch.owner=manager;watch.player=player;watch.item=player.currentItem;
     watch.generation=[[FMSequenceGenerations objectForKey:manager] unsignedIntegerValue];
     [FMSequenceWatches setObject:watch forKey:manager];__weak FMSequenceWatch *weak=watch;
+    FMCurrentWatch = watch;
+    [NSNotificationCenter.defaultCenter postNotificationName:FMPlaybackItemDidChange object:nil];
     watch.timer=[player addPeriodicTimeObserverForInterval:CMTimeMakeWithSeconds(0.5,600) queue:dispatch_get_main_queue() usingBlock:^(CMTime time){
         FMSequenceWatch *current=weak;if(!current)return;
         // A queued periodic callback may carry a pre-seek timestamp. Read the
@@ -134,6 +153,18 @@ void FMPlaybackSequenceSourceTransition(void) {
     // Current healthy playback is preserved, while a newly selected source can
     // supply the next song after the cache module resets native preload state.
     for(FMSequenceWatch *watch in FMSequenceWatches.objectEnumerator.allObjects)watch.requested=NO;
+}
+NSArray<AVPlayerItem *> *FMPlaybackSequencePlayingFile(NSURL *file) {
+    if (!NSThread.isMainThread || !file.isFileURL) return @[];
+    FMSequenceState();
+    NSMutableArray *items = [NSMutableArray array];
+    for (FMSequenceWatch *watch in FMSequenceWatches.objectEnumerator.allObjects) {
+        AVPlayerItem *item = watch.player.currentItem;
+        if (![item.asset isKindOfClass:AVURLAsset.class]) continue;
+        NSURL *url = ((AVURLAsset *)item.asset).URL;
+        if (url.isFileURL && [file.path.stringByStandardizingPath isEqual:url.path.stringByStandardizingPath]) [items addObject:item];
+    }
+    return items;
 }
 NSDictionary *FMPlaybackSequenceDiagnostics(void) {
     if(!NSThread.isMainThread)return @{};FMSequenceState();

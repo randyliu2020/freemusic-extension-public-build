@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 import struct
 import download_order_patch
+import song_menu_patch
 
 ORIGINAL_SHA256 = "59bb22eb6fb7a62bf574e8b42c9a16f1b3774368bda484a41ce9bea4b8af992f"
 ORIGINAL_SIZE = 6160080
@@ -82,6 +83,7 @@ def patch_binary(current: bytes, original: bytes) -> tuple[bytes, dict]:
     changes = []
     plan = [(offset, *entry) for offset, entry in PATCHES.items()]
     plan.extend(download_order_patch.changes(current, original))
+    plan.extend(song_menu_patch.changes(current, original))
     for offset, old, new, purpose in plan:
         if current[offset:offset+len(old)] != old:
             raise NavigationPatchError(f"Navigation patch location is occupied at {offset:#x}")

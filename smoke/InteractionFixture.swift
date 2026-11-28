@@ -4,6 +4,7 @@
 import SwiftUI
 import UIKit
 import AVFAudio
+import MediaPlayer
 import Darwin
 
 private func interactionCount(_ name: String) {
@@ -450,3 +451,105 @@ public func interactionFixtureSnapshot(_ pointer: UnsafeMutableRawPointer) -> Un
     return Unmanaged.passRetained(snapshot).toOpaque()
 }
 
+
+@MainActor
+private struct InteractionSongMenuFixture: View {
+    @State private var cleared = ""
+    @State private var queued = ""
+
+    @State private var translation = false
+    @State private var switchToken: Int32 = 0
+
+    private func playerLabel() -> Label<Text, Image> {
+        var item = Label("显示翻译", systemImage: "character.book.closed")
+        if let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "FMXMakePlayerMenuLabelForTest") {
+            typealias Make = @convention(c) (UnsafeMutableRawPointer?) -> Void
+            withUnsafeMutablePointer(to: &item) { unsafeBitCast(symbol, to: Make.self)(UnsafeMutableRawPointer($0)) }
+        }
+        return item
+    }
+
+    private func beginCurrentTrackFixture() {
+        let center = MPNowPlayingInfoCenter.default()
+        center.nowPlayingInfo = [MPMediaItemPropertyTitle: "Fixture A",
+                                 MPNowPlayingInfoPropertyExternalContentIdentifier: "qq_a_01"]
+        // XCUI cannot tap a second control through a presented native menu.
+        // Switch the system's actual track metadata only after the runner has
+        // seen the menu action, then acknowledge the value read from the center.
+        var token: Int32 = 0
+        let result = notify_register_dispatch("org.codex.fmx.smoke.switch-player-menu-track", &token, .main) { _ in
+            DispatchQueue.main.async {
+                let current = MPNowPlayingInfoCenter.default()
+                current.nowPlayingInfo = [MPMediaItemPropertyTitle: "Fixture B",
+                                          MPNowPlayingInfoPropertyExternalContentIdentifier: "wy_b"]
+                if current.nowPlayingInfo?[MPNowPlayingInfoPropertyExternalContentIdentifier] as? String == "wy_b" {
+                    notify_post("org.codex.fmx.smoke.player-menu-track-switched")
+                }
+            }
+        }
+        if result == NOTIFY_STATUS_OK { switchToken = token }
+    }
+
+    private func label(for id: String) -> Label<Text, Image> {
+        var item = Label("下一首播放", systemImage: "text.line.first.and.arrowtriangle.forward")
+        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "FMXMakeSongMenuLabelForTest") else {
+            return item
+        }
+        typealias Make = @convention(c) (UnsafeMutableRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?) -> Void
+        let server = (id == "A" ? "wy" : "qq") as NSString
+        let track = id as NSString
+        withExtendedLifetime((server, track)) {
+            withUnsafeMutablePointer(to: &item) { slot in
+                unsafeBitCast(symbol, to: Make.self)(slot, Unmanaged.passUnretained(server).toOpaque(), Unmanaged.passUnretained(track).toOpaque())
+            }
+        }
+        return item
+    }
+    private func actions(_ id: String) -> some View {
+        Button(action: { queued = id }, label: { label(for: id) })
+    }
+    var body: some View {
+        VStack(spacing: 32) {
+            Text("正在播放 C")
+            ForEach(["A", "B"], id: \.self) { id in
+                HStack {
+                    Text("同名歌曲").accessibilityIdentifier("song.title." + id)
+                    Spacer()
+                    Menu { actions(id) } label: {
+                        Label("更多", systemImage: "ellipsis")
+                    }.accessibilityIdentifier("song.menu." + id)
+                }
+                .padding(.horizontal, 24)
+                .contentShape(Rectangle())
+                .contextMenu { actions(id) }
+            }
+            Menu {
+                Toggle(isOn: $translation, label: playerLabel)
+            } label: {
+                Label("播放器更多", systemImage: "ellipsis.circle")
+            }
+            .accessibilityIdentifier("song.menu.player")
+            Text(translation ? "translation-on" : "translation-off")
+                .accessibilityIdentifier("song.menu.translation")
+            Text("clear-" + cleared).accessibilityIdentifier("song.clear.result")
+            Text("queue-" + queued).accessibilityIdentifier("song.queue.result")
+        }
+        .onAppear { beginCurrentTrackFixture() }
+        .onDisappear {
+            if switchToken != 0 { notify_cancel(switchToken); switchToken = 0 }
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("FMX.songCache.testCompleted"))) { event in
+            if let server = event.userInfo?["server"] as? String, let id = event.userInfo?["id"] as? String {
+                cleared = server + "-" + id
+            }
+        }
+    }
+}
+
+@_cdecl("FMInteractionMakeSongMenuFixture")
+@MainActor
+public func interactionMakeSongMenuFixture() -> UnsafeMutableRawPointer {
+    let controller = UIHostingController(rootView: InteractionSongMenuFixture())
+    return Unmanaged.passRetained(controller as UIViewController).toOpaque()
+}

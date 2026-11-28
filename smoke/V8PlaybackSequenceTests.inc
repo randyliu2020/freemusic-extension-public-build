@@ -31,13 +31,20 @@ void (^endSequenceAudio)(NSDictionary *)=^(NSDictionary *saved){
     Check(create&&state&&copyPlayer&&start&&stop&&configure&&configureSequence&&select&&tick&&failure&&registerURL&&transition&&setup&&nativeFailure&&reconcile&&resolverClass,@"Sequence and genuine native fixture exports loaded");
     __block id fixture=nil;__block FMQualityResolver *resolver=nil;__block FMQualityAttemptCompletion delayed=nil;
     __block NSURL *good=nil;__block AVPlayer *oldPlayer=nil;__block NSUInteger resolverCancels=0;
+    FMPreferredDownloadStore *downloads = [(id)NSClassFromString(@"FMPreferredDownloadStore") sharedStore];
+    Check(downloads != nil, @"The production manual-download store is available");
+    __block NSUInteger selectionA = 0;
     __block NSDictionary *oldAudio=nil;
     @try {
         Main(^{
             oldAudio=beginSequenceAudio();
             configure(setup,nativeFailure);configureSequence(reconcile);fixture=CFBridgingRelease(create());
             NSDictionary *initial=CFBridgingRelease(state((__bridge void *)fixture));
-            NSURL *bad=[NSURL URLWithString:initial[@"bad"]];good=[NSURL URLWithString:initial[@"good"]];select(fixture);
+            NSURL *bad=[NSURL URLWithString:initial[@"bad"]];good=[NSURL URLWithString:initial[@"good"]];
+            NSUInteger before = downloads.playbackSelection;
+            select(fixture);
+            selectionA = downloads.playbackSelection;
+            Check(selectionA == before + 1, @"A committed native selection starts exactly one local retry scope");
             resolver=[[resolverClass alloc] initWithPlatform:@"wy" supportedQualities:@[@"flac",@"128k"] timeout:20 isCurrent:^BOOL{return YES;} resolve:^dispatch_block_t(NSString *quality,NSTimeInterval budget,FMQualityAttemptCompletion complete){
                 if([quality isEqual:@"flac"])complete(bad,nil);else delayed=[complete copy];
                 return ^{resolverCancels++;};
@@ -49,7 +56,9 @@ void (^endSequenceAudio)(NSDictionary *)=^(NSDictionary *saved){
         Check(Until(^BOOL{return delayed!=nil;},12),@"Actual A media failure starts a held lower-quality request");
         Main(^{
             oldPlayer=CFBridgingRelease(copyPlayer((__bridge void *)fixture));
+            Check(downloads.playbackSelection == selectionA, @"Media setup, failure and adaptive fallback did not start a new selection");
             select(fixture);select(fixture); // B then C commit; neither URL has installed a player yet.
+            Check(downloads.playbackSelection == selectionA + 2, @"B and C each reopen local downloads exactly once");
             Check(failure(fixture,oldPlayer),@"Pending newest selection suppresses an old player's late failure/skip");
             tick(fixture,oldPlayer,100,105);
             FMQualityAttemptCompletion late=delayed;delayed=nil;late(good,nil);
@@ -66,7 +75,7 @@ void (^endSequenceAudio)(NSDictionary *)=^(NSDictionary *saved){
             NSDictionary *current=CFBridgingRelease(state((__bridge void *)fixture));
             return [current[@"setups"] integerValue]==2&&[current[@"status"] integerValue]==AVPlayerItemStatusReadyToPlay&&[current[@"time"] doubleValue]>0.1;
         },12),@"Newest real media loads and advances after pending selection");
-        return @{@"consecutive_pending_selections":@2,@"held_real_failure_rejected":@YES,@"latest_actual_media_plays":@YES,
+        return @{@"manual_retry_scoped_to_real_selections":@YES,@"consecutive_pending_selections":@2,@"held_real_failure_rejected":@YES,@"latest_actual_media_plays":@YES,
             @"scope":@"production extension and actual AVPlayer; authored native host",@"original_app_runtime_verified":@NO};
     } @finally {Main(^{[resolver cancel];transition();configureSequence(NULL);configure(NULL,NULL);if(fixture)stop((__bridge void *)fixture);endSequenceAudio(oldAudio);});}
 }];

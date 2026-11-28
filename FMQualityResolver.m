@@ -15,7 +15,7 @@ static BOOL FMQValidURL(NSURL *URL) {
 }
 
 @implementation FMQualityResolver {
-    NSArray<NSString *> *_qualities;
+    NSArray<NSString *> *_qualities, *_onlineOrder;
     NSUInteger _nextIndex, _attemptToken;
     NSTimeInterval _remaining, _resolutionBudget, _attemptStarted;
     BOOL (^_isCurrent)(void);
@@ -54,6 +54,7 @@ static BOOL FMQValidURL(NSURL *URL) {
                          timeout:(NSTimeInterval)timeout isCurrent:(BOOL (^)(void))isCurrent resolve:(FMQualityAttemptResolver)resolve {
     if ((self = [super init])) {
         _qualities = [self.class orderedQualitiesForPlatform:platform supportedQualities:supportedQualities];
+        _onlineOrder = _qualities;
         _resolutionBudget = isfinite(timeout) && timeout > 0 ? MIN(timeout, 60) : 35;
         _remaining = _resolutionBudget;
         _isCurrent = [isCurrent copy]; _resolve = [resolve copy];
@@ -163,10 +164,24 @@ static BOOL FMQValidURL(NSURL *URL) {
     }
     if (!_qualities.count || !_resolve) { [self terminate:FMQError(FMQualityResolverNoSupportedQuality,@"No supported common quality")]; return; }
     if (_remaining <= 0.001) { [self terminate:FMQError(NSURLErrorTimedOut,@"Total quality resolution time exhausted")]; return; }
-    if (!_resumeQuality && _nextIndex >= _qualities.count) { [self terminate:FMQError(FMQualityResolverExhausted,@"All supported qualities failed or returned a previously failed URL")]; return; }
+    if (_lookup && !_nextIndex && !_resumeQuality) {
+        // A lower tier may be the only address that resolved on the previous play.
+        // Reuse the highest available address before creating a fresh JS worker.
+        for (NSString *tier in _qualities) {
+            NSURL *saved = _lookup(tier, FMQualityCandidateFromAddressCache);
+            if (!FMQValidURL(saved) || [_returnedURLs containsObject:saved.absoluteString]) continue;
+            NSMutableArray *remaining = _qualities.mutableCopy;
+            [remaining removeObject:tier];
+            _onlineOrder = [@[tier] arrayByAddingObjectsFromArray:remaining];
+            _nextIndex = 1;
+            [self deliverCandidate:saved quality:tier origin:FMQualityCandidateFromAddressCache refreshed:NO];
+            return;
+        }
+    }
+    if (!_resumeQuality && _nextIndex >= _onlineOrder.count) { [self terminate:FMQError(FMQualityResolverExhausted,@"All supported qualities failed or returned a previously failed URL")]; return; }
     BOOL resuming = _resumeQuality != nil;
     BOOL refresh = resuming && _lastCandidateOrigin != FMQualityCandidateFromAudioCache;
-    NSString *quality = _resumeQuality ?: _qualities[_nextIndex++];
+    NSString *quality = _resumeQuality ?: _onlineOrder[_nextIndex++];
     _resumeQuality = nil;
     if (_lookup && !refresh) {
         NSURL *remote = _lookup(quality,FMQualityCandidateFromAddressCache);

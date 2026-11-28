@@ -106,6 +106,75 @@
             invalidationsBefore = [((NSDictionary *)CFBridgingRelease(copyState((__bridge void *)fixture)))[@"invalidations"] unsignedIntegerValue];
             [manager activate:@{@"file":fixtureFiles[0], @"name":@"Authored cache A"}];
             initializingKey = currentKey();
+            // Exercise the exact single-song policy with a real Swift receiver and
+            // actual temporary files in the simulator's original cache directory.
+            NSString *nativeServer=@"wy", *song=[NSString stringWithFormat:@"fixture-%@", NSUUID.UUID.UUIDString];
+            NSString *base=[NSString stringWithFormat:@"%@_%@",nativeServer,song];
+            NSURL *caches=[NSFileManager.defaultManager URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask].firstObject;
+            NSURL *nativeFolder=[caches URLByAppendingPathComponent:@"MusicCache" isDirectory:YES];
+            Check([NSFileManager.defaultManager createDirectoryAtURL:nativeFolder withIntermediateDirectories:YES attributes:nil error:nil],@"Prepare native automatic cache for a single song");
+            NSURL *target=[nativeFolder URLByAppendingPathComponent:[base stringByAppendingPathExtension:@"mp3"]];
+            NSURL *foreign=[nativeFolder URLByAppendingPathComponent:[base stringByAppendingString:@"other.mp3"]];
+            NSURL *cover=[nativeFolder URLByAppendingPathComponent:[base stringByAppendingString:@"_cover.jpg"]];
+            NSString *targetKey=[base stringByAppendingString:@"|320k"], *otherKey=[base stringByAppendingString:@"other|320k"];
+            void *(*suffixFor)(NSString *) = (void *)dlsym(self.extensionHandle,"FMPlaybackCacheCopySuffixForString");
+            BOOL (*clearTrack)(NSString *,NSString *,NSUInteger *) = (void *)dlsym(self.extensionHandle,"FMPlaybackCacheClearTrack");
+            Check(suffixFor && clearTrack,@"Exact native clear API and per-track key bridge loaded");
+            NSString *(^suffix)(NSString *)=^NSString *(NSString *name) { return CFBridgingRelease(suffixFor(name)); };
+            NSString *prior=suffix(targetKey), *unrelated=suffix(otherKey);
+            for (NSURL *file in @[target,foreign,cover]) Check([automaticBytes writeToURL:file atomically:YES],@"Write simulator-owned cache fixtures");
+            NSUInteger removed=0;
+            Check(clearTrack(nativeServer,song,&removed) && removed==1 && ![NSFileManager.defaultManager fileExistsAtPath:target.path],
+                  @"The target native MusicCache MP3 is removed");
+            Check(![suffix(targetKey) isEqual:prior] && [suffix(otherKey) isEqual:unrelated] &&
+                  [suffix([base stringByAppendingString:@"|128k"]) isEqual:suffix(targetKey)],
+                  @"All qualities of one native address/preload key change; another song keeps its exact generation");
+            Check(clearTrack(nativeServer,song,&removed) && removed==0 && [NSData dataWithContentsOfURL:foreign] && [NSData dataWithContentsOfURL:cover],
+                  @"Repeated clear ignores similar song IDs and preserves artwork");
+            // Earlier downloads may be filed under a native song_id even though
+            // the primary id in downloaded_tracks.json is the row identifier.
+            NSFileManager *files = NSFileManager.defaultManager;
+            NSURL *support = [files URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
+            NSURL *registry = [support URLByAppendingPathComponent:@"downloaded_tracks.json"];
+            BOOL hadRegistry = [files fileExistsAtPath:registry.path];
+            NSData *original = hadRegistry ? [NSData dataWithContentsOfURL:registry] : nil;
+            NSArray *existingRows = original ? [NSJSONSerialization JSONObjectWithData:original options:0 error:nil] : @[];
+            Check((!hadRegistry || original) && [existingRows isKindOfClass:NSArray.class], @"Preserve the simulator download registry");
+            Check([files createDirectoryAtURL:support withIntermediateDirectories:YES attributes:nil error:nil], @"Prepare the simulator registry");
+            NSMutableDictionary *row = [@{@"server":@"netease", @"id":NSUUID.UUID.UUIDString, @"song_id":song, @"platform":@0} mutableCopy];
+            void (^writeRow)(void) = ^{
+                NSData *data = [NSJSONSerialization dataWithJSONObject:[existingRows arrayByAddingObject:row] options:0 error:nil];
+                Check([data writeToURL:registry atomically:YES], @"Install an authored row with a separate song identity");
+            };
+            @try {
+                writeRow();
+                Check([[@"registered" dataUsingEncoding:NSUTF8StringEncoding] writeToURL:target atomically:YES],
+                      @"File the historical manual download under its verified song_id");
+                Check(clearTrack(nativeServer,song,&removed) && !removed && [files fileExistsAtPath:target.path],
+                      @"A platform-confirmed registered song_id protects a manual file under the alias");
+                row[@"platform"] = @3;
+                writeRow();
+                Check(clearTrack(nativeServer,song,&removed) && removed==1 && ![files fileExistsAtPath:target.path],
+                      @"A conflicting registration platform does not claim unrelated automatic media");
+            } @finally {
+                if (hadRegistry) [original writeToURL:registry atomically:YES];
+                else [files removeItemAtURL:registry error:nil];
+                [files removeItemAtURL:target error:nil];
+            }
+            void (*deferRetry)(NSString *,NSString *) = dlsym(self.extensionHandle,"FMPlaybackCacheDeferDownloadRetry");
+            void (*beginRetry)(void) = dlsym(self.extensionHandle,"FMPlaybackCacheBeginSelection");
+            Check(deferRetry && beginRetry, @"Scoped native manual retry is available");
+            NSString *beforeRetry = suffix(targetKey);
+            deferRetry(nativeServer,song);
+            NSString *afterFailure = suffix(targetKey);
+            deferRetry(nativeServer,song);
+            Check(![beforeRetry isEqual:afterFailure] && [afterFailure isEqual:suffix(targetKey)] && [unrelated isEqual:suffix(otherKey)],
+                  @"A failed manual file retires its old native URL only once during that play");
+            beginRetry();
+            Check(![afterFailure isEqual:suffix(targetKey)] && [unrelated isEqual:suffix(otherKey)],
+                  @"A new selection rechecks this song's downloaded file ahead of its previous online fallback");
+            [NSFileManager.defaultManager removeItemAtURL:foreign error:nil];
+            [NSFileManager.defaultManager removeItemAtURL:cover error:nil];
             seedFixture((__bridge void *)fixture, initializingKey.UTF8String);
             Check(keyHit((__bridge void *)fixture, initializingKey.UTF8String)==3, @"Native caches can refill during asynchronous JS initialization");
         });

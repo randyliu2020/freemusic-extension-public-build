@@ -176,8 +176,42 @@
             },6),@"The local AVPlayer clock advances again after seeking");
             fileRequests=requestCount()-beforeFile;
             Check(fileRequests==0,@"No JS musicUrl HTTP or native origin request during local resolution, play and seek");
+            // Native preload/resume may install a previously resolved URL without
+            // registering any new adaptive session. The item must keep the
+            // retired file until it finishes, even in this reused-player path.
+            NSString *playingTrack = NSUUID.UUID.UUIDString;
+            __block NSString *playingKey;
+            Main(^{
+                playingKey = [store keyForNamespace:manager.replayNamespace platform:@"tx" trackID:playingTrack quality:@"128k"];
+            });
+            Check([store publishVerifiedAudio:cachedFile fileExtension:@"wav" forKey:playingKey],
+                  @"Publish an independent cache file for the active-item regression");
+            NSURL *playingFile = [store audioForKey:playingKey];
+            Check(playingFile.isFileURL && ![playingFile isEqual:cachedFile], @"The second fixture has its own physical file");
+            Main(^{
+                selectionWillChange(receiver);
+                NSUInteger before = [adaptiveState()[@"bound"] unsignedIntegerValue];
+                start((__bridge void *)receiver, (__bridge void *)playingFile);
+                player = CFBridgingRelease(copyPlayer((__bridge void *)receiver));
+                Check([adaptiveState()[@"bound"] unsignedIntegerValue] == before,
+                      @"Native file reuse has no active resolver registration");
+            });
+            Check(Until(^BOOL{return player.currentItem.status == AVPlayerItemStatusReadyToPlay;},8),
+                  @"The reused local AVPlayerItem is ready");
+            __block BOOL soughtAfterClear = NO;
+            Main(^{
+                [player pause];
+                NSUInteger removed = 0;
+                Check([store clearPlatform:@"tx" trackID:playingTrack removedEntries:&removed] && removed == 1 &&
+                      ![store audioForKey:playingKey] && [playingFile checkResourceIsReachableAndReturnError:nil],
+                      @"Clearing revokes future lookups while a real native-bound AVPlayerItem holds the file");
+                [player seekToTime:CMTimeMake(3,2) toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero
+                 completionHandler:^(BOOL finished){dispatch_async(dispatch_get_main_queue(),^{soughtAfterClear=finished;});}];
+            });
+            Check(Until(^BOOL{return soughtAfterClear && fabs(CMTimeGetSeconds(player.currentTime) - 1.5)<0.1;},5),
+                  @"After clearing its cache the same item still seeks to new media");
             localPlaylistEvidence = SmokeLocalPlaylistRoutes(manager, store, observeMetadata, replayRequest,
-                                                            workerCount, requestCount, ^{
+                                                            workerCount, requestCount, dlsym(self.extensionHandle,"FMXClearSongCache"), ^{
                 Main(^{ selectionWillChange(receiver); });
             }, ^(NSURL *localFile) {
                 Main(^{
@@ -210,8 +244,38 @@
             Check([FetchSearchFixture(replayRequest)[@"data"][@"url"] isEqual:addressA] &&
                   requestCount() == beforeReturn + 1, @"Returning A after B requires a fresh JS address");
         } @finally { [NSFileManager.defaultManager removeItemAtURL:otherFile error:nil]; }
-        return @{@"local_playlist_routing":localPlaylistEvidence, @"same_source_replay_without_js":@YES, @"source_switch_gets_own_url":@YES,
+        void (*clearSong)(NSString *, NSString *) = dlsym(self.extensionHandle,"FMXClearSongCache");
+        Check(clearSong != NULL, @"Track menus and the smoke host use the same clear action");
+        __block NSString *targetKey, *lowerKey, *otherTrackKey, *otherPlatformKey;
+        Main(^{
+            targetKey = [store keyForNamespace:manager.replayNamespace platform:@"tx" trackID:@"highest" quality:@"flac24bit"];
+            lowerKey = [store keyForNamespace:manager.replayNamespace platform:@"tx" trackID:@"highest" quality:@"128k"];
+            otherTrackKey = [store keyForNamespace:manager.replayNamespace platform:@"tx" trackID:@"different" quality:@"128k"];
+            otherPlatformKey = [store keyForNamespace:manager.replayNamespace platform:@"wy" trackID:@"highest" quality:@"128k"];
+        });
+        NSURL *clearSample = SmokeWriteQualityWave();
+        NSURL *testURL = [NSURL URLWithString:addressA];
+        Check([store publishVerifiedAudio:clearSample fileExtension:@"wav" forKey:lowerKey]
+              && [store publishVerifiedAudio:clearSample fileExtension:@"wav" forKey:otherTrackKey], @"Prepare independent automatic song caches");
+        [store saveAddress:testURL forKey:otherPlatformKey];
+        Check([[store addressForKey:targetKey] isEqual:testURL], @"A higher tier address is also present before clearing");
+        Main(^{ clearSong(@"qq", @"highest"); });
+        Check(![store audioForKey:lowerKey] && ![store addressForKey:targetKey], @"The actual song action invalidates both complete audio and the address across qualities");
+        [store saveAddress:testURL forKey:targetKey];
+        Check(![store publishVerifiedAudio:clearSample fileExtension:@"wav" forKey:lowerKey]
+              && ![store addressForKey:targetKey], @"Delayed writes for the previous song keys cannot restore a cleared entry");
+        Check([store audioForKey:otherTrackKey] && [[store addressForKey:otherPlatformKey] isEqual:testURL],
+              @"Other songs and the same identifier on another service keep their caches");
+        [NSFileManager.defaultManager removeItemAtURL:clearSample error:nil];
+        NSUInteger resolutionsBefore = workerCount(), requestsBefore = requestCount();
+        Check([FetchSearchFixture(replayRequest)[@"data"][@"url"] isEqual:addressA] &&
+              workerCount() == resolutionsBefore + 1 && requestCount() == requestsBefore + 1,
+              @"The next playback after a song menu clear makes one new source resolution");
+        NSDictionary *clearEvidence = @{@"cleared_address_and_audio":@YES, @"stale_writes_rejected":@YES,
+                                        @"other_tracks_preserved":@YES, @"new_resolutions":@(workerCount()-resolutionsBefore)};
+        return @{@"single_song_clear":clearEvidence, @"local_playlist_routing":localPlaylistEvidence, @"same_source_replay_without_js":@YES, @"source_switch_gets_own_url":@YES,
                  @"protocol_file_url_bound_to_avplayer":@YES, @"local_media_seek_seconds":@(secondsAfterSeek),
+                 @"playing_file_survives_single_song_clear":@YES,
                  @"local_replay_transport_requests":@(fileRequests), @"old_complete_file_revoked_on_switch":@YES,
                  @"switching_back_resolves_again":@YES, @"scenarios":results,@"qmc_request_uses_JS":@YES,@"highest_first":@YES,@"all_qualities_attempted_once":@YES,@"unverified_quality_label":@"未知",@"native_origin_requests":@(nativeRequests),@"credential_metadata_allowlist":@YES,@"enriched_album_media_quality_metadata":@YES,@"isolated_workers":@YES,@"observed_JS_HTTP_attempts":attempts,@"observed_JS_HTTP_requests":@(requests.count-nativeRequests),@"real_network_used":@NO};
     } @finally {

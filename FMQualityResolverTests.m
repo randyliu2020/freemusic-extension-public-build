@@ -46,6 +46,17 @@ static void TestReplayOrdering(void) {
     Check(!NextURL(session,nil) && [attempts isEqual:@[@"flac",@"128k"]],@"last cached quality refreshes once then exhausts");
     Check([failuresSeen isEqual:@[file,upper,upper,lower]] && [handoffs isEqual:@[upper,upper,lower]],@"each actual candidate failure and remote handoff is reported exactly once");
 
+    [attempts removeAllObjects]; [links removeAllObjects];
+    links[@"128k"] = lower;
+    session = Session(@[@"flac", @"128k"], 2, ^BOOL{return current;}, ^dispatch_block_t(NSString *q, NSTimeInterval t, FMQualityAttemptCompletion done){
+        [attempts addObject:q]; done([q isEqual:@"flac"] ? upper : nil, nil); return nil;
+    });
+    [session setReplayLookup:^NSURL *(NSString *q, FMQualityCandidateOrigin origin){
+        return origin == FMQualityCandidateFromAddressCache ? links[q] : nil;
+    } saveAddress:nil discardFailed:^(NSString *q, NSURL *url){ [links removeObjectForKey:q]; }];
+    Check([NextURL(session, @"128k") isEqual:lower] && !attempts.count, @"an existing lower-tier URL replays without higher-tier JS requests");
+    Check([NextURL(session, @"flac") isEqual:upper] && [attempts isEqual:@[@"128k",@"flac"]], @"expired lower address refreshes once and still tries the highest available tier");
+
     [attempts removeAllObjects];[links removeAllObjects];
     __block FMQualityAttemptCompletion pending;
     session=Session(@[@"flac",@"128k"],2,^BOOL{return current;},^dispatch_block_t(NSString *q,NSTimeInterval t,FMQualityAttemptCompletion done){

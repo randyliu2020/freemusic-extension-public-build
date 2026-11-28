@@ -1,5 +1,6 @@
 import XCTest
 import XCUIAutomation
+import Darwin
 
 /// A standalone XCTest runner controls ONLY the preinstalled self-authored
 /// org.codex.fmx.smoke app. It never installs or launches the user's IPA.
@@ -233,5 +234,74 @@ final class InteractionUITests: XCTestCase {
         outside.press(forDuration: 0.05, thenDragTo: outside.withOffset(CGVector(dx: 0, dy: 185)))
         assertReturned(5, "An outer third works even when the drag starts outside the lyrics")
         record("page thirds keep center scrolling; either side returns with the original audio playing", app: app)
+    }
+
+    @MainActor
+    func testPlayerMoreFreezesTheTrackAtOpeningAndKeepsTranslationToggle() throws {
+        let app = app("song-menu")
+        defer { app.terminate() }
+        let more = app.buttons["song.menu.player"]
+        XCTAssertTrue(more.waitForExistence(timeout: 10))
+        more.tap()
+        let clear = app.buttons["清除缓存"].firstMatch
+        XCTAssertTrue(clear.waitForExistence(timeout: 5))
+
+        // Synchronize on the application's own read-back of the new public
+        // system metadata. Neither process can call the extension action here.
+        let changed = expectation(description: "Application has switched to B with A's menu on screen")
+        var token: Int32 = 0
+        XCTAssertEqual(notify_register_dispatch("org.codex.fmx.smoke.player-menu-track-switched", &token, .main) { _ in
+            changed.fulfill()
+        }, UInt32(NOTIFY_STATUS_OK))
+        defer { notify_cancel(token) }
+        XCTAssertEqual(notify_post("org.codex.fmx.smoke.switch-player-menu-track"), UInt32(NOTIFY_STATUS_OK))
+        wait(for: [changed], timeout: 8)
+        XCTAssertTrue(clear.isHittable)
+        clear.tap()
+        let result = app.staticTexts["song.clear.result"]
+        let first = expectation(for: NSPredicate(format: "label == %@", "clear-qq-a_01"), evaluatedWith: result)
+        wait(for: [first], timeout: 5)
+
+        more.tap()
+        XCTAssertTrue(clear.waitForExistence(timeout: 5))
+        clear.tap()
+        let next = expectation(for: NSPredicate(format: "label == %@", "clear-wy-b"), evaluatedWith: result)
+        wait(for: [next], timeout: 5)
+
+        more.tap()
+        let translation = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "显示翻译")).firstMatch
+        XCTAssertTrue(translation.waitForExistence(timeout: 5))
+        translation.tap()
+        let toggle = app.staticTexts["song.menu.translation"]
+        let changedToggle = expectation(for: NSPredicate(format: "label == %@", "translation-on"), evaluatedWith: toggle)
+        wait(for: [changedToggle], timeout: 5)
+        record("player More keeps the opened song, refreshes next time, and runs the original toggle", app: app)
+    }
+
+    @MainActor
+    func testSongMenusClearTheSelectedRecordingAndKeepQueueAction() throws {
+        let app = app("song-menu")
+        defer { app.terminate() }
+        let more = app.buttons["song.menu.B"]
+        XCTAssertTrue(more.waitForExistence(timeout: 10))
+        more.tap()
+        let clear = app.buttons["清除缓存"].firstMatch
+        XCTAssertTrue(clear.waitForExistence(timeout: 5))
+        clear.tap()
+        let status = app.staticTexts["song.clear.result"]
+        expectation(for: NSPredicate(format: "label == %@", "clear-qq-B"), evaluatedWith: status)
+        waitForExpectations(timeout: 5)
+        app.staticTexts["song.title.A"].press(forDuration: 1)
+        XCTAssertTrue(clear.waitForExistence(timeout: 5))
+        clear.tap()
+        expectation(for: NSPredicate(format: "label == %@", "clear-wy-A"), evaluatedWith: status)
+        waitForExpectations(timeout: 5)
+        more.tap()
+        let next = app.buttons["下一首播放"].firstMatch
+        XCTAssertTrue(next.waitForExistence(timeout: 5))
+        next.tap()
+        expectation(for: NSPredicate(format: "label == %@", "queue-B"), evaluatedWith: app.staticTexts["song.queue.result"])
+        waitForExpectations(timeout: 5)
+        record("both song menus target the selected row and retain the queue action", app: app)
     }
 }

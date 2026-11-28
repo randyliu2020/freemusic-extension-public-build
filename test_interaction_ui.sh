@@ -49,7 +49,7 @@ xcodebuild test \
   -resultBundlePath "$output_dir/interaction.xcresult" \
   -parallel-testing-enabled NO -maximum-concurrent-test-simulator-destinations 1 \
   ONLY_ACTIVE_ARCH=YES "ARCHS=$ui_arch" CODE_SIGNING_ALLOWED=NO 2>&1 | tee "$output_dir/xcodebuild.log"
-stage="validate_three_actually_executed_ui_tests"
+stage="validate_five_actually_executed_ui_tests"
 xcrun xcresulttool get test-results summary --path "$output_dir/interaction.xcresult" > "$output_dir/xcresult-summary.json"
 python3 "$source_dir/verify_interaction_result.py" "$output_dir/xcresult-summary.json" > "$output_dir/validated-execution-counts.pending"
 mv "$output_dir/validated-execution-counts.pending" "$output_dir/validated-execution-counts.json"

@@ -3,6 +3,7 @@
 #import "FMQualityResolver.h"
 #import "FMPlaybackQualityDisplay.h"
 #import "FMPlaybackSequence.h"
+#import "FMReplayCache.h"
 #import <CommonCrypto/CommonDigest.h>
 #import <math.h>
 #import <string.h>
@@ -224,6 +225,9 @@ void FMAdaptiveNativeDidSetup(id manager,AVPlayer *player) {
     if(!FMImageAllowed||!NSThread.isMainThread||!manager||!player)return;
     AVPlayerItem *item=player.currentItem;
     NSURL *URL=[item.asset isKindOfClass:AVURLAsset.class]?((AVURLAsset *)item.asset).URL:nil;
+    // A native preloaded player may reuse a file without a second resolver
+    // registration. Protect the actual file bound to every newly installed item.
+    if (URL.isFileURL) [FMReplayCache.sharedCache protectAudio:URL forPlaybackItem:item];
     FMAdaptiveRegistration *entry=URL ? FMURLs[URL.absoluteString] : nil;
     if(entry && (entry.ambiguous || NSProcessInfo.processInfo.systemUptime-entry.created>600))entry=nil;
     FMAdaptiveBinding *old=[FMBindings objectForKey:manager];
@@ -241,7 +245,7 @@ void FMAdaptiveNativeDidSetup(id manager,AVPlayer *player) {
     binding.quality=entry.quality;binding.trackKey=entry.trackKey;binding.retired=NO;binding.recovering=NO;binding.revision++;
     [FMBindings setObject:binding forKey:manager];
     objc_setAssociatedObject(player,FMBindingKey,binding,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    if (entry.session.didBindPlayer && !URL.isFileURL) entry.session.didBindPlayer(player,URL,entry.quality);
+    if (entry.session.didBindPlayer) entry.session.didBindPlayer(player,URL,entry.quality);
     __weak FMAdaptiveBinding *weak=binding;
     binding.timer=[player addPeriodicTimeObserverForInterval:CMTimeMakeWithSeconds(0.5,600) queue:dispatch_get_main_queue() usingBlock:^(CMTime time){
         FMAdaptiveBinding *current=weak;if(!current||!FMStillCurrent(current))return;

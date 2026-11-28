@@ -20,6 +20,16 @@ NS_ASSUME_NONNULL_BEGIN
                                trackID:(NSString *)trackID
                                quality:(NSString *)quality;
 
+/// Removes replay addresses and complete automatic files in one song's namespace.
+/// The count is the number of stored quality entries. Pending keys are retired
+/// even on a cache miss. A failed clear can be retried.
+- (BOOL)clearPlatform:(NSString *)platform trackID:(NSString *)trackID removedEntries:(NSUInteger * _Nullable)removed;
+/// Changes on source switch and after the user clears this exact recording.
+- (BOOL)isCurrentKey:(nullable NSString *)key;
+/// When a player is already reading a complete replay file, retire its index
+/// immediately but keep its bytes available until the last bound item releases it.
+- (void)protectAudio:(NSURL *)file forPlaybackItem:(id)item;
+
 - (nullable NSURL *)addressForKey:(nullable NSString *)key;
 - (nullable NSURL *)audioForKey:(nullable NSString *)key;
 - (void)saveAddress:(NSURL *)address forKey:(nullable NSString *)key;

@@ -10,6 +10,9 @@ NS_ASSUME_NONNULL_BEGIN
 + (void)observePlayer:(AVPlayer *)player remoteURL:(NSURL *)url key:(NSString *)key isCurrent:(BOOL (^)(void))isCurrent;
 + (void)playbackSelectionWillChange;
 + (void)sourceDidChange;
++ (void)retireClearedTracks;
++ (void)installAutomaticTransferTracking;
++ (void)retireNativeAutomaticSong:(NSString *)basename;
 @end
 
 NS_ASSUME_NONNULL_END

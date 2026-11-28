@@ -7,6 +7,12 @@ FOUNDATION_EXPORT void FMPlaybackCacheInstall(void);
 /// usable -> disabled. Servers use original identifiers wy/qq/kg, not LX tx.
 /// The set records affected disk namespaces; an empty set still advances RAM.
 FOUNDATION_EXPORT void FMPlaybackCacheSourceTransition(NSSet<NSString *> *affectedServers);
+/// Scope the temporary online fallback to this selection and song.
+FOUNDATION_EXPORT void FMPlaybackCacheDeferDownloadRetry(NSString *server, NSString *trackID);
+FOUNDATION_EXPORT void FMPlaybackCacheBeginSelection(void);
+/// Clears one song's native address/preload keys and its identifiable automatic MP3.
+FOUNDATION_EXPORT BOOL FMPlaybackCacheClearTrack(NSString *server, NSString *trackID, NSUInteger * _Nullable removedFiles);
+FOUNDATION_EXPORT NSString * _Nullable FMPlaybackCacheCopySuffixForString(NSString *key) NS_RETURNS_RETAINED;
 FOUNDATION_EXPORT NSDictionary *FMPlaybackCacheDiagnostics(void);
 /// Read-only, main-thread snapshot of live receivers captured from the verified
 /// native manager initializer. Empty on an unrecognized image or other thread.

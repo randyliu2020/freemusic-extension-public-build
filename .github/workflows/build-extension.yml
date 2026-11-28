@@ -28,6 +28,7 @@ jobs:
           python -m pip install --quiet setuptools==80.9.0 capstone==5.0.6 unicorn==2.1.4 keystone-engine==0.9.2
           python test_player_swipe_patch.py -v
           python test_download_order_patch.py -v
+          python test_song_menu_patch.py -v
           python test_playback_cache_patch.py -v
           python test_adaptive_playback_patch.py -v
           python test_native_format_patch.py -v
@@ -95,7 +96,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p v11-validation
-          xcrun clang -fobjc-arc -fblocks -framework Foundation -framework AVFoundation FMPreferredDownloadStore.m FMRecordingMatch.m FMRecordingMatchTests.m -o recording-match-tests
+          xcrun clang -fobjc-arc -fblocks -framework Foundation -framework AVFoundation -framework CoreMedia FMPreferredDownloadStore.m FMRecordingMatch.m FMRecordingMatchTests.m -o recording-match-tests
           ./recording-match-tests v11-validation/recording-match-tests.json
           xcrun swiftc -swift-version 5 -parse-as-library FMDownloadSort.swift FMDownloadSortTests.swift -o download-sort-tests
           ./download-sort-tests v11-validation/download-sort-tests.json

@@ -71,7 +71,9 @@ adrp x1, 0x509000
 add x1, x1, #0xaa0
 bl 0x40821c
 cbz x0, done
-blr x0
+mov x16, x0
+mov x0, x19
+blr x16
 cbz x0, done
 mov x21, x0
 bl 0x406b78
@@ -162,7 +164,7 @@ ENCODED = {
     0x509780: 'fd7bbfa9e08300911e000094fd7bc1a8e00741a92c06ed17',
     0x5097a0: 'fd7bbfa960620a9116000094fd7bc1a8774e41f99d11ed17',
     0x5097c0: 'fd7bbfa960c20e910e000094fd7bc1a875da41f95836ed17',
-    0x509800: 'fd7bbda9f35301a9f55b02a9f30300aa200080920100009021802a9180fafb97800100b400003fd6400100b4f50300aad2f4fb97f60301aaf40313aa1af5fb97e00316aa73fdfb97e00315aabefbfb97f55b42a9f35341a9fd7bc3a8c0035fd6',
+    0x509800: 'fd7bbda9f35301a9f55b02a9f30300aa200080920100009021802a9180fafb97c00100b4f00300aae00313aa00023fd6400100b4f50300aad0f4fb97f60301aaf40313aa18f5fb97e00316aa71fdfb97e00315aabcfbfb97f55b42a9f35341a9fd7bc3a8c0035fd6',
     0x5098c0: 'fd7bbfa9e00315aa880400b0086d46f9c102088b3b00009480000035fd7bc1a8881240f930a6ed17fd7bc1a80da6ed17',
     0x509940: 'fd7bbfa9a08358f8880400b0086d46f96102088b1b00009480000035fd7bc1a8628e8ed27006ed17e0031baa29fdfb97fd7bc1a89106ed17',
     0x5099c0: 'fd7bbca9f35301a9f55b02a9f76303a9f30300aaf50301aa200080920100009021802b910efafb97200200b4f60300aaf40313aa10ebfb97f70300aaf40315aa0debfb97f80300aae00317aae10318aac0023fd6f303002ae00317aa4afbfb97e00318aa48fbfb97e003132af76343a9f55b42a9f35341a9fd7bc4a8c0035fd6',
@@ -172,7 +174,7 @@ def payload() -> bytes:
     result = bytearray(END-CAVE)
     used: set[int] = set()
     chunks = {offset: bytes.fromhex(value) for offset, value in ENCODED.items()}
-    chunks.update({SUFFIX_NAME:b"FMPlaybackCacheCopySuffix\0", URL_POLICY_NAME:b"FMPlaybackCacheShouldBypassURL\0", MARKER:b"FMX-CACHE-GENERATION-v1\0"})
+    chunks.update({SUFFIX_NAME:b"FMPlaybackCacheCopyKeySuffix\0", URL_POLICY_NAME:b"FMPlaybackCacheShouldBypassURL\0", MARKER:b"FMX-CACHE-GENERATION-v1\0"})
     for offset, value in chunks.items():
         occupied = set(range(offset,offset+len(value)))
         if offset<CAVE or offset+len(value)>END or used&occupied:

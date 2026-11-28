@@ -33,6 +33,35 @@ static inline NSString *FMDASource(id server) {
     return @{@"wy":@"wy", @"netease":@"wy", @"qq":@"tx", @"tx":@"tx", @"kg":@"kg", @"kugou":@"kg",
              @"kw":@"kw", @"kuwo":@"kw", @"mg":@"mg", @"migu":@"mg", @"qs":@"qishui", @"qishui":@"qishui"}[server];
 }
+static inline BOOL FMDownloadHash(NSString *server, NSString *identifier) {
+    if (![server isEqual:@"kg"] || identifier.length != 32) return NO;
+    static NSCharacterSet *invalid;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        invalid = [NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdefABCDEF"].invertedSet;
+    });
+    return [identifier rangeOfCharacterFromSet:invalid].location == NSNotFound;
+}
+
+static inline NSString *FMDownloadLookupID(NSString *server, id value) {
+    NSString *identifier = FMDAIdentifier(value);
+    return FMDownloadHash(server,identifier) ? identifier.uppercaseString : identifier;
+}
+
+// Track has a separate optional song_id (the original playlist APIs call it
+// song_id as well). A visible row ID or record_id alone is not a substitute.
+static inline NSString *FMDownloadRowAlias(NSDictionary *row, NSString *platform) {
+    NSString *alias = FMDAIdentifier(row[@"song_id"]);
+    if (!alias) return nil;
+    id code = row[@"platform"];
+    if (code && code != NSNull.null) {
+        NSDictionary *codes = @{@0:@"wy", @2:@"kg", @3:@"tx", @4:@"qishui"};
+        if (![code isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)code) == CFBooleanGetTypeID() ||
+            ![codes[code] isEqual:platform]) return nil;
+    }
+    return alias;
+}
+
 static inline NSArray *FMDAExtensions(void) {
     static NSArray *extensions;
     static dispatch_once_t once;

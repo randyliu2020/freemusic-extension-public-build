@@ -158,7 +158,44 @@ static FMReplayFileCompletion FMWrap(FMReplayCandidate *c,FMReplayFileCompletion
     };
 }
 
-static IMP originalDownload;
+// The native automatic-MP3 writer checks its exact destination before it
+// creates the shared-session request, both synchronously on the same thread.
+static NSString *const FMNativeDestinationSlot = @"FMReplay.automaticDestination";
+static NSMutableDictionary<NSString *, NSNumber *> *nativeGenerations;
+static IMP originalFileExists, originalDownload;
+static uintptr_t nativeFileCheckReturn;
+static NSURL *nativeMusicDirectory;
+
+static BOOL FMObserveDestination(id receiver, SEL command, NSString *path) {
+    BOOL exists = ((BOOL(*)(id,SEL,id))originalFileExists)(receiver,command,path);
+    uintptr_t caller=(uintptr_t)__builtin_extract_return_addr(__builtin_return_address(0));
+#if __has_feature(ptrauth_calls)
+    caller=(uintptr_t)ptrauth_strip((void *)caller,ptrauth_key_return_address);
+#endif
+    if (caller != nativeFileCheckReturn) return exists;
+    NSMutableDictionary *state = NSThread.currentThread.threadDictionary;
+    [state removeObjectForKey:FMNativeDestinationSlot];
+    if (exists || ![path.pathExtension isEqual:@"mp3"] ||
+        ![path.stringByDeletingLastPathComponent isEqual:nativeMusicDirectory.path]) return exists;
+    NSString *base = path.lastPathComponent.stringByDeletingPathExtension;
+    if (base.length) @synchronized(FMLock()) {
+        state[FMNativeDestinationSlot] = @[base, nativeGenerations[base] ?: @0];
+    }
+    return exists;
+}
+
+static FMReplayFileCompletion FMGuardNativeAuto(NSArray *ticket, FMReplayFileCompletion callback) {
+    if (ticket.count != 2) return callback;
+    return ^(NSURL *file, NSURLResponse *response, NSError *error) {
+        // This callback belongs only to the native background MusicCache writer.
+        // Hold the song-clear boundary through its synchronous file operation.
+        @synchronized(FMLock()) {
+            BOOL valid = [(nativeGenerations[ticket[0]] ?: @0) isEqual:ticket[1]];
+            if (valid) callback(file,response,error);
+            else callback(nil,response,[NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil]);
+        }
+    };
+}
 static uintptr_t nativeReturn;
 static NSURLSessionDownloadTask *FMObserveAutoDownload(NSURLSession *session,SEL selector,NSURLRequest *request,FMReplayFileCompletion completion) {
     uintptr_t caller=(uintptr_t)__builtin_extract_return_addr(__builtin_return_address(0));
@@ -166,6 +203,10 @@ static NSURLSessionDownloadTask *FMObserveAutoDownload(NSURLSession *session,SEL
     caller=(uintptr_t)ptrauth_strip((void *)caller,ptrauth_key_return_address);
 #endif
     if(caller==nativeReturn && completion && session==NSURLSession.sharedSession && [request.HTTPMethod isEqual:@"GET"] && request.URL.absoluteString.length){
+        NSMutableDictionary *state = NSThread.currentThread.threadDictionary;
+        NSArray *ticket = state[FMNativeDestinationSlot];
+        [state removeObjectForKey:FMNativeDestinationSlot];
+        completion = FMGuardNativeAuto(ticket,completion);
         @synchronized(FMLock()){
             FMReplayCandidate *candidate=byURL[request.URL.absoluteString];
             if(candidate)completion=FMWrap(candidate,completion);
@@ -192,6 +233,10 @@ static BOOL FMCheckNativeImage(void) {
     const unsigned char expected[]={0x36,0xe5,0x4e,0x4c,0xda,0xe2,0x8d,0xa8,0xb3,0x36,0xff,0xc4,0x92,0x2b,0xff,0xaf,0x01,0x41,0x17,0xf5,0x0c,0x61,0xf0,0xaf,0x24,0xf0,0x90,0x21,0xe4,0xd3,0x8c,0x81};
     unsigned char digest[CC_SHA256_DIGEST_LENGTH];CC_SHA256((const uint8_t *)h+0x734d8,80,digest);
     if(memcmp(digest,expected,sizeof(expected)))return NO;
+    uint32_t checkedCall;
+    memcpy(&checkedCall, (const uint8_t *)h + 0x733a4, sizeof(checkedCall));
+    if (checkedCall != (0x94000000u | ((0x40ae00u-0x733a4u)/4))) return NO;
+    nativeFileCheckReturn=(uintptr_t)h+0x733a8;
     nativeReturn=(uintptr_t)h+0x734fc;
     return YES;
 }
@@ -203,6 +248,15 @@ static void FMInstall(void) {
         SEL sel=@selector(downloadTaskWithRequest:completionHandler:);
         Method m=class_getInstanceMethod(cls,sel);
         if(!m || method_getNumberOfArguments(m)!=4)return;
+        Class files = object_getClass(NSFileManager.defaultManager);
+        SEL probe = @selector(fileExistsAtPath:);
+        Method check = class_getInstanceMethod(files,probe);
+        if (!check || method_getNumberOfArguments(check)!=3) return;
+        NSURL *caches = [NSFileManager.defaultManager URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask].firstObject;
+        nativeMusicDirectory = [caches URLByAppendingPathComponent:@"MusicCache" isDirectory:YES];
+        nativeGenerations = [NSMutableDictionary dictionary];
+        originalFileExists = method_getImplementation(check);
+        class_replaceMethod(files,probe,(IMP)FMObserveDestination,method_getTypeEncoding(check));
         originalDownload=method_getImplementation(m);
         class_replaceMethod(cls,sel,(IMP)FMObserveAutoDownload,method_getTypeEncoding(m));
     });
@@ -250,7 +304,7 @@ static void FMInstall(void) {
 // validation may still fail, so leave the observer in place for those two states.
 static BOOL FMStartIfNeeded(FMReplayCandidate *c) {
     @synchronized(FMLock()){
-        if(!FMCurrent(c) || c.supplementalStarted)return YES;
+        if(!FMCurrent(c) || ![FMStore() isCurrentKey:c.key] || c.supplementalStarted)return YES;
         if(c.nativePending || c.validating)return NO;
         if([FMStore() audioForKey:c.key])return YES;
         c.supplementalStarted=YES;
@@ -260,7 +314,13 @@ static BOOL FMStartIfNeeded(FMReplayCandidate *c) {
     }
 }
 #if defined(FMX_REPLAY_MEDIA_TESTING) && FMX_REPLAY_MEDIA_TESTING
-void FMReplayMediaTestStore(FMReplayCache *store) { fixtureStore=store; }
+void FMReplayMediaTestStore(FMReplayCache *store) {
+    fixtureStore=store;
+    if (!nativeGenerations) nativeGenerations = [NSMutableDictionary dictionary];
+}
+FMReplayFileCompletion FMReplayMediaTestNativeWrite(NSString *basename, FMReplayFileCompletion original) {
+    return FMGuardNativeAuto(@[basename, nativeGenerations[basename] ?: @0], original);
+}
 FMReplayFileCompletion FMReplayMediaTestAdopt(NSURL *url,FMReplayFileCompletion completion) {
     @synchronized(FMLock()){
         FMReplayCandidate *c=byURL[url.absoluteString];
@@ -279,8 +339,15 @@ BOOL FMReplayMediaTestIdle(NSString *key) {
 #endif
 
 @implementation FMReplayMedia
++ (void)installAutomaticTransferTracking { FMState(); FMInstall(); }
++ (void)retireNativeAutomaticSong:(NSString *)basename {
+    if (!basename.length) return;
+    @synchronized(FMLock()) {
+        nativeGenerations[basename] = @([nativeGenerations[basename] unsignedLongLongValue]+1);
+    }
+}
 + (void)registerRemoteURL:(NSURL *)url key:(NSString *)key {
-    if(!key.length || !FMRemote(url))return;
+    if(!key.length || !FMRemote(url) || ![FMStore() isCurrentKey:key])return;
     FMState();FMInstall();
     @synchronized(FMLock()){
         FMReplayCandidate *old=byKey[key];
@@ -341,6 +408,14 @@ BOOL FMReplayMediaTestIdle(NSString *key) {
             previous.supplementalStarted=NO;
         }
         playingCandidate=nil;
+    }
+}
++ (void)retireClearedTracks {
+    FMState();
+    @synchronized(FMLock()) {
+        for (FMReplayCandidate *candidate in byKey.allValues) {
+            if (![FMStore() isCurrentKey:candidate.key]) FMForget(candidate);
+        }
     }
 }
 + (void)sourceDidChange {

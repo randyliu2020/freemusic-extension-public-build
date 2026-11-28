@@ -6,6 +6,7 @@ typedef void (^FixtureFinish)(NSURL *, NSURLResponse *, NSError *);
 extern void FMReplayMediaTestStore(FMReplayCache *store);
 extern FixtureFinish FMReplayMediaTestAdopt(NSURL *url,FixtureFinish completion);
 extern BOOL FMReplayMediaTestStart(NSString *key);
+extern FixtureFinish FMReplayMediaTestNativeWrite(NSString *basename, FixtureFinish original);
 extern BOOL FMReplayMediaTestIdle(NSString *key);
 
 static NSHTTPURLResponse *Response(NSURL *url,NSInteger code,NSUInteger length,NSDictionary *extras) {
@@ -64,6 +65,35 @@ int main(int argc,const char **argv) {
         Check(server.requests==requests,@"A complete native copy replays without a new HTTP request");
         if(cached){AVAudioFile *decoded=[[AVAudioFile alloc] initForReading:cached error:nil];Check(decoded.length>0,@"Saved file opens in a real local audio decoder");}
 
+        NSString *otherSongKey=registerTrack(@"kept",[server URL:@"kept"]);
+        NSURL *pendingURL=[server URL:@"same-after-clear"];
+        NSString *oldSong=registerTrack(@"to-clear",pendingURL);
+        __block NSUInteger preservedCompletions=0;
+        FixtureFinish oldNative=FMReplayMediaTestAdopt(pendingURL,^(NSURL *file,NSURLResponse *response,NSError *error){
+            if (file && !error) preservedCompletions++;
+        });
+        NSUInteger removedEntries=0;
+        Check([store clearPlatform:@"tx" trackID:@"to-clear" removedEntries:&removedEntries] && removedEntries==1,
+              @"Clearing the selected replay track revokes its pending transfer key");
+        [FMReplayMedia retireClearedTracks];
+        NSString *newSong=registerTrack(@"to-clear",pendingURL);
+        oldNative(Temporary(root,audio),Response(pendingURL,200,audio.length,@{}),nil);
+        Pump(.05);
+        Check(preservedCompletions==1 && ![store audioForKey:newSong] && ![store isCurrentKey:oldSong] &&
+              [store addressForKey:otherSongKey], @"Stale transfer cannot attach to a newly resolved identical URL; a different song keeps its cached address");
+        __block NSUInteger rejectedNativeWrites=0, acceptedNativeWrites=0;
+        FixtureFinish normalize=^(NSURL *file,NSURLResponse *response,NSError *error){
+            if (!file && error.code==NSURLErrorCancelled) rejectedNativeWrites++;
+            else if (file && !error) acceptedNativeWrites++;
+        };
+        FixtureFinish nativeBeforeClear=FMReplayMediaTestNativeWrite(@"qq_target",normalize);
+        FixtureFinish nativeUnaffected=FMReplayMediaTestNativeWrite(@"qq_neighbor",normalize);
+        [FMReplayMedia retireNativeAutomaticSong:@"qq_target"];
+        NSURL *temp=Temporary(root,audio);
+        nativeBeforeClear(temp,nil,nil);
+        nativeUnaffected(temp,nil,nil);
+        FMReplayMediaTestNativeWrite(@"qq_target",normalize)(temp,nil,nil);
+        Check(rejectedNativeWrites==1 && acceptedNativeWrites==2, @"Only the pre-clear instance of a native automatic write is retired");
         NSArray *cases=@[
             @[@"partial",@206,@{@"Content-Range":@"bytes 0-127/99999"},audio],
             @[@"nostore",@200,@{@"Cache-Control":@"private, no-store"},audio],

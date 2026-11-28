@@ -8,6 +8,7 @@
 #import "FMQishuiSearch.h"
 #import "FMInsights.h"
 #import "FMInteraction.h"
+#import "FMSongMenu.h"
 #import "FMLXMCUI.h"
 #import "FMNavigation.h"
 #import "FMPlaybackCache.h"
@@ -212,6 +213,7 @@ static NSString *FMXCoverStatusText(NSDictionary *state) {
     if (self.navigationController.viewControllers.firstObject == self)
         self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:self action:@selector(close)];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(reload) name:FMXChanged object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(reload) name:FMPlaybackItemDidChange object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(reload) name:FMXQishuiSearchStatusDidChangeNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(coverStatusChanged:)
         name:FMDownloadArtworkStatusDidChangeNotification object:nil];
@@ -238,7 +240,7 @@ static NSString *FMXCoverStatusText(NSDictionary *state) {
     if (section == 1) return @"支持网易云、QQ 和酷狗的基础洛雪音源。酷狗 JS 使用标准音质；部分脚本需要额外歌曲信息或尚未支持的功能。仅启用你信任的脚本。";
     if (section == 2) return @"用当前封面在手机上生成轻微缩放的循环动画。系统需要时才生成；低电量或减少动态效果开启时显示静态封面。需要 iOS 26 或更高版本。";
     if (section == 4) return @"按实际听歌记录查看月度、年度偏好，只保存在本机。";
-    return @"扩展 v11。播放时优先读取这首歌的本地下载，其次使用当前音源下已缓存的完整音频。仅有播放地址时仍需联网。";
+    return @"扩展 v12。播放时优先读取这首歌的本地下载，其次使用当前音源下已缓存的完整音频。仅有播放地址时仍需联网。";
 }
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)path {
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
@@ -279,7 +281,15 @@ static NSString *FMXCoverStatusText(NSDictionary *state) {
     } else {
         FMXManager *manager = [FMXManager shared];
         cell.textLabel.text = manager.status;
-        cell.detailTextLabel.text = manager.playbackStatus ?: (manager.runtime ? @"本次启用后尚无 JS 解析记录。已适配平台优先使用 JS 支持的最高音质，失败逐档降低。" : nil);
+        NSMutableArray<NSString *> *lines = [NSMutableArray array];
+        NSNumber *local = FMPlaybackSequenceIsLocalItem();
+        if (local) [lines addObject:local.boolValue ? @"当前播放 · 本地文件" : @"当前播放 · 在线音频"];
+        if (manager.playbackStatus.length) {
+            [lines addObject:[@"最近一次查找（含下一首预载） · " stringByAppendingString:manager.playbackStatus]];
+        } else if (manager.runtime) {
+            [lines addObject:@"本次启用后尚无音源查找记录"];
+        }
+        cell.detailTextLabel.text = [lines componentsJoinedByString:@"\n"];
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
     }
     return cell;
@@ -405,6 +415,7 @@ __attribute__((constructor)) static void FMXInitialize(void) {
         FMPlaybackCacheInstall();
         FMAdaptivePlaybackInstall();
         FMPlaybackSequenceInstall();
+        [FMReplayMedia installAutomaticTransferTracking];
         FMDownloadIntegrationInstall();
         FMNativeDownloadCoverDisplayInstall();
         // Drop addresses/preloaded players selected before a manual file appeared
@@ -426,6 +437,13 @@ __attribute__((constructor)) static void FMXInitialize(void) {
             __block BOOL cancelled = NO;
             __block LXSourceRuntime *selectedRuntime;
             __block NSString *selectedSource, *diagnostic;
+            FMPreferredDownloadStore *downloads = FMPreferredDownloadStore.sharedStore;
+            NSUInteger downloadSelection = downloads.playbackSelection;
+            void (^rejectLocalForSelection)(NSURL *) = ^(NSURL *URL) {
+                if (downloads.playbackSelection != downloadSelection) return;
+                [downloads rejectURL:URL forSelection:downloadSelection];
+                FMPlaybackCacheDeferDownloadRetry(parameters[@"server"],parameters[@"id"]);
+            };
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (cancelled) return;
                 LXSourceRuntime *runtime = [FMXManager shared].runtime;
@@ -434,7 +452,6 @@ __attribute__((constructor)) static void FMXInitialize(void) {
                 NSArray *qualities = FMXRoutableQualities(runtime.manifest, source);
                 NSDictionary *info = FMTrackMetadataForParameters(parameters, source ?: parameters[@"server"]);
                 NSDictionary *recording = FMXRecordingRequest(parameters, info);
-                FMPreferredDownloadStore *downloads = FMPreferredDownloadStore.sharedStore;
                 if (!runtime || !source || !qualities.count) {
                     NSURL *local = [downloads lookupTrack:recording];
                     if (local) {
@@ -447,9 +464,7 @@ __attribute__((constructor)) static void FMXInitialize(void) {
                                 done(nil,nil); return nil;
                             }];
                         session.preferredDownload = ^NSURL *{ return [downloads lookupTrack:recording]; };
-                        session.rejectPreferredDownload = ^(NSURL *URL) {
-                            [downloads rejectURL:URL]; FMPlaybackCacheSourceTransition([NSSet set]);
-                        };
+                        session.rejectPreferredDownload = rejectLocalForSelection;
                         [session nextWithCompletion:^(NSURL *url, NSString *quality, NSError *error) {
                             if (cancelled) return;
                             if (!url || error) { completion(nil,nil); return; }
@@ -466,15 +481,23 @@ __attribute__((constructor)) static void FMXInitialize(void) {
                 NSString *trackID = parameters[@"id"];
                 FMReplayCache *cache = [FMReplayCache sharedCache];
                 NSString *namespaceID = [FMXManager shared].replayNamespace;
+                // This selection owns its original keys, even if a menu clear
+                // takes place while an asynchronous JS result or transfer is pending.
+                NSMutableDictionary *issuedKeys = [NSMutableDictionary dictionary];
+                for (NSString *quality in qualities) {
+                    NSString *key = [cache keyForNamespace:namespaceID platform:source trackID:trackID quality:quality];
+                    if (key) issuedKeys[quality] = key;
+                }
+                NSDictionary *selectionKeys = issuedKeys.copy;
                 NSString *(^cacheKey)(NSString *) = ^NSString *(NSString *quality) {
-                    return [cache keyForNamespace:namespaceID platform:source trackID:trackID quality:quality];
+                    return selectionKeys[quality];
                 };
                 BOOL (^currentSource)(void) = ^BOOL {
                     return [FMXManager shared].runtime == runtime && runtime.manifest != nil;
                 };
                 NSString *diagnosticID = NSUUID.UUID.UUIDString;
                 selectedRuntime = runtime; selectedSource = source; diagnostic = diagnosticID;
-                FMXPlaybackStatus(runtime, diagnosticID, source, @"正在从最高支持音质查找歌曲", YES);
+                FMXPlaybackStatus(runtime, diagnosticID, source, @"正在检查本地下载和播放缓存", YES);
                 NSTimeInterval budget = MIN(35, request.timeoutInterval > 0 ? MAX(1, request.timeoutInterval - 1) : 35);
                 session = [[FMQualityResolver alloc] initWithPlatform:source supportedQualities:qualities timeout:budget
                     isCurrent:currentSource
@@ -484,9 +507,7 @@ __attribute__((constructor)) static void FMXInitialize(void) {
                         return ^{ [runtime cancelRequestWithIdentifier:identifier]; };
                     }];
                 session.preferredDownload = ^NSURL *{ return [downloads lookupTrack:recording]; };
-                session.rejectPreferredDownload = ^(NSURL *URL) {
-                    [downloads rejectURL:URL]; FMPlaybackCacheSourceTransition([NSSet set]);
-                };
+                session.rejectPreferredDownload = rejectLocalForSelection;
                 [session setReplayLookup:^NSURL *(NSString *quality, FMQualityCandidateOrigin origin) {
                     NSString *key = cacheKey(quality);
                     if (!key) return nil;
@@ -506,7 +527,7 @@ __attribute__((constructor)) static void FMXInitialize(void) {
                 };
                 session.didBindPlayer = ^(AVPlayer *player, NSURL *url, NSString *quality) {
                     NSString *key = cacheKey(quality);
-                    if (key) [FMReplayMedia observePlayer:player remoteURL:url key:key isCurrent:currentSource];
+                    if (key && !url.isFileURL) [FMReplayMedia observePlayer:player remoteURL:url key:key isCurrent:currentSource];
                 };
                 [session nextWithCompletion:^(NSURL *url, NSString *requestedQuality, NSError *error) {
                     if (cancelled) return;
@@ -572,6 +593,7 @@ __attribute__((constructor)) static void FMXInitialize(void) {
             FMSearchPreferencesInstall();
             FMLockScreenInstall();
             FMInteractionInstall();
+            FMSongMenuInstall();
             FMLXMCUIInstall();
             FMNavigationInstall();
             FMSettingsEntryInstall(^(UIViewController *settingsController) {

@@ -12,6 +12,7 @@
 #import "FMListeningHistory.h"
 #import "FMQualityResolver.h"
 #import "FMReplayCache.h"
+#import "FMPreferredDownloadStore.h"
 
 @interface FMXManager : NSObject
 @property(atomic,strong) LXSourceRuntime *runtime;
@@ -437,7 +438,7 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
 static NSDictionary *SmokeLocalPlaylistRoutes(
     FMXManager *manager, FMReplayCache *cache, void (*observe)(id), NSURLRequest *nativeRequest,
     NSUInteger (^workerCount)(void), NSUInteger (^networkCount)(void),
-    dispatch_block_t willSelect, void (^bindPlayer)(NSURL *)) {
+    void (*clearSong)(NSString *,NSString *), dispatch_block_t willSelect, void (^bindPlayer)(NSURL *)) {
     NSFileManager *files = NSFileManager.defaultManager;
     NSURL *support = [files URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
     NSURL *documents = [files URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
@@ -469,7 +470,10 @@ static NSDictionary *SmokeLocalPlaylistRoutes(
     NSURL *cached = nil;
     NSUInteger initialWorkers = workerCount(), initialNetwork = networkCount();
     NSMutableArray *origins = [NSMutableArray array];
-    BOOL registryWritten = NO, manualWritten = NO;
+    BOOL registryWritten = NO, manualWritten = NO, legacyWritten = NO;
+    NSURL *cacheDirectory = [files URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask].firstObject;
+    NSURL *oldDownloads = [cacheDirectory URLByAppendingPathComponent:@"MusicCache" isDirectory:YES];
+    NSURL *legacy = [oldDownloads URLByAppendingPathComponent:[NSString stringWithFormat:@"qq_%@.mp3", identifier]];
     NSURL *(^requestFile)(NSDictionary *) = ^NSURL *(NSDictionary *song) {
         willSelect();
         NSMutableURLRequest *request = [nativeRequest mutableCopy];
@@ -505,8 +509,61 @@ static NSDictionary *SmokeLocalPlaylistRoutes(
                                      @"matched":@"same-manual-file"}];
             }
         }
-        Check(manualWritten && [files removeItemAtURL:manual error:nil], @"Remove only the authored manual file to exercise the next tier");
+        // Match the reported sequence: A is explicitly downloaded, B belongs to a
+        // different track with only an address cached at its last working quality.
+        NSString *bID = [@"other-" stringByAppendingString:identifier];
+        NSURL *bAddress = [NSURL URLWithString:@"https://fixture.invalid/authored-saved-address"];
+        __block NSString *bKey;
+        Main(^{ bKey = [cache keyForNamespace:manager.replayNamespace platform:@"tx" trackID:bID quality:@"128k"]; });
+        [cache saveAddress:bAddress forKey:bKey];
+        Check([requestFile(qq) isEqual:manual], @"A starts from the manual download");
+        willSelect();
+        NSMutableURLRequest *selectB = [nativeRequest mutableCopy];
+        selectB.HTTPBody = [[NSString stringWithFormat:@"server=qq&id=%@&level=hires&qmc=1", bID] dataUsingEncoding:NSUTF8StringEncoding];
+        Check([FetchSearchFixture(selectB)[@"data"][@"url"] isEqual:bAddress.absoluteString], @"Switching to B reuses its cached address with higher tiers missing");
+        Check([requestFile(qq) isEqual:manual] && [requestFile(wy) isEqual:manual],
+              @"Switching back to A reuses the registered download for both identities");
+        Check(workerCount()==initialWorkers && networkCount()==initialNetwork, @"A-B-A creates zero JS workers and sends zero parse requests");
+        Check(clearSong != NULL, @"The production menu action is available");
+        Main(^{ clearSong(@"qq", identifier); });
+        Check([[NSData dataWithContentsOfURL:index] isEqualToData:rows] && [files fileExistsAtPath:manual.path] &&
+              [[NSData dataWithContentsOfURL:authored] isEqualToData:[NSData dataWithContentsOfURL:manual]] &&
+              [requestFile(qq) isEqual:manual], @"Clearing the song keeps the completed registry, its audio bytes and offline playback");
+        Main(^{
+            low = [cache keyForNamespace:manager.replayNamespace platform:@"tx" trackID:identifier quality:@"128k"];
+            high = [cache keyForNamespace:manager.replayNamespace platform:@"tx" trackID:identifier quality:@"flac24bit"];
+        });
+        Check([cache publishVerifiedAudio:authored fileExtension:@"wav" forKey:low], @"A subsequent play can populate a fresh automatic cache");
+        cached = [cache audioForKey:low];
+        [cache saveAddress:remote forKey:high];
+        Check(manualWritten && [files removeItemAtURL:manual error:nil], @"Remove only the authored manual file to exercise the old-layout download");
         manualWritten = NO;
+        Check([files createDirectoryAtURL:oldDownloads withIntermediateDirectories:YES attributes:nil error:nil], @"Prepare old storage layout");
+        // 116 MPEG-1 Layer III mono silent frames, about three seconds. The
+        // fixture exercises the real compressed container at its historic name.
+        uint8_t frame[417] = {0xff,0xfb,0x90,0xc4};
+        NSMutableData *mp3 = [NSMutableData dataWithCapacity:sizeof(frame)*116];
+        for (NSUInteger n=0; n<116; n++) [mp3 appendBytes:frame length:sizeof(frame)];
+        Check([mp3 writeToURL:legacy atomically:YES], @"Save an authored compressed historical download");
+        legacyWritten = YES;
+        Check([requestFile(qq) isEqual:legacy], @"Selected A opens its recorded historical file before cached or network audio");
+        willSelect();
+        Check([FetchSearchFixture(selectB)[@"data"][@"url"] isEqual:bAddress.absoluteString], @"B reuses its saved address");
+        NSURL *returned = requestFile(qq);
+        Check([returned isEqual:legacy], @"After B, A again opens the historical MP3");
+        bindPlayer(returned);
+        Main(^{ clearSong(@"qq", identifier); });
+        Check([[NSData dataWithContentsOfURL:legacy] isEqualToData:mp3] && [requestFile(qq) isEqual:legacy],
+              @"Clearing a song also protects registered downloads in the historical shared directory");
+        Check([files removeItemAtURL:legacy error:nil], @"Remove only this fixture's historical file");
+        legacyWritten = NO;
+        [cache discardAddress:bAddress forKey:bKey];
+        Main(^{
+            low = [cache keyForNamespace:manager.replayNamespace platform:@"tx" trackID:identifier quality:@"128k"];
+            high = [cache keyForNamespace:manager.replayNamespace platform:@"tx" trackID:identifier quality:@"flac24bit"];
+        });
+        Check([cache publishVerifiedAudio:authored fileExtension:@"wav" forKey:low], @"Prepare the final automatic-cache priority cases");
+        cached = [cache audioForKey:low]; [cache saveAddress:remote forKey:high];
         for (NSNumber *withHigherAddress in @[@YES, @NO]) {
             if (!withHigherAddress.boolValue) [cache discardAddress:remote forKey:high];
             NSURL *URL = requestFile(qq);
@@ -514,14 +571,15 @@ static NSDictionary *SmokeLocalPlaylistRoutes(
             bindPlayer(URL);
         }
         NSUInteger workers = workerCount() - initialWorkers, network = networkCount() - initialNetwork;
-        Check(workers == 0 && network == 0, @"All six local selections reached the player with zero JS resolutions and zero transport requests");
-        return @{@"manual_playlist_routes":origins.copy, @"auto_128k_before_cached_high_url":@YES,
-                 @"auto_128k_before_uncached_high_js":@YES, @"local_file_player_bindings":@(origins.count + 2),
+        Check(workers == 0 && network == 0, @"Local selections reached the player with zero JS resolutions and zero transport requests");
+        return @{@"historical_mp3_returned_after_switch":@YES, @"download_address_download_switch":@YES, @"manual_survives_song_clear":@YES, @"manual_playlist_routes":origins.copy, @"auto_128k_before_cached_high_url":@YES,
+                 @"auto_128k_before_uncached_high_js":@YES, @"local_file_player_bindings":@(origins.count + 3),
                  @"local_js_resolutions":@(workers), @"local_transport_requests":@(network)};
     } @finally {
         if (cached) [cache discardAudio:cached forKey:low];
         [cache discardAddress:remote forKey:high];
         if (manualWritten) [files removeItemAtURL:manual error:nil];
+        if (legacyWritten) [files removeItemAtURL:legacy error:nil];
         [files removeItemAtURL:authored error:nil];
         if (registryWritten) {
             BOOL restored = indexWasPresent ? [previous writeToURL:index atomically:YES] : [files removeItemAtURL:index error:nil];
@@ -1296,11 +1354,12 @@ static NSDictionary *SmokeLocalPlaylistRoutes(
     self.window=[[UIWindow alloc] initWithWindowScene:(UIWindowScene*)scene];
     NSArray *arguments=NSProcessInfo.processInfo.arguments;
     BOOL lyricFixture=[arguments containsObject:@"--ui-fixture=lyrics"],searchFixture=[arguments containsObject:@"--ui-fixture=swiftui-search"],playerSwipeFixture=[arguments containsObject:@"--ui-fixture=player-swipe"];
-    if(lyricFixture||searchFixture||playerSwipeFixture) {
+    BOOL songMenuFixture=[arguments containsObject:@"--ui-fixture=song-menu"];
+    if(lyricFixture||searchFixture||playerSwipeFixture||songMenuFixture) {
         NSString *frameworks=NSBundle.mainBundle.privateFrameworksPath;
         void *extension=dlopen([[frameworks stringByAppendingPathComponent:@"FMExtension.dylib"] fileSystemRepresentation],RTLD_NOW|RTLD_GLOBAL);
         void *fixture=dlopen([[frameworks stringByAppendingPathComponent:@"SmokeSettingsFixture.dylib"] fileSystemRepresentation],RTLD_NOW|RTLD_GLOBAL);
-        void *(*factory)(void)=fixture?(void*(*)(void))dlsym(fixture,lyricFixture?"FMInteractionMakeLyricFixture":playerSwipeFixture?"FMInteractionMakePlayerSwipeFixture":"FMInteractionMakeSwiftUISearchFixture"):NULL;
+        void *(*factory)(void)=fixture?(void*(*)(void))dlsym(fixture,songMenuFixture?"FMInteractionMakeSongMenuFixture":lyricFixture?"FMInteractionMakeLyricFixture":playerSwipeFixture?"FMInteractionMakePlayerSwipeFixture":"FMInteractionMakeSwiftUISearchFixture"):NULL;
         NSAssert(extension&&factory,@"UI-test fixture libraries load");
         self.window.rootViewController=CFBridgingRelease(factory());[self.window makeKeyAndVisible];
         void (*install)(void)=(void(*)(void))dlsym(extension,"FMInteractionInstall");if(install)install();

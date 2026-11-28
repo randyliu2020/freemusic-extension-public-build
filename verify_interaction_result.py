@@ -1,4 +1,4 @@
-"""Fail closed unless all three standalone real-input XCTest cases passed."""
+"""Fail closed unless all five standalone real-input XCTest cases passed."""
 import json
 from pathlib import Path
 import sys
@@ -7,7 +7,7 @@ import sys
 def validate(summary):
     if not isinstance(summary, dict):
         raise ValueError("XCTest summary is not an object")
-    wanted = {"totalTestCount": 3, "passedTests": 3, "failedTests": 0, "skippedTests": 0}
+    wanted = {"totalTestCount": 5, "passedTests": 5, "failedTests": 0, "skippedTests": 0}
     for key, value in wanted.items():
         if type(summary.get(key)) is not int or summary[key] != value:
             raise ValueError(f"Expected {key}={value}, received {summary.get(key)!r}")

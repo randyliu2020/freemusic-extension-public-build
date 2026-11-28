@@ -58,10 +58,11 @@ class Machine:
         if address==p.BASE+p.DYLSYM:
             assert self.get(0)==0xFFFFFFFFFFFFFFFE
             name=self.read_cstring(self.get(1))
-            assert name in (b'FMPlaybackCacheCopySuffix',b'FMPlaybackCacheShouldBypassURL')
-            self.set(0,0 if not self.exports else self.suffix_function if name.endswith(b'CopySuffix') else self.policy_function)
+            assert name in (b'FMPlaybackCacheCopyKeySuffix',b'FMPlaybackCacheShouldBypassURL')
+            self.set(0,0 if not self.exports else self.suffix_function if name.endswith(b'CopyKeySuffix') else self.policy_function)
             self.ret()
         elif address==self.suffix_function:
+            assert self.get(0)==self.target_string
             self.set(0,self.suffix_object if self.suffix else 0);self.ret()
         elif address==p.BASE+p.STRING_FROM_NS:
             assert self.get(0)==self.suffix_object
@@ -108,7 +109,7 @@ class PlaybackCachePatch(unittest.TestCase):
         data=p.payload()
         self.assertEqual(len(data),p.END-p.CAVE)
         self.assertIn(b'FMX-CACHE-GENERATION-v1\0',data)
-        self.assertEqual(p.sha256(data),'2e7b3bd62a17e25e4e64113b2e907decaee412cadb143a3fab5cf608facafa4c')
+        self.assertEqual(p.sha256(data),'45dc2f93961de4a7f3077b475592660207ce5d987c0fe77b8234a8189e3f5440')
         self.assertEqual(len(p.SITES),5)
 
     def test_three_native_key_builders_append_same_suffix_with_balanced_arc(self):
