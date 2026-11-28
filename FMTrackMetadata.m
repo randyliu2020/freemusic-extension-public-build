@@ -34,7 +34,7 @@ static NSDictionary *FMNormalize(NSDictionary *track,NSString *source,NSString *
     NSDictionary *meta=[track[@"meta"] isKindOfClass:NSDictionary.class]?track[@"meta"]:@{};
     NSArray *containers=@[track,meta];
     NSMutableDictionary *result=[@{@"source":source,@"songmid":identifier,@"id":identifier,@"name":@"",@"singer":@"",@"albumName":@"",@"albumId":@"",@"img":@"",@"interval":@"",@"typeUrl":@{},@"types":@[],@"_types":@{}} mutableCopy];
-    NSDictionary *fields=@{@"name":@[@"title",@"name"],@"singer":@[@"singer",@"artist"],@"albumName":@[@"albumName",@"album_name",@"album"],@"albumId":@[@"albumId",@"album_id"],@"albumMid":@[@"albumMid",@"album_mid"],@"strMediaMid":@[@"strMediaMid",@"media_mid"],@"songId":@[@"songId"],@"interval":@[@"interval"]};
+    NSDictionary *fields=@{@"name":@[@"title",@"name"],@"singer":@[@"singer",@"artist"],@"albumName":@[@"albumName",@"album_name",@"album"],@"albumId":@[@"albumId",@"album_id"],@"albumMid":@[@"albumMid",@"album_mid"],@"strMediaMid":@[@"strMediaMid",@"media_mid"],@"songId":@[@"songId"],@"interval":@[@"interval"],@"isrc":@[@"isrc",@"ISRC"]};
     for(NSString *key in fields){NSString *value=FMFirst(containers,fields[key],1024);if(value.length)result[key]=value;}
     result[@"img"]=FMTrackCover(track,source,YES) ?: @"";
     if(![result[@"interval"] length]){id duration=track[@"duration"]?:meta[@"duration"];if([duration isKindOfClass:NSNumber.class]){double seconds=[duration doubleValue];if(isfinite(seconds)&&seconds>=0&&seconds<=604800){NSUInteger total=(NSUInteger)seconds;result[@"interval"]=[NSString stringWithFormat:@"%02lu:%02lu",(unsigned long)(total/60),(unsigned long)(total%60)];}}}
@@ -110,7 +110,7 @@ NSDictionary *FMTrackMetadataForParameters(NSDictionary *parameters,NSString *so
     @synchronized(FMTrackLock){cached=FMTracks[key];}
     NSMutableDictionary *merged=[cached mutableCopy]?:NSMutableDictionary.dictionary;
     // Only documented track fields are merged; src_cookie/src_api/auth never cross the bridge.
-    for(NSString *field in @[@"title",@"name",@"singer",@"artist",@"albumName",@"albumId",@"albumMid",@"strMediaMid",@"songId",@"interval"]){NSString *value=FMText(parameters[field],1024);if(value.length)merged[field]=value;}
+    for(NSString *field in @[@"title",@"name",@"singer",@"artist",@"albumName",@"albumId",@"albumMid",@"strMediaMid",@"songId",@"interval",@"isrc"]){NSString *value=FMText(parameters[field],1024);if(value.length)merged[field]=value;}
     NSString *currentCover=FMTrackCover(parameters,platform,YES);
     if(currentCover){
         merged[@"img"]=currentCover;

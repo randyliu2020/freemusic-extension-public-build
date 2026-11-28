@@ -19,7 +19,8 @@
         @"m.singer='PRIVATE_FIXTURE_MUTATION';m.types.push({type:'PRIVATE_FIXTURE_MUTATION'});"
         @"return new Promise((resolve,reject)=>lx.request('https://fixture.invalid/v7-quality-attempt?scenario='+encodeURIComponent(id)+'&quality='+encodeURIComponent(q)+'&invocation='+invocations,{},(error,response)=>{"
         @"if(error)return reject(error);const body=response&&response.body;if(!body||body.ok!==true)return reject(Error('authored per-quality failure'));resolve(body.url);}));});"
-        @"lx.send('inited',{sources:{tx:{type:'music',actions:['musicUrl'],qualitys:['128k','320k','flac','flac24bit']}}});";
+        @"const routed={type:'music',actions:['musicUrl'],qualitys:['128k','320k','flac','flac24bit']};"
+        @"lx.send('inited',{sources:{tx:routed,wy:routed}});";
     NSError *writeError=nil;
     Check([script writeToURL:[directory URLByAppendingPathComponent:filename] atomically:YES encoding:NSUTF8StringEncoding error:&writeError],writeError.localizedDescription);
     InstallSearchFixtureTransport();
@@ -45,7 +46,23 @@
         BOOL success=![identifier isEqual:@"all-fail"] && !([identifier isEqual:@"down"] && [@[@"flac24bit",@"flac"] containsObject:quality]);
         return @{@"ok":@(success),@"url":[NSString stringWithFormat:@"https://fixture.invalid/v7-quality/%@/%@",identifier,quality]};
     }; }
+    SEL workerSelector = @selector(resolveIsolatedMusicURLForSource:musicInfo:quality:timeout:completion:);
+    Class runtimeClass = NSClassFromString(@"LXSourceRuntime");
+    Method workerMethod = class_getInstanceMethod(runtimeClass, workerSelector);
+    IMP previousWorker = NULL, workerProbe = NULL;
+    __block NSUInteger workerStarts = 0;
+    NSUInteger (^workerCount)(void) = ^NSUInteger{ @synchronized(runtimeClass) { return workerStarts; } };
     @try {
+        Check(workerMethod != NULL, @"Observe the actual boundary that starts an isolated JS resolution");
+        previousWorker = method_getImplementation(workerMethod);
+        IMP original = previousWorker;
+        workerProbe = imp_implementationWithBlock(^NSString *(id receiver, NSString *source, NSDictionary *musicInfo,
+                                                               NSString *quality, NSTimeInterval timeout, LXSourceURLCompletion completion) {
+            @synchronized(runtimeClass) { workerStarts++; }
+            typedef NSString *(*Resolve)(id, SEL, NSString *, NSDictionary *, NSString *, NSTimeInterval, LXSourceURLCompletion);
+            return ((Resolve)original)(receiver, workerSelector, source, musicInfo, quality, timeout, completion);
+        });
+        method_setImplementation(workerMethod, workerProbe);
         Main(^{ [manager activate:@{@"file":filename,@"name":@"Authored quality routing fixture"}]; });
         Check(Until(^BOOL{ return [manager.selectedFile isEqual:filename] && manager.runtime.manifest[@"sources"][@"tx"]!=nil; },8),@"Quality fixture is enabled through production manager");
         void (*observeMetadata)(id)=(void(*)(id))dlsym(self.extensionHandle,"FMTrackMetadataObserveResponse");
@@ -89,6 +106,7 @@
         }
         NSDictionary *expectedAttempts=@{@"highest":@[@"flac24bit"],@"down":@[@"flac24bit",@"flac",@"320k"],@"all-fail":@[@"flac24bit",@"flac",@"320k",@"128k"],@"audit":@[@"flac24bit"]};
         Check([attempts isEqual:expectedAttempts] && requests.count==9,@"Actual JS HTTP attempts prove highest-first order, one attempt per quality, complete exhaustion and a later independent success");
+        Check(workerCount() == requests.count, @"Positive control observes all nine online JS resolutions at the worker boundary");
         Check(nativeRequests==0,@"No parse request falls through or retries the native backend");
         Check(Until(^BOOL{ return manager.runtime==runtime && runtime.manifest!=nil; },2),@"Per-quality failures do not disable the responsive source");
         NSUInteger (^requestCount)(void) = ^NSUInteger{
@@ -110,18 +128,20 @@
         Check(published && cachedFile.isFileURL && ![cachedFile isEqual:authored], @"Store owns the complete authored media after its input file is removed");
         void (*configureNative)(void *,void *)=dlsym(self.extensionHandle,"FMAdaptivePlaybackTestConfigureNative");
         NSDictionary *(*adaptiveState)(void)=dlsym(self.extensionHandle,"FMAdaptivePlaybackDiagnostics");
+        void (*selectionWillChange)(id)=dlsym(self.extensionHandle,"FMAdaptivePlaybackSelectionWillChange");
         void *setup=dlsym(self.swiftUIFixtureHandle,"FMAdaptiveFixtureSetupNative");
         void *failure=dlsym(self.swiftUIFixtureHandle,"FMAdaptiveFixtureFailureNative");
         void *(*create)(void)=dlsym(self.swiftUIFixtureHandle,"FMAdaptiveFixtureCreate");
         void (*start)(void *,void *)=dlsym(self.swiftUIFixtureHandle,"FMAdaptiveFixtureStart");
         void *(*copyPlayer)(void *)=dlsym(self.swiftUIFixtureHandle,"FMAdaptiveFixtureCopyPlayer");
         void (*stop)(void *)=dlsym(self.swiftUIFixtureHandle,"FMAdaptiveFixtureStop");
-        Check(configureNative&&adaptiveState&&setup&&failure&&create&&start&&copyPlayer&&stop,@"Swift player receiver and production adaptive registration are available");
+        Check(configureNative&&adaptiveState&&selectionWillChange&&setup&&failure&&create&&start&&copyPlayer&&stop,@"Swift player receiver and production adaptive registration are available");
         __block id receiver;
         __block AVPlayer *player;
         __block NSUInteger previousBindings;
         __block double secondsAfterSeek=0;
         NSUInteger beforeFile=requestCount(), fileRequests=NSNotFound;
+        NSDictionary *localPlaylistEvidence = nil;
         @try {
             Main(^{
                 configureNative(setup,failure);
@@ -156,6 +176,22 @@
             },6),@"The local AVPlayer clock advances again after seeking");
             fileRequests=requestCount()-beforeFile;
             Check(fileRequests==0,@"No JS musicUrl HTTP or native origin request during local resolution, play and seek");
+            localPlaylistEvidence = SmokeLocalPlaylistRoutes(manager, store, observeMetadata, replayRequest,
+                                                            workerCount, requestCount, ^{
+                Main(^{ selectionWillChange(receiver); });
+            }, ^(NSURL *localFile) {
+                Main(^{
+                    NSUInteger before = [adaptiveState()[@"bound"] unsignedIntegerValue];
+                    start((__bridge void *)receiver, (__bridge void *)localFile);
+                    player = CFBridgingRelease(copyPlayer((__bridge void *)receiver));
+                    AVAsset *asset = player.currentItem.asset;
+                    Check([asset isKindOfClass:AVURLAsset.class] && [((AVURLAsset *)asset).URL isEqual:localFile] &&
+                          [adaptiveState()[@"bound"] unsignedIntegerValue] == before + 1,
+                          @"Each playlist selection binds the resolved local audio to a new real AVPlayerItem");
+                });
+                Check(Until(^BOOL{ return player.currentItem.status == AVPlayerItemStatusReadyToPlay; },8),
+                      @"The real AVPlayerItem reports each local candidate ready");
+            });
         } @finally {
             Main(^{if(receiver)stop((__bridge void *)receiver);configureNative(NULL,NULL);player=nil;receiver=nil;});
         }
@@ -174,12 +210,13 @@
             Check([FetchSearchFixture(replayRequest)[@"data"][@"url"] isEqual:addressA] &&
                   requestCount() == beforeReturn + 1, @"Returning A after B requires a fresh JS address");
         } @finally { [NSFileManager.defaultManager removeItemAtURL:otherFile error:nil]; }
-        return @{@"same_source_replay_without_js":@YES, @"source_switch_gets_own_url":@YES,
+        return @{@"local_playlist_routing":localPlaylistEvidence, @"same_source_replay_without_js":@YES, @"source_switch_gets_own_url":@YES,
                  @"protocol_file_url_bound_to_avplayer":@YES, @"local_media_seek_seconds":@(secondsAfterSeek),
                  @"local_replay_transport_requests":@(fileRequests), @"old_complete_file_revoked_on_switch":@YES,
                  @"switching_back_resolves_again":@YES, @"scenarios":results,@"qmc_request_uses_JS":@YES,@"highest_first":@YES,@"all_qualities_attempted_once":@YES,@"unverified_quality_label":@"未知",@"native_origin_requests":@(nativeRequests),@"credential_metadata_allowlist":@YES,@"enriched_album_media_quality_metadata":@YES,@"isolated_workers":@YES,@"observed_JS_HTTP_attempts":attempts,@"observed_JS_HTTP_requests":@(requests.count-nativeRequests),@"real_network_used":@NO};
     } @finally {
         Main(^{ [manager disable]; });
+        if (workerProbe) { method_setImplementation(workerMethod,previousWorker); imp_removeBlock(workerProbe); }
         method_setImplementation(sessionFactory,previousSessionFactory);imp_removeBlock(fixtureSessionFactory);
         RestoreSearchFixtureTransport();
         [NSFileManager.defaultManager removeItemAtURL:[directory URLByAppendingPathComponent:filename] error:nil];

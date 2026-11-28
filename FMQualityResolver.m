@@ -31,7 +31,7 @@ static BOOL FMQValidURL(NSURL *URL) {
     FMQualityCandidateOrigin _lastCandidateOrigin;
     BOOL _lastWasRefresh;
     NSError *_terminalError;
-    BOOL _attemptActive, _deliveryPending, _renewBudget;
+    BOOL _attemptActive, _deliveryPending, _renewBudget, _checkLocalFiles;
 }
 - (void)setReplayLookup:(FMQualityCacheLookup)lookup saveAddress:(FMQualityCacheMutation)saveAddress
           discardFailed:(FMQualityCacheMutation)discardFailed {
@@ -114,14 +114,17 @@ static BOOL FMQValidURL(NSURL *URL) {
         if (self->_renewBudget && !self->_terminalError) {
             self->_remaining = self->_resolutionBudget;
             self->_renewBudget = NO;
-            if (self->_lookup && [self sourceIsCurrent]) {
-                if (self->_discardFailed) self->_discardFailed(self->_lastQuality,self->_lastURL);
-                // First failure of a cached file falls through to the remote
-                // tiers at this quality. A remote failure gets one forced JS
-                // refresh, whether the original URL came from disk or JS.
-                if (!self->_lastWasRefresh) self->_resumeQuality = self->_lastQuality;
+            if ([self sourceIsCurrent]) {
+                if (self->_lastCandidateOrigin == FMQualityCandidateFromManualDownload) {
+                    if (self.rejectPreferredDownload) self.rejectPreferredDownload(self->_lastURL);
+                } else if (self->_lookup) {
+                    if (self->_discardFailed) self->_discardFailed(self->_lastQuality,self->_lastURL);
+                    if (self->_lastCandidateOrigin != FMQualityCandidateFromAudioCache && !self->_lastWasRefresh)
+                        self->_resumeQuality = self->_lastQuality;
+                }
             }
         }
+        self->_checkLocalFiles = YES;
         self->_completion = [completion copy];
         [self attemptNext];
     });
@@ -140,6 +143,24 @@ static BOOL FMQValidURL(NSURL *URL) {
     if (!_completion) return;
     if (_terminalError) { [self completeURL:nil quality:nil error:_terminalError]; return; }
     if (![self sourceIsCurrent]) { [self terminate:FMQError(FMQualityResolverSourceChanged,@"Source or playback generation changed")]; return; }
+    // A completed local recording is playable without an online quality attempt.
+    // Probe in descending quality within this source and exact track. Keep the
+    // remote cursor untouched, so a failed disk candidate can still try the top tier.
+    if (_checkLocalFiles) {
+        _checkLocalFiles = NO;
+        NSURL *manual = self.preferredDownload ? self.preferredDownload() : nil;
+        if (manual.isFileURL && ![_returnedURLs containsObject:manual.absoluteString]) {
+            [self deliverCandidate:manual quality:@"local" origin:FMQualityCandidateFromManualDownload refreshed:NO];
+            return;
+        }
+        for (NSString *quality in (_lookup ? _qualities : @[])) {
+            NSURL *local = _lookup(quality,FMQualityCandidateFromAudioCache);
+            if (local.isFileURL && ![_returnedURLs containsObject:local.absoluteString]) {
+                [self deliverCandidate:local quality:quality origin:FMQualityCandidateFromAudioCache refreshed:NO];
+                return;
+            }
+        }
+    }
     if (!_qualities.count || !_resolve) { [self terminate:FMQError(FMQualityResolverNoSupportedQuality,@"No supported common quality")]; return; }
     if (_remaining <= 0.001) { [self terminate:FMQError(NSURLErrorTimedOut,@"Total quality resolution time exhausted")]; return; }
     if (!_resumeQuality && _nextIndex >= _qualities.count) { [self terminate:FMQError(FMQualityResolverExhausted,@"All supported qualities failed or returned a previously failed URL")]; return; }
@@ -148,11 +169,6 @@ static BOOL FMQValidURL(NSURL *URL) {
     NSString *quality = _resumeQuality ?: _qualities[_nextIndex++];
     _resumeQuality = nil;
     if (_lookup && !refresh) {
-        NSURL *local = resuming ? nil : _lookup(quality,FMQualityCandidateFromAudioCache);
-        if (local.isFileURL && ![_returnedURLs containsObject:local.absoluteString]) {
-            [self deliverCandidate:local quality:quality origin:FMQualityCandidateFromAudioCache refreshed:NO];
-            return;
-        }
         NSURL *remote = _lookup(quality,FMQualityCandidateFromAddressCache);
         if (FMQValidURL(remote) && ![_returnedURLs containsObject:remote.absoluteString]) {
             [self deliverCandidate:remote quality:quality origin:FMQualityCandidateFromAddressCache refreshed:NO];

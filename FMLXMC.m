@@ -134,6 +134,8 @@ static NSDictionary *FMTrack(id raw, BOOL modern, NSString **unsupported) {
     NSString *server = [source isEqualToString:@"tx"] ? @"qq" : source;
     NSMutableDictionary *result = [@{@"id":identifier, @"title":title, @"server":server,
         @"singer":singer, @"album":album, @"cover":FMTrackCover(track,source,NO) ?: @""} mutableCopy];
+    NSString *isrc = FMString(meta[@"isrc"] ?: track[@"isrc"], 20);
+    if (isrc.length) result[@"isrc"] = isrc;
     NSNumber *duration = FMDuration(track[@"interval"]);
     if (duration) result[@"duration"] = duration;
     return [result copy];

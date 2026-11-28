@@ -7,6 +7,52 @@ identity, control actions, labels and their captured destinations stay native.
 """
 from hashlib import sha256
 import struct
+from interaction_patch import CAVE as FIRST_BRIDGE, _verify_cave
+
+
+# Only full-row reads made by LocalDownloadsView. The other reads at this
+# screen's key path obtain a count or populate an unordered set of selected
+# IDs. Persisted download ordering and all other playlists are untouched.
+PROJECTION_SITES = {
+    0xcab90: "download_rows_in_list",
+    0xcb99c: "download_rows_for_playback_queue",
+    0xcda1c: "download_rows_for_selection",
+}
+PROJECTION_CAVE = 0x50A100
+PUBLISHED_GET = 0x404BF8
+PROJECTION_CONTEXTS = {
+    0xcab60: (0x130, "ae7a75abc0bef7164d3f33e9144730cc6d690abcf19466f51c998ad346029e4a"),
+    0xcb96c: (0x124, "9a09acdd07ac35bcb06e0afd27e8cbe4096382047544886d08f6e778cb9281cf"),
+    0xcd9ec: (0x150, "3bafc5a4a533e30e87d14d7fb099f98a18dbf75cde9673c8f32a384c03cd0633"),
+    0x41b7a0: (0x48, "8931aa5dc5c600006f31dab38cfb8e1a81d48a276dff8986a170091aa3a95da5"),
+    0xd3590: (8, "768a5f342d447ab40e2a2415ab8731f121d23240226b310c3473d83fcbb834aa"),
+    0x43e99c: (28, "94fa0edfb263b4978f2f5d1f37865404a73c23bf7d588069f7bbdfb0b25b7b7c"),
+    0x43f4d0: (28, "3be7f8dffbdec8f9808b5181b17552ecb540dc88b8fc7909871b52a544b39e1f"),
+}
+# Keep the indirect result address, borrowed key path and return address. The
+# host initializes that result normally before we sort its independent value.
+# Normal API lookup can be absent: return the unmodified native read then.
+PROJECTION_CODE = bytes.fromhex(
+    "e807bea9fe0b00f9bceafb97200080922101001042f8fb97800000b4"
+    "f00300aae00740a900023fd6fe0b40f9ff830091c0035fd6"
+)
+PROJECTION_SYMBOL = b"FMProjectLocalDownloads\0"
+
+
+def _call(source: int, target: int) -> bytes:
+    return struct.pack("<I", 0x94000000 | (((target - source) // 4) & 0x3ffffff))
+
+
+def _projected_reads(data: bytes, original: bytes):
+    payload = PROJECTION_CODE + PROJECTION_SYMBOL
+    _verify_cave(original, PROJECTION_CAVE + len(payload) - FIRST_BRIDGE)
+    for offset, (width, digest) in PROJECTION_CONTEXTS.items():
+        if sha256(data[offset:offset + width]).hexdigest() != digest:
+            raise ValueError(f"Local Downloads row reader changed at {offset:#x}")
+    plan = [(PROJECTION_CAVE, bytes(len(payload)), payload, "download_sort_projection")]
+    for site, purpose in PROJECTION_SITES.items():
+        plan.append((site, _call(site, PUBLISHED_GET), _call(site, PROJECTION_CAVE), purpose))
+    return plan
 
 
 # Indirect context-descriptor references used by the Swift runtime.
@@ -63,7 +109,7 @@ def _context_name(data: bytes, indirect: int) -> bytes:
     return data[name:name + 64].split(b"\0", 1)[0]
 
 
-def changes(data: bytes) -> list[tuple[int, bytes, bytes, str]]:
+def changes(data: bytes, original: bytes) -> list[tuple[int, bytes, bytes, str]]:
     """Caller verifies the version and full original hash, then applies these ranges."""
     if (sha256(data[BUILDER_START:BUILDER_END]).hexdigest() != BUILDER_SHA256
             or _context_name(data, RECENT) != b"RecentPlaysView"
@@ -87,4 +133,4 @@ def changes(data: bytes) -> list[tuple[int, bytes, bytes, str]]:
         if data[at:at + 4] != before:
             raise ValueError(f"Library tuple initializer changed at {at:#x}")
         plan.append((at, before, bytes.fromhex(new), "library_native_row_value"))
-    return plan
+    return plan + _projected_reads(data, original)

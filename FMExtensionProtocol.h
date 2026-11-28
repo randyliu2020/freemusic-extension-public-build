@@ -9,7 +9,8 @@ typedef BOOL (^FMXParsePredicate)(NSURLRequest *request, NSDictionary<NSString *
 /// Cleanup reason: nil on success, NSURLErrorCancelled on client cancellation,
 /// NSURLErrorTimedOut on the protocol deadline, or the failure that ended handling.
 typedef void (^FMXParseCancellation)(NSError * _Nullable reason);
-/// Return a cleanup/cancellation block. Complete at most once with a JSON dictionary.
+/// Return a cleanup/cancellation block. Complete at most once. If the predicate
+/// became false after accepting a request, (nil,nil) forwards the retained original.
 /// aacert parse uses APIResponse; the exact m.kugou.com native route uses top-level url/bitRate.
 /// Kugou parameters are synthesized as {server:kg,id:uppercase hash,level:standard}; no native quality is available.
 /// The predicate must accept kg only when the active script explicitly supports kg musicUrl at 128k.

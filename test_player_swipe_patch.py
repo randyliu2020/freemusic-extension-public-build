@@ -135,74 +135,40 @@ class PlayerSwipe(unittest.TestCase):
                     if not zoom and available:
                         self.assertEqual(read(state[r.UC_ARM64_REG_FP]-0x78),state[r.UC_ARM64_REG_SP])
 
-    def test_lyric_drag_calls_original_once_and_closes_only_matching_full_player(self):
-        ks=Ks(KS_ARCH_ARM64,KS_MODE_LITTLE_ENDIAN)
-        self.assertEqual(bytes(ks.asm(p.LYRIC_END_ASSEMBLY,p.LYRIC_END_CAVE)[0]),bytes.fromhex(p.LYRIC_END_HEX))
-        self.assertEqual(bytes(ks.asm('adrp x2, 0x50b000; add x2, x2, #0xe00',p.LYRIC_END_SITE)[0]),p.LYRIC_END_REDIRECT)
-        self.assertEqual(bytes(ks.asm('adrp x2, 0x50b000; add x2, x2, #0xe08', p.LYRIC_CHANGE_SITE)[0]), p.LYRIC_CHANGE_REDIRECT)
-        for ended, accept, match, owner, available, style in [
-            (False, True, True, True, True, 0), (True, False, True, True, True, 0),
-            (True, True, True, True, True, 1), (True, True, False, True, True, 0),
-            (True, True, True, False, True, 0), (True, True, True, True, False, 0)
-        ]:
-            with self.subTest(ended=ended, accept=accept, match=match, owner=owner, available=available):
-                base=p.BASE+0x2000000
-                vm=Uc(UC_ARCH_ARM64,UC_MODE_ARM);vm.mem_map(base,0x600000);vm.mem_map(0x200000,0x10000)
-                for at in [0x1cd620,0x1c771c,p.FULL_PLAYER_DRAG]:
-                    vm.mem_write(base+at,bytes.fromhex(p.CONTEXTS[at]))
-                # Model the sibling callback entry. Its target is replaced below;
-                # the local-original test checks its independent fingerprint.
-                sibling = bytes.fromhex(p.CONTEXTS[0x1cd620])[:16] + p.branch(0x1cd61c, 0x1c771c)
-                vm.mem_write(base+0x1cd60c, sibling)
-                vm.mem_write(base+p.LYRIC_CHANGE_SITE,p.LYRIC_CHANGE_REDIRECT)
-                vm.mem_write(base+p.LYRIC_END_SITE,p.LYRIC_END_REDIRECT)
-                vm.mem_write(base+p.LYRIC_END_CAVE,bytes.fromhex(p.LYRIC_END_HEX)+p.LYRIC_POLICY_SYMBOL)
-                gesture,lyric_context,player_context=0x201000,0x202000,0x203000
-                metadata,witnesses,stop=0x204000,0x205000,base+0x550000
-                vm.mem_write(metadata-8,struct.pack('<Q',witnesses))
-                vm.mem_write(witnesses+0x50,b'\x0f')
-                vm.mem_write(lyric_context+16+18,bytes([style]))
-                vm.mem_write(lyric_context+16+24,struct.pack('<QQ',base+p.FULL_PLAYER_SEEK if match else 0,
-                                                              player_context if owner else 0))
-                initial={r.UC_ARM64_REG_SP:0x20f000,r.UC_ARM64_REG_X19:0x123,r.UC_ARM64_REG_X20:lyric_context,
-                         r.UC_ARM64_REG_X21:0x456,r.UC_ARM64_REG_X22:0x654,r.UC_ARM64_REG_X29:0x789,r.UC_ARM64_REG_LR:stop}
-                for reg,value in initial.items():vm.reg_write(reg,value)
-                vm.reg_write(r.UC_ARM64_REG_X0,gesture)
-                events=[]
-                def hook(machine,address,size,user):
-                    offset=address-base
-                    if offset in (0x1c505c,0x1c1168): machine.reg_write(r.UC_ARM64_REG_X0,metadata)
-                    elif offset in (p.LYRIC_NATIVE_ENDED, p.LYRIC_NATIVE_CHANGED):
-                        events.append('scroll-end' if offset==p.LYRIC_NATIVE_ENDED else 'scroll-change')
-                        self.assertEqual(machine.reg_read(r.UC_ARM64_REG_X0),gesture)
-                        self.assertEqual(machine.reg_read(r.UC_ARM64_REG_X1),lyric_context+16)
-                    elif offset==0x40821c:
-                        events.append('lookup')
-                        self.assertEqual(bytes(machine.mem_read(machine.reg_read(r.UC_ARM64_REG_X1),len(p.LYRIC_POLICY_SYMBOL))),p.LYRIC_POLICY_SYMBOL)
-                        machine.reg_write(r.UC_ARM64_REG_X0,base+0x54e000 if available else 0)
-                    elif offset==0x54e000:
-                        events.append('lyric-policy')
-                        self.assertEqual(machine.reg_read(r.UC_ARM64_REG_X0),player_context)
-                        self.assertEqual(machine.reg_read(r.UC_ARM64_REG_X1),gesture)
-                        self.assertEqual(machine.reg_read(r.UC_ARM64_REG_X2),int(ended))
-                        self.assertEqual(machine.reg_read(r.UC_ARM64_REG_X3),style)
-                        machine.reg_write(r.UC_ARM64_REG_X0,int(accept))
-                    elif offset==0x1aba84:
-                        events.append('full-player-gesture')
-                        self.assertEqual(machine.reg_read(r.UC_ARM64_REG_X0),gesture)
-                        self.assertEqual(machine.reg_read(r.UC_ARM64_REG_X1),player_context+16)
-                    else:return
-                    machine.reg_write(r.UC_ARM64_REG_PC,machine.reg_read(r.UC_ARM64_REG_LR))
-                vm.hook_add(UC_HOOK_CODE,hook)
-                vm.emu_start(base+(0x1cd620 if ended else 0x1cd60c),stop,count=200)
-                self.assertEqual(vm.reg_read(r.UC_ARM64_REG_PC),stop)
-                expected=['scroll-end' if ended else 'scroll-change']
-                if match and owner:
-                    expected.append('lookup')
-                    if available: expected.append('lyric-policy')
-                    if available and ended and accept: expected.append('full-player-gesture')
-                self.assertEqual(events,expected)
-                for reg,value in initial.items():self.assertEqual(vm.reg_read(reg),value)
+    def test_header_notification_preserves_native_close_with_and_without_extension(self):
+        ks = Ks(KS_ARCH_ARM64, KS_MODE_LITTLE_ENDIAN)
+        self.assertEqual(bytes(ks.asm(p.HEADER_NOTIFY_ASSEMBLY, p.HEADER_NOTIFY_CAVE)[0]), p.HEADER_NOTIFY_CODE)
+        for available in (False, True):
+            with self.subTest(available=available):
+                base = p.BASE + 0x2000000
+                vm = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
+                vm.mem_map(base, 0x600000)
+                vm.mem_write(base + p.NATIVE_DISMISS, p.branch(p.NATIVE_DISMISS, p.HEADER_NOTIFY_CAVE))
+                vm.mem_write(base + p.HEADER_NOTIFY_CAVE, p.HEADER_NOTIFY_CODE + p.HEADER_NOTIFY_SYMBOL)
+                observer = base + 0x54E000
+                native = base + p.NATIVE_DISMISS + 4
+                initial = {getattr(r, f'UC_ARM64_REG_X{i}'): 0xAC000+i for i in range(19,29)}
+                for reg, value in initial.items(): vm.reg_write(reg,value)
+                calls = []
+                def hook(machine, address, size, user):
+                    if address == base + 0x40821c:
+                        calls.append('lookup')
+                        key = machine.reg_read(r.UC_ARM64_REG_X1)
+                        self.assertEqual(machine.mem_read(key, len(p.HEADER_NOTIFY_SYMBOL)), p.HEADER_NOTIFY_SYMBOL)
+                        machine.reg_write(r.UC_ARM64_REG_X0, observer if available else 0)
+                    elif address == observer:
+                        calls.append('observer')
+                        self.assertEqual(machine.reg_read(r.UC_ARM64_REG_X0), initial[r.UC_ARM64_REG_X20])
+                    else:
+                        return
+                    machine.reg_write(r.UC_ARM64_REG_PC, machine.reg_read(r.UC_ARM64_REG_LR))
+                vm.hook_add(UC_HOOK_CODE, hook)
+                vm.emu_start(base + p.NATIVE_DISMISS, native, count=60)
+                self.assertEqual(vm.reg_read(r.UC_ARM64_REG_PC), native)
+                self.assertEqual(vm.reg_read(r.UC_ARM64_REG_X0), 0)
+                self.assertEqual(calls, ['lookup', 'observer'] if available else ['lookup'])
+                for reg, value in initial.items(): self.assertEqual(vm.reg_read(reg), value)
+
     def test_encoded_instructions_and_all_branch_destinations(self):
         assembled, _ = Ks(KS_ARCH_ARM64, KS_MODE_LITTLE_ENDIAN).asm(p.TRAMPOLINE_ASSEMBLY, addr=p.CAVE)
         self.assertEqual(bytes(assembled), bytes.fromhex(p.TRAMPOLINE_HEX))
@@ -248,7 +214,11 @@ class PlayerSwipe(unittest.TestCase):
         self.assertEqual(len(changes),6)
         allowed={i for c in changes for i in range(c.offset,c.offset+len(c.after))}
         self.assertTrue(all(a==b or i in allowed for i,(a,b) in enumerate(zip(data,output))))
-        self.assertEqual(output[p.NATIVE_DISMISS:p.NATIVE_DISMISS+len(bytes.fromhex(p.NATIVE_DISMISS_HEX))],bytes.fromhex(p.NATIVE_DISMISS_HEX))
+        self.assertEqual(p.branch_target(p.NATIVE_DISMISS, output[p.NATIVE_DISMISS:p.NATIVE_DISMISS+4]), p.HEADER_NOTIFY_CAVE)
+        self.assertEqual(output[p.NATIVE_DISMISS+4:p.NATIVE_DISMISS+len(bytes.fromhex(p.NATIVE_DISMISS_HEX))],
+                         bytes.fromhex(p.NATIVE_DISMISS_HEX)[4:])
+        # The lyric scroll callbacks and their original bookkeeping are untouched.
+        self.assertEqual(output[0x1cd60c:0x1cd630], data[0x1cd60c:0x1cd630])
         self.assertTrue(report['original_downward_condition_preserved'])
         # Compose with the shipped lyric patch; neither cave overlaps the other.
         import interaction_patch

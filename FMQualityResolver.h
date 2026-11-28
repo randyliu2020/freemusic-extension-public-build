@@ -7,6 +7,7 @@ typedef NS_ENUM(NSUInteger, FMQualityCandidateOrigin) {
     FMQualityCandidateFromJS,
     FMQualityCandidateFromAddressCache,
     FMQualityCandidateFromAudioCache,
+    FMQualityCandidateFromManualDownload,
 };
 typedef NSURL * _Nullable (^FMQualityCacheLookup)(NSString *quality, FMQualityCandidateOrigin origin);
 typedef void (^FMQualityCacheMutation)(NSString *quality, NSURL *URL);
@@ -51,6 +52,9 @@ typedef void (^FMQualityResolutionCompletion)(NSURL * _Nullable URL,
             saveAddress:(FMQualityCacheMutation)saveAddress
           discardFailed:(FMQualityCacheMutation)discardFailed;
 @property(nonatomic,readonly) FMQualityCandidateOrigin lastCandidateOrigin;
+/// Actual local recording owned by the user. Download resolvers leave these unset.
+@property(nonatomic,copy,nullable) NSURL * _Nullable (^preferredDownload)(void);
+@property(nonatomic,copy,nullable) void (^rejectPreferredDownload)(NSURL *URL);
 /// Invoked on main before handing a current remote playback candidate to the host.
 @property(nonatomic,copy,nullable) FMQualityCacheMutation willUseRemoteURL;
 /// Called by the verified playback binding, also on recovery to a later URL.

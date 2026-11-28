@@ -12,6 +12,7 @@
 #import "FMNavigation.h"
 #import "FMPlaybackCache.h"
 #import "FMQualityResolver.h"
+#import "FMPreferredDownloadStore.h"
 #import "FMReplayCache.h"
 #import "FMReplayMedia.h"
 #import "FMAdaptivePlayback.h"
@@ -237,7 +238,7 @@ static NSString *FMXCoverStatusText(NSDictionary *state) {
     if (section == 1) return @"支持网易云、QQ 和酷狗的基础洛雪音源。酷狗 JS 使用标准音质；部分脚本需要额外歌曲信息或尚未支持的功能。仅启用你信任的脚本。";
     if (section == 2) return @"用当前封面在手机上生成轻微缩放的循环动画。系统需要时才生成；低电量或减少动态效果开启时显示静态封面。需要 iOS 26 或更高版本。";
     if (section == 4) return @"按实际听歌记录查看月度、年度偏好，只保存在本机。";
-    return @"扩展 v10。命中完整歌曲缓存时可离线播放。仅复用播放地址时仍需联网读取音频。";
+    return @"扩展 v11。播放时优先读取这首歌的本地下载，其次使用当前音源下已缓存的完整音频。仅有播放地址时仍需联网。";
 }
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)path {
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
@@ -361,6 +362,27 @@ static NSString *FMXCoverStatusText(NSDictionary *state) {
 @end
 
 static NSString *FMXLXSource(NSString *server) { if ([server isEqual:@"qq"]) return @"tx"; if ([server isEqual:@"wy"]) return @"wy"; if ([server isEqual:@"kg"]) return @"kg"; return nil; }
+// Combine IDs and same-recording metadata without copying credentials from a parse request.
+static NSDictionary *FMXRecordingRequest(NSDictionary *parameters, NSDictionary *musicInfo) {
+    NSMutableDictionary *track = [@{@"server":parameters[@"server"] ?: @"", @"id":parameters[@"id"] ?: @""} mutableCopy];
+    NSDictionary *fields = @{@"title":@"name", @"singer":@"singer", @"album":@"albumName", @"isrc":@"isrc"};
+    for (NSString *key in fields) {
+        id value = parameters[key] ?: musicInfo[fields[key]];
+        if ([value isKindOfClass:NSString.class] && [value length]) track[key] = value;
+    }
+    id duration = parameters[@"duration"];
+    if ([duration isKindOfClass:NSNumber.class]) track[@"duration"] = duration;
+    else {
+        NSString *interval = musicInfo[@"interval"];
+        NSArray *parts = [interval isKindOfClass:NSString.class] ? [interval componentsSeparatedByString:@":"] : nil;
+        if (parts.count == 2 && [parts[0] length] && [parts[1] length] == 2) {
+            NSCharacterSet *invalid = [[NSCharacterSet characterSetWithCharactersInString:@"0123456789"] invertedSet];
+            if ([parts[0] rangeOfCharacterFromSet:invalid].location == NSNotFound && [parts[1] rangeOfCharacterFromSet:invalid].location == NSNotFound && [parts[1] integerValue] < 60 && [parts[0] integerValue] <= 10080)
+                track[@"duration"] = @([parts[0] integerValue] * 60 + [parts[1] integerValue]);
+        }
+    }
+    return track;
+}
 // Record only actual handler invocations. Capability probes are not playback.
 // Do not retain song IDs, URLs, credentials, or arbitrary server error strings.
 static void FMXPlaybackStatus(LXSourceRuntime *runtime, NSString *identifier, NSString *source, NSString *state, BOOL starting) {
@@ -385,6 +407,12 @@ __attribute__((constructor)) static void FMXInitialize(void) {
         FMPlaybackSequenceInstall();
         FMDownloadIntegrationInstall();
         FMNativeDownloadCoverDisplayInstall();
+        // Drop addresses/preloaded players selected before a manual file appeared
+        // (or before it was removed). Keep the current playback and JS source.
+        [NSNotificationCenter.defaultCenter addObserverForName:FMDownloadCatalogueDidChangeNotification
+            object:nil queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note){
+                FMPlaybackCacheSourceTransition([NSSet set]);
+            }];
         FMDownloadArtworkInstall();
         [FMExtensionProtocol setTrackMetadataObserver:^(id payload){FMTrackMetadataObserveResponse(payload);}];
         // Capture must install before the host registers its original AVPlayer
@@ -404,13 +432,37 @@ __attribute__((constructor)) static void FMXInitialize(void) {
                 NSString *source = FMXLXSource(parameters[@"server"]);
                 BOOL directKugou = [request.URL.host.lowercaseString isEqual:@"m.kugou.com"];
                 NSArray *qualities = FMXRoutableQualities(runtime.manifest, source);
+                NSDictionary *info = FMTrackMetadataForParameters(parameters, source ?: parameters[@"server"]);
+                NSDictionary *recording = FMXRecordingRequest(parameters, info);
+                FMPreferredDownloadStore *downloads = FMPreferredDownloadStore.sharedStore;
                 if (!runtime || !source || !qualities.count) {
-                    completion(directKugou ? @{@"url":@""} : @{@"code":@503, @"msg":@"JS 音源当前不可用"}, nil);
+                    NSURL *local = [downloads lookupTrack:recording];
+                    if (local) {
+                        // A discovered file can still fail during actual playback. Bind a
+                        // local-only session so its normal failure callback rejects this
+                        // file revision, then restores the original player's failure path.
+                        session = [[FMQualityResolver alloc] initWithPlatform:parameters[@"server"] ?: @"" supportedQualities:@[] timeout:5
+                            isCurrent:^BOOL{ return [FMXManager shared].runtime == runtime; }
+                            resolve:^dispatch_block_t(NSString *quality, NSTimeInterval timeout, FMQualityAttemptCompletion done) {
+                                done(nil,nil); return nil;
+                            }];
+                        session.preferredDownload = ^NSURL *{ return [downloads lookupTrack:recording]; };
+                        session.rejectPreferredDownload = ^(NSURL *URL) {
+                            [downloads rejectURL:URL]; FMPlaybackCacheSourceTransition([NSSet set]);
+                        };
+                        [session nextWithCompletion:^(NSURL *url, NSString *quality, NSError *error) {
+                            if (cancelled) return;
+                            if (!url || error) { completion(nil,nil); return; }
+                            FMAdaptivePlaybackRegisterURL(url, session, quality,
+                                [NSString stringWithFormat:@"%@:%@", parameters[@"server"], parameters[@"id"]]);
+                            completion(directKugou ? @{@"url":url.absoluteString} : @{@"code":@200, @"data":@{@"url":url.absoluteString, @"quality":@"未知", @"qmc":NSNull.null}}, nil);
+                        }];
+                    } else {
+                        // The download or registry can disappear after the original probe.
+                        completion(nil, nil);
+                    }
                     return;
                 }
-                // Native auth, cookies, QMC keys and custom API settings are not
-                // passed to user scripts. Only the documented song metadata is.
-                NSDictionary *info = FMTrackMetadataForParameters(parameters,source);
                 NSString *trackID = parameters[@"id"];
                 FMReplayCache *cache = [FMReplayCache sharedCache];
                 NSString *namespaceID = [FMXManager shared].replayNamespace;
@@ -431,6 +483,10 @@ __attribute__((constructor)) static void FMXInitialize(void) {
                         NSString *identifier = [runtime resolveIsolatedMusicURLForSource:source musicInfo:info quality:quality timeout:timeout completion:resolved];
                         return ^{ [runtime cancelRequestWithIdentifier:identifier]; };
                     }];
+                session.preferredDownload = ^NSURL *{ return [downloads lookupTrack:recording]; };
+                session.rejectPreferredDownload = ^(NSURL *URL) {
+                    [downloads rejectURL:URL]; FMPlaybackCacheSourceTransition([NSSet set]);
+                };
                 [session setReplayLookup:^NSURL *(NSString *quality, FMQualityCandidateOrigin origin) {
                     NSString *key = cacheKey(quality);
                     if (!key) return nil;
@@ -482,6 +538,7 @@ __attribute__((constructor)) static void FMXInitialize(void) {
                         },^BOOL{return [FMXManager shared].runtime==runtime&&runtime.manifest!=nil;});
                     NSString *status;
                     switch (session.lastCandidateOrigin) {
+                        case FMQualityCandidateFromManualDownload: status=@"已使用本地下载"; break;
                         case FMQualityCandidateFromAudioCache: status=@"已命中当前音源的本地歌曲缓存"; break;
                         case FMQualityCandidateFromAddressCache: status=@"已复用当前音源的播放地址"; break;
                         default: status=@"JS 已返回播放地址，实际音质将在播放后确认"; break;
@@ -506,8 +563,9 @@ __attribute__((constructor)) static void FMXInitialize(void) {
         } canHandle:^BOOL(NSURLRequest *request, NSDictionary<NSString *,NSString *> *parameters) {
             NSString *source = FMXLXSource(parameters[@"server"]);
             NSDictionary *manifest = [FMXManager shared].runtime.manifest;
-            return source && [parameters[@"id"] length]
-                && FMXRoutableQualities(manifest, source).count > 0;
+            if (source && [parameters[@"id"] length] && FMXRoutableQualities(manifest, source).count) return YES;
+            NSDictionary *info = FMTrackMetadataForParameters(parameters, source ?: parameters[@"server"]);
+            return [FMPreferredDownloadStore.sharedStore lookupTrack:FMXRecordingRequest(parameters, info)] != nil;
         }];
         [FMExtensionProtocol install];
         dispatch_async(dispatch_get_main_queue(), ^{

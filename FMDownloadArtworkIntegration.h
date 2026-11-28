@@ -7,6 +7,8 @@ FOUNDATION_EXPORT void FMDownloadArtworkInstall(void);
 // (the index's original string or NSNull) and coverURL (the local native URL).
 FOUNDATION_EXPORT NSNotificationName const FMDownloadArtworkDidRecoverNotification;
 FOUNDATION_EXPORT NSNotificationName const FMDownloadArtworkStatusDidChangeNotification;
+/// Raised on main when the manual-download catalogue changes. Contains no track data.
+FOUNDATION_EXPORT NSNotificationName const FMDownloadCatalogueDidChangeNotification;
 FOUNDATION_EXPORT NSDictionary *FMDownloadArtworkStatus(void);
 
 // Native 4.2.9 DownloadAssets sidecars are shared by the download list and player.

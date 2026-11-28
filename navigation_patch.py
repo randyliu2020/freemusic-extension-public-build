@@ -81,7 +81,7 @@ def patch_binary(current: bytes, original: bytes) -> tuple[bytes, dict]:
     result = bytearray(current)
     changes = []
     plan = [(offset, *entry) for offset, entry in PATCHES.items()]
-    plan.extend(download_order_patch.changes(current))
+    plan.extend(download_order_patch.changes(current, original))
     for offset, old, new, purpose in plan:
         if current[offset:offset+len(old)] != old:
             raise NavigationPatchError(f"Navigation patch location is occupied at {offset:#x}")
@@ -96,6 +96,7 @@ def patch_binary(current: bytes, original: bytes) -> tuple[bytes, dict]:
         "reserved_header_range":[STUB_OFFSET,STUB_END], "changes":changes,
         "startup_destination":"library_root", "favorites_navigation":"manual",
         "library_first_row":"native_local_downloads", "library_second_row":"native_recent_plays",
+        "download_tracks_order":"display_only_han_pinyin_then_latin_then_other",
         "discover_visibility":"handled by public UITab placement filters, model order retained",
     }
 

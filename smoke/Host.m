@@ -432,6 +432,104 @@ static NSDictionary *FetchSearchFixture(NSURLRequest *request) {
     NSDictionary *result=body?[NSJSONSerialization JSONObjectWithData:body options:0 error:nil]:nil;Check([result isKindOfClass:NSDictionary.class],@"Search fixture received a JSON object");return result;
 }
 
+// Two independent playlist payloads feed the same parser used by the player.
+// Only the simulator's authored container and temporary audio are touched.
+static NSDictionary *SmokeLocalPlaylistRoutes(
+    FMXManager *manager, FMReplayCache *cache, void (*observe)(id), NSURLRequest *nativeRequest,
+    NSUInteger (^workerCount)(void), NSUInteger (^networkCount)(void),
+    dispatch_block_t willSelect, void (^bindPlayer)(NSURL *)) {
+    NSFileManager *files = NSFileManager.defaultManager;
+    NSURL *support = [files URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
+    NSURL *documents = [files URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
+    NSURL *downloads = [documents URLByAppendingPathComponent:@"Downloads" isDirectory:YES];
+    NSURL *index = [support URLByAppendingPathComponent:@"downloaded_tracks.json"];
+    BOOL indexWasPresent = [files fileExistsAtPath:index.path];
+    NSData *previous = indexWasPresent ? [NSData dataWithContentsOfURL:index] : nil;
+    NSArray *savedRows = previous ? [NSJSONSerialization JSONObjectWithData:previous options:0 error:nil] : @[];
+    Check((!indexWasPresent || previous) && [savedRows isKindOfClass:NSArray.class], @"Read the original simulator download registry");
+    Check([files createDirectoryAtURL:downloads withIntermediateDirectories:YES attributes:nil error:nil], @"Prepare the normal manual-download directory");
+
+    NSString *identifier = NSUUID.UUID.UUIDString;
+    NSString *wyID = [NSString stringWithFormat:@"900%u", arc4random()];
+    NSURL *manual = [downloads URLByAppendingPathComponent:[NSString stringWithFormat:@"qq_%@.wav", identifier]];
+    NSURL *authored = SmokeWriteQualityWave();
+    NSDictionary *qq = @{@"server":@"qq", @"id":identifier, @"title":@"Fixture Local Recording",
+                         @"singer":@"Authored A / Authored B", @"album":@"Fixture Collection", @"duration":@3};
+    NSMutableDictionary *wy = [qq mutableCopy];
+    wy[@"server"] = @"wy"; wy[@"id"] = wyID;
+    wy[@"singer"] = @"Authored B / Authored A";
+    __block NSString *low, *high;
+    Main(^{
+        low = [cache keyForNamespace:manager.replayNamespace platform:@"tx" trackID:identifier quality:@"128k"];
+        high = [cache keyForNamespace:manager.replayNamespace platform:@"tx" trackID:identifier quality:@"flac24bit"];
+        Check(manager.runtime.manifest[@"sources"][@"tx"] && manager.runtime.manifest[@"sources"][@"wy"],
+              @"A real selected JS source advertises both fixture platforms");
+    });
+    NSURL *remote = [NSURL URLWithString:@"https://fixture.invalid/unrequested-high-quality-address"];
+    NSURL *cached = nil;
+    NSUInteger initialWorkers = workerCount(), initialNetwork = networkCount();
+    NSMutableArray *origins = [NSMutableArray array];
+    BOOL registryWritten = NO, manualWritten = NO;
+    NSURL *(^requestFile)(NSDictionary *) = ^NSURL *(NSDictionary *song) {
+        willSelect();
+        NSMutableURLRequest *request = [nativeRequest mutableCopy];
+        NSString *body = [NSString stringWithFormat:@"server=%@&id=%@&level=hires&qmc=1",song[@"server"],song[@"id"]];
+        request.HTTPBody = [body dataUsingEncoding:NSUTF8StringEncoding];
+        NSDictionary *result = FetchSearchFixture(request);
+        NSURL *URL = [NSURL URLWithString:result[@"data"][@"url"] ?: @""];
+        Check([result[@"code"] integerValue] == 200 && URL.isFileURL, @"The shared production parse entry returns a local file URL");
+        return URL;
+    };
+    @try {
+        Check([files copyItemAtURL:authored toURL:manual error:nil], @"Publish a unique authored manual download");
+        manualWritten = YES;
+        NSData *rows = [NSJSONSerialization dataWithJSONObject:[savedRows arrayByAddingObject:qq] options:0 error:nil];
+        Check([rows writeToURL:index atomically:YES], @"Publish the normal completed-download registry");
+        registryWritten = YES;
+        Check([cache publishVerifiedAudio:authored fileExtension:@"wav" forKey:low], @"Publish an independent lower-quality copy in the automatic cache");
+        cached = [cache audioForKey:low];
+        [cache saveAddress:remote forKey:high];
+        Check(cached.isFileURL && ![cached isEqual:manual] && [[cache addressForKey:high] isEqual:remote],
+              @"A manual file, lower-quality complete cache and higher-quality remote address compete simultaneously");
+        for (NSString *origin in @[@"favorites", @"imported-playlist"]) {
+            NSArray *songs = [origin isEqual:@"favorites"] ? @[qq, wy] : @[wy, qq];
+            NSDictionary *playlist = @{@"id":origin, @"tracks":songs};
+            observe(@{@"data":playlist});
+            for (NSDictionary *song in songs) {
+                // The parse request carries only native identity; matching an
+                // alternate platform requires metadata from the playlist.
+                NSURL *URL = requestFile(song);
+                Check([URL isEqual:manual], @"Exact and confirmed alternate-platform selections return the identical manual file");
+                bindPlayer(URL);
+                [origins addObject:@{@"playlist":origin, @"selection":song[@"server"],
+                                     @"matched":@"same-manual-file"}];
+            }
+        }
+        Check(manualWritten && [files removeItemAtURL:manual error:nil], @"Remove only the authored manual file to exercise the next tier");
+        manualWritten = NO;
+        for (NSNumber *withHigherAddress in @[@YES, @NO]) {
+            if (!withHigherAddress.boolValue) [cache discardAddress:remote forKey:high];
+            NSURL *URL = requestFile(qq);
+            Check([URL isEqual:cached], @"Complete 128k cache wins before a higher remote URL or a higher fresh JS attempt");
+            bindPlayer(URL);
+        }
+        NSUInteger workers = workerCount() - initialWorkers, network = networkCount() - initialNetwork;
+        Check(workers == 0 && network == 0, @"All six local selections reached the player with zero JS resolutions and zero transport requests");
+        return @{@"manual_playlist_routes":origins.copy, @"auto_128k_before_cached_high_url":@YES,
+                 @"auto_128k_before_uncached_high_js":@YES, @"local_file_player_bindings":@(origins.count + 2),
+                 @"local_js_resolutions":@(workers), @"local_transport_requests":@(network)};
+    } @finally {
+        if (cached) [cache discardAudio:cached forKey:low];
+        [cache discardAddress:remote forKey:high];
+        if (manualWritten) [files removeItemAtURL:manual error:nil];
+        [files removeItemAtURL:authored error:nil];
+        if (registryWritten) {
+            BOOL restored = indexWasPresent ? [previous writeToURL:index atomically:YES] : [files removeItemAtURL:index error:nil];
+            Check(restored, @"Restore the original simulator download registry");
+        }
+    }
+}
+
 @interface SmokeRunner : NSObject
 @property(nonatomic,strong) UIWindow *window;
 @property(nonatomic,strong) SmokeHomeViewController *home;

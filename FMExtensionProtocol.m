@@ -614,7 +614,11 @@ static NSArray *FMXProtocolClasses(id self, SEL selector) {
         self.cancelParse = handler(self.effectiveRequest, parameters, ^(NSDictionary *payload, NSError *error) {
             typeof(self) strongSelf = weakSelf;
             if (!strongSelf) return;
-            dispatch_async(strongSelf.stateQueue, ^{ [strongSelf finishPayload:payload error:error]; });
+            dispatch_async(strongSelf.stateQueue, ^{
+                if (strongSelf.finished) return;
+                if (payload || error) [strongSelf finishPayload:payload error:error];
+                else [strongSelf forwardPreparedRequest];
+            });
         });
     } @catch (NSException *exception) {
         [self finishPayload:nil error:FMXError(500, @"音源处理失败")];

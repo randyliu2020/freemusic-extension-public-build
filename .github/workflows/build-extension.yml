@@ -90,6 +90,16 @@ jobs:
           xcrun clang -fobjc-arc -fblocks -framework Foundation FMLXMC.m FMLXMCLocalStore.m FMPlaylistEditTests.m -lz -o playlist-edit-tests
           ./playlist-edit-tests v9-validation/playlist-edit-tests.json
 
+      - name: Test registered audio playback and cross-platform recording identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p v11-validation
+          xcrun clang -fobjc-arc -fblocks -framework Foundation -framework AVFoundation FMPreferredDownloadStore.m FMRecordingMatch.m FMRecordingMatchTests.m -o recording-match-tests
+          ./recording-match-tests v11-validation/recording-match-tests.json
+          xcrun swiftc -swift-version 5 -parse-as-library FMDownloadSort.swift FMDownloadSortTests.swift -o download-sort-tests
+          ./download-sort-tests v11-validation/download-sort-tests.json
+
       - name: Test offline artwork recovery and exact song matching
         if: ${{ !cancelled() }}
         shell: bash
@@ -244,6 +254,7 @@ jobs:
           set -euo pipefail
           cp v9-validation/{replay-cache,replay-media,playlist-edit,download-artwork,download-artwork-integration}-tests.json smoke-artifact/
           cp v10-validation/native-cover-model-tests.json smoke-artifact/
+          cp v11-validation/{recording-match,download-sort}-tests.json smoke-artifact/
 
       - name: Upload simulator validation evidence
         if: always()

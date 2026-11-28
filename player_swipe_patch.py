@@ -1,4 +1,4 @@
-"""Use FullPlayer's existing SwiftUI actions for top-bar and lyric dismissal."""
+"""Use FullPlayer's existing presentation for its top bar and side gestures."""
 from __future__ import annotations
 
 import argparse
@@ -17,13 +17,7 @@ CAVE = 0x509740  # after the lyric patch's 0x509720..0x509734 allocation
 ORIGINAL_CONDITION = 0x1ABB1C
 NATIVE_DISMISS = 0x1ABB44
 TRANSLATION_GETTER = 0x404DE4
-LYRIC_CHANGE_SITE = 0x1CD614
-LYRIC_END_SITE = 0x1CD628
-LYRIC_END_CAVE = 0x50BE00
-LYRIC_NATIVE_CHANGED = 0x1BD56C
-LYRIC_NATIVE_ENDED = 0x1BD608
-FULL_PLAYER_SEEK = 0x1C6660
-FULL_PLAYER_DRAG = 0x1C6608
+HEADER_NOTIFY_CAVE = 0x50BE00
 ZOOM_LAYOUT_SITE = 0x9E23C
 PLAIN_LAYOUT_SITE = 0x9E02C
 ZOOM_LAYOUT_CAVE = 0x50BEB4
@@ -31,9 +25,9 @@ PLAIN_LAYOUT_CAVE = ZOOM_LAYOUT_CAVE + 28
 
 # PlayerZoomDestination's body has two original paths. Zoom owns an AnyView
 # already. The plain path copies its unchanged content into the return buffer
-# (normal value witness). AnyView.init consumes that copy only when the layout
-# observer is available. Both then use the original AnyView enum case. When
-# the observer is missing, plain content keeps its original case and identity.
+# (normal value witness). AnyView.init consumes that copy only when the gesture
+# wrapper is available. Both then use the original AnyView enum case. When
+# the wrapper is missing, plain content keeps its original case and identity.
 # Normal and reduced motion retain the host's original navigation choices.
 LAYOUT_ASSEMBLY = """
 str x20, [x19]
@@ -80,60 +74,25 @@ symbol:
 LAYOUT_CODE = bytes.fromhex("740200f91f000094800000b4e80300aae00313aa00013fd6dd48ee17fc0302aa00013fd617000094400000b55448ee17f80300aa2002009000e01b912102009021801b9162f8ffd042603391430100d0634046f99e0bec97e20300aae1031caae00313aa7ae9fb97600200f9e00313aa00033fd6e8030091a88318f8c448ee172000809241000010b8f0fb17")
 LAYOUT_SYMBOL = b"FMXAttachLyricTextLayout\0"
 
-# These two callbacks preserve the original scroll bookkeeping. Only the original
-# FullPlayer seek closure identifies a player owner suitable for dismissal. Its
-# native lyric row layout supplies the same style used by the Swift gesture policy.
-LYRIC_END_ASSEMBLY = """
-mov w2, #1
-b common
-changed:
-mov w2, #0
-common:
-stp x19, x20, [sp, #-48]!
-stp x21, x22, [sp, #16]
-str x30, [sp, #32]
-mov x19, x0
-mov x21, x1
-mov w22, w2
-cbz w22, moved
-bl 0x1bd608
-b original_done
-moved:
-bl 0x1bd56c
-original_done:
-ldr x9, [x21, #24]
-adrp x8, 0x1c6000
-add x8, x8, #0x660
-cmp x9, x8
-b.ne finished
-ldr x8, [x21, #32]
-cbz x8, finished
+# Runs only after the original top bar has accepted a drag. Its prologue
+# already saved LR and the native drag remains borrowed in callee-saved x20.
+# The last two instructions replay the displaced mov x0,#0 and continue with
+# the unmodified native PresentationMode dismissal, even without our observer.
+HEADER_NOTIFY_ASSEMBLY = """
 mov x0, #-2
 adr x1, symbol
 bl 0x40821c
-cbz x0, finished
+cbz x0, native
 mov x8, x0
-ldr x0, [x21, #32]
-mov x1, x19
-mov w2, w22
-ldrb w3, [x21, #18]
+mov x0, x20
 blr x8
-cbz w22, finished
-cbz w0, finished
-mov x0, x19
-ldr x20, [x21, #32]
-bl 0x1c6608
-finished:
-ldr x30, [sp, #32]
-ldp x21, x22, [sp, #16]
-ldp x19, x20, [sp], #48
-ret
+native:
+mov x0, #0
+b 0x1abb48
 symbol:
 """
-LYRIC_POLICY_SYMBOL = b"FMXLyricGutterDismiss\0"
-LYRIC_END_HEX = "220080520200001402008052f353bda9f55b01a9fe1300f9f30300aaf50301aaf603022a76000034f8c5f29702000014cfc5f297a90e40f9c8e5fff0088119913f0108eb41020054a81240f9080200b42000809241020010f1f0fb97800100b4e80300aaa01240f9e10313aae203162aa34a403900013fd6b600003480000034e00313aab41240f9e0e9f297fe1340f9f55b41a9f353c3a8c0035fd6"
-LYRIC_CHANGE_REDIRECT = bytes.fromhex("e21900d042203891")
-LYRIC_END_REDIRECT = bytes.fromhex("e21900d042003891")
+HEADER_NOTIFY_CODE = bytes.fromhex("200080920101001005f1fb97800000b4e80300aae00314aa00013fd6000080d24a7ff217")
+HEADER_NOTIFY_SYMBOL = b"FMXPlayerHeaderWillDismiss\0"
 
 # The original onEnded has saved LR and all callee-saved FP registers already.
 # translation returns dx/dy in d0/d1. Only caller-saved d2/d3/d4 and x8 are used;
@@ -170,13 +129,12 @@ CONTEXTS = {
     0x1BC510: "800000b000801891a88302d1150150f8e80315aae10313aaa92302d1370150f8e20317aaf40316aa1c280994",
     0x1CD620: "c1ffff902170019182ffff90422018913be8ff17",
     0x1C771C: "ffc300d1f44f01a9fd7b02a9fd830091e20700f9f30300aa000080d220003fd608805ff808414139094100912801288a8102088be00313aae20740f9fd7b42a9f44f41a9ffc3009140001fd6",
-    LYRIC_NATIVE_ENDED: "fc6fbaa9fa6701a9f85f02a9f65703a9f44f04a9fd7b05a9fd430191",
     0x1AA918: "28008052e84a0039e800009008811991e8d601a9",
 }
 
 # Only fingerprints of the additional native layout and drag callback context
 # are distributed. The actual bytes are checked against the owner's local IPA.
-LYRIC_LAYOUT_DIGESTS = {
+PLAYER_LAYOUT_DIGESTS = {
     # Native source/return ownership, conditional tags, and the concrete
     # ModifiedContent<FullPlayerView...,PlayerZoomDestination> type lineage.
     0x9DFA8: (44, "f5c0040c7b2c53edc983eff2d94125ced9f14e1f2e379231fc906831654e8d67"),
@@ -187,14 +145,7 @@ LYRIC_LAYOUT_DIGESTS = {
     0x5329E0: (8, "1b3fa6a4631eef263acadd3ebefc4b160d299934894e226adf7638024441c334"),
     0x43E520: (24, "167d7890a3c7d936f1a6599cb97854dc70334f8353edb21843fb9c1e4efd5519"),
     0x440614: (24, "faacac0bceb7d8d2801ad54d06b3b6ef27afb029f04a9313be3165b21fe26909"),
-    0x1BC380: (16, "9678302bf1e5d7995ca74d828e49c5fdf97142938ad8c1c4912eccb1ff0664e4"),  # local DragGesture
-    0x1BD1D8: (8, "728874b26822ceda7c8baf5121216250232a63707dfe8f2392f5454730bff2da"),  # scroller style
-    0x1BD2CC: (8, "d55abeb56a2e24d24e7c8145ebbf86b21bce0f399741d2b5401fbbaef3d5fe6d"),  # row's style field
-    0x1BE4AC: (12, "6485fc0890f27fc24382cd6641d5d6e2990fda30dd922581e08c2454c2c91d9e"),
-    0x1BE4DC: (16, "130cc9f912ae505edda01c6f29c059894fa56155d420f169d86cb86e9a98f774"),  # 24pt or 32pt
-    0x1BE5B4: (16, "65c3ade73b4aa3ece6165cf94638b1f1eb76e5955f9176e4efbb01b45a948ed1"),  # horizontal edges
-    0x1CD60C: (20, "dce106b63a43a51c07bf0b7767a7cb1335c030b4cc2439d8c65873635fb2818c"),
-    LYRIC_NATIVE_CHANGED: (20, "9dbc66e5c362ed090fd36a7d922e4708da54dbf6debd2743f15c45cd866a17ed"),
+
 }
 
 
@@ -203,17 +154,17 @@ def patch_plan(original: bytes) -> list[Change]:
     if len(original) != ORIGINAL_BINARY_SIZE or sha256(original) != ORIGINAL_BINARY_SHA256:
         raise InteractionPatchError("Original FreeMusic 4.2.9 executable SHA256 mismatch")
     trampoline = bytes.fromhex(TRAMPOLINE_HEX)
-    lyric_end = bytes.fromhex(LYRIC_END_HEX) + LYRIC_POLICY_SYMBOL
-    layout_offset = ZOOM_LAYOUT_CAVE - LYRIC_END_CAVE
-    if len(lyric_end) > layout_offset:
-        raise InteractionPatchError("Lyric gesture and layout bridge ranges overlap")
-    lyric_end = lyric_end.ljust(layout_offset, b'\0') + LAYOUT_CODE + LAYOUT_SYMBOL
+    bridges = HEADER_NOTIFY_CODE + HEADER_NOTIFY_SYMBOL
+    layout_offset = ZOOM_LAYOUT_CAVE - HEADER_NOTIFY_CAVE
+    if len(bridges) > layout_offset:
+        raise InteractionPatchError("Player gesture bridge ranges overlap")
+    bridges = bridges.ljust(layout_offset, b'\0') + LAYOUT_CODE + LAYOUT_SYMBOL
     # The shared validator checks the complete zero-padding interval, executable
     # __TEXT permissions, no section overlap, and absence of encryption.
-    _verify_cave(original, LYRIC_END_CAVE + len(lyric_end) - LYRIC_CAVE)
-    for offset, (length, digest) in LYRIC_LAYOUT_DIGESTS.items():
+    _verify_cave(original, HEADER_NOTIFY_CAVE + len(bridges) - LYRIC_CAVE)
+    for offset, (length, digest) in PLAYER_LAYOUT_DIGESTS.items():
         if sha256(original[offset:offset + length]) != digest:
-            raise InteractionPatchError(f"Native lyric layout context mismatch at {offset:#x}")
+            raise InteractionPatchError(f"Native player layout context mismatch at {offset:#x}")
     for offset, expected_hex in CONTEXTS.items():
         expected = bytes.fromhex(expected_hex)
         if original[offset:offset + len(expected)] != expected:
@@ -227,14 +178,13 @@ def patch_plan(original: bytes) -> list[Change]:
         Change(CAVE, bytes(len(trampoline)), trampoline,
                "left threshold OR unmodified native downward dismissal"),
         Change(ZOOM_LAYOUT_SITE, original[ZOOM_LAYOUT_SITE:ZOOM_LAYOUT_SITE + 4],
-               branch(ZOOM_LAYOUT_SITE, ZOOM_LAYOUT_CAVE), "observe actual text in the zoomed player"),
+               branch(ZOOM_LAYOUT_SITE, ZOOM_LAYOUT_CAVE), "wrap the zoomed player in its gesture scope"),
         Change(PLAIN_LAYOUT_SITE, original[PLAIN_LAYOUT_SITE:PLAIN_LAYOUT_SITE + 4],
-               branch(PLAIN_LAYOUT_SITE, PLAIN_LAYOUT_CAVE), "observe actual text with plain presentation and reduced motion"),
-        Change(LYRIC_CHANGE_SITE, original[LYRIC_CHANGE_SITE:LYRIC_END_SITE+8],
-               LYRIC_CHANGE_REDIRECT + original[LYRIC_CHANGE_SITE+8:LYRIC_END_SITE] + LYRIC_END_REDIRECT,
-               "observe the start in the existing lyric scroll, then classify the ended drag"),
-        Change(LYRIC_END_CAVE, bytes(len(lyric_end)), lyric_end,
-               "downward drag from a verified lyric gutter invokes native FullPlayer dismissal"),
+               branch(PLAIN_LAYOUT_SITE, PLAIN_LAYOUT_CAVE), "wrap the plain player, including reduced motion, in its gesture scope"),
+        Change(NATIVE_DISMISS, bytes.fromhex(NATIVE_DISMISS_HEX)[:4],
+               branch(NATIVE_DISMISS, HEADER_NOTIFY_CAVE), "give the existing header dismissal precedence"),
+        Change(HEADER_NOTIFY_CAVE, bytes(len(bridges)), bridges,
+               "install whole-player gesture on both presentation paths; coordinate native header dismissal"),
     ]
 
 
@@ -244,14 +194,14 @@ def patch_binary(original: bytes) -> tuple[bytes, dict]:
     return result, {
         "original_sha256": sha256(original), "patched_sha256": sha256(result),
         "version": "FreeMusic 4.2.9 (4381)", "requires_resigning": True,
-        "scope": "existing FullPlayer top gestures and FullPlayer-owned lyric scroller",
-        "lyric_down_condition": "start beside the measured lyric line or in a native side gutter, dy > 144, dy > 2 * abs(dx)",
+        "scope": "existing FullPlayer top gestures and the presented player surface",
+        "lyric_down_condition": "start in the left or right third of the visible player, dy > 144, dy > 2 * abs(dx)",
         "left_condition": "dx < -80 and -dx > 1.5 * abs(dy)",
         "original_downward_condition_preserved": True,
         "native_presentation_binding_preserved": True,
         "changes": [{"offset": hex(c.offset), "before": c.before.hex(),
                      "after": c.after.hex(), "reason": c.reason} for c in changes],
-        "limits": ["Only the existing lyric gesture with a verified FullPlayer seek owner can close the player.",
+        "limits": ["The middle third retains normal scrolling. Original top-bar dismissal remains available.",
                    "Equivalent SwiftUI real-input tests do not execute the original IPA.",
                    "Original app requires device verification after valid re-signing."],
     }

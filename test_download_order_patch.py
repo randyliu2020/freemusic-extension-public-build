@@ -30,6 +30,71 @@ def local_executable():
 
 
 class DownloadsFirst(unittest.TestCase):
+    def test_projection_on_owned_result_and_missing_extension_fallback(self):
+        for present in [False, True]:
+            for site in patch.PROJECTION_SITES:
+                with self.subTest(present=present, site=hex(site)):
+                    vm = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
+                    for page in [site & ~0xfff, patch.PROJECTION_CAVE & ~0xfff, 0x404000, 0x408000,
+                                 0x10000, 0x20000, 0x30000, 0x31000]:
+                        vm.mem_map(page, 0x1000)
+                    vm.mem_write(site, patch._call(site, patch.PROJECTION_CAVE))
+                    vm.mem_write(patch.PROJECTION_CAVE, patch.PROJECTION_CODE + patch.PROJECTION_SYMBOL)
+                    vm.reg_write(R.UC_ARM64_REG_SP, 0x31800)
+                    vm.reg_write(R.UC_ARM64_REG_X8, 0x30000)
+                    vm.reg_write(R.UC_ARM64_REG_X1, 0x30200)
+                    vm.reg_write(R.UC_ARM64_REG_X0, 0x30100)
+                    vm.reg_write(R.UC_ARM64_REG_X2, 0x30300)
+                    events = []
+                    def emulate(cpu, pc, size, user):
+                        if pc not in [patch.PUBLISHED_GET, 0x40821c, 0x10000]:
+                            return
+                        if pc == patch.PUBLISHED_GET:
+                            events.append("get")
+                            self.assertEqual(cpu.reg_read(R.UC_ARM64_REG_X8), 0x30000)
+                            self.assertEqual(cpu.reg_read(R.UC_ARM64_REG_X0), 0x30100)
+                            self.assertEqual(cpu.reg_read(R.UC_ARM64_REG_X1), 0x30200)
+                            self.assertEqual(cpu.reg_read(R.UC_ARM64_REG_X2), 0x30300)
+                            cpu.mem_write(0x30000, b"native!!")
+                        elif pc == 0x40821c:
+                            events.append("lookup")
+                            name = cpu.reg_read(R.UC_ARM64_REG_X1)
+                            self.assertEqual(bytes(cpu.mem_read(name, len(patch.PROJECTION_SYMBOL))), patch.PROJECTION_SYMBOL)
+                            cpu.reg_write(R.UC_ARM64_REG_X0, 0x10000 if present else 0)
+                        else:
+                            events.append("sort")
+                            self.assertEqual(cpu.reg_read(R.UC_ARM64_REG_X0), 0x30000)
+                            self.assertEqual(cpu.reg_read(R.UC_ARM64_REG_X1), 0x30200)
+                            self.assertEqual(bytes(cpu.mem_read(0x30000, 8)), b"native!!")
+                            cpu.mem_write(0x30000, b"sorted!!")
+                        # Both native and foreign calls may clobber their volatile registers.
+                        cpu.reg_write(R.UC_ARM64_REG_X8, 0xab00)
+                        cpu.reg_write(R.UC_ARM64_REG_X1, 0xab01)
+                        cpu.reg_write(R.UC_ARM64_REG_PC, cpu.reg_read(R.UC_ARM64_REG_LR))
+                    vm.hook_add(UC_HOOK_CODE, emulate)
+                    vm.emu_start(site, site + 4, count=80)
+                    self.assertEqual(vm.reg_read(R.UC_ARM64_REG_PC), site + 4)
+                    self.assertEqual(vm.reg_read(R.UC_ARM64_REG_SP), 0x31800)
+                    self.assertEqual(events, ["get", "lookup", "sort"] if present else ["get", "lookup"])
+                    self.assertEqual(bytes(vm.mem_read(0x30000, 8)), b"sorted!!" if present else b"native!!")
+
+    @unittest.skipUnless(local_executable().is_file(), "Original IPA remains on the owner's computer")
+    def test_projection_is_limited_to_native_local_downloads_value_reads(self):
+        original = local_executable().read_bytes()
+        result, report = navigation_patch.patch_binary(original, original)
+        self.assertEqual(report["download_tracks_order"], "display_only_han_pinyin_then_latin_then_other")
+        for site in patch.PROJECTION_SITES:
+            self.assertEqual(original[site:site + 4], patch._call(site, patch.PUBLISHED_GET))
+            self.assertEqual(result[site:site + 4], patch._call(site, patch.PROJECTION_CAVE))
+        # Label counts, select-all counts and set membership still use the unmodified read.
+        for site in (0xc9438, 0xccf30, 0xcd5b8, 0xcd634):
+            self.assertEqual(result[site:site + 4], original[site:site + 4])
+        for at in (0xcab60, 0xd3590, patch.PROJECTION_CAVE):
+            damaged = bytearray(original)
+            damaged[at] ^= 1
+            with self.assertRaises(ValueError):
+                navigation_patch.patch_binary(bytes(damaged), original)
+
     def test_copy_witness_arguments_and_cleanup(self):
         dis = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
         operations = []

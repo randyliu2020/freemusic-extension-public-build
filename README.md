@@ -9,10 +9,10 @@ or a previously resolved address for the same source, platform, track and
 quality. After an address fails, the player retries the resolver. Changing the
 selected script starts a new cache generation. Local Downloads is the first
 Library row, followed by Recent Plays. Library playlist ordering,
-names, track ordering and removals are stored on the device. Dragging up or down on a lyric scrolls the lines. A downward drag starting
-beside the visible words collapses the player while audio continues. When
-line positions are unavailable, either outer margin supports the same gesture.
-Tapping a timed line seeks to its start.
+names, track ordering and removals are stored on the device. The expanded player
+uses vertical thirds. A downward drag starting in either outer third collapses
+the player while audio continues. The middle third scrolls the lyrics, and
+tapping a timed line seeks to its start.
 
 Previously downloaded tracks with missing artwork can recover it from an
 embedded picture, known artwork, or public album metadata for the exact
@@ -57,6 +57,8 @@ upgrade sheet on launch. A user-initiated check in Settings can still show it.
 ## V7 additions
 
 - Align AES-ECB padding and raw RSA with LX mobile. Support binary request/response bytes, multipart form bodies and additional buffer/console behavior. This is a JavaScriptCore implementation, not the original Android QuickJS native bridge; unsupported platform/source capabilities remain explicit.
+- Each playlist uses the shared playback policy. A readable completed manual download with the same platform and song ID takes priority. Another platform's manual download qualifies with a unique recording identifier match or a unique match on the full version title, all credited artists, album, and duration (within two seconds). A complete audio cache entry from the active source takes priority over online quality attempts.
+- Local Downloads displays Chinese titles by Mandarin pinyin before Latin titles sorted alphabetically. Reordering this view preserves the underlying song identities for playback and editing.
 - Playback and native manual downloads use independent highest-first JS resolver sessions. Download retries must not consume a playing item's remaining quality candidates or reuse another source generation.
 - Each quality attempt is capped at 20 seconds, matching [LX mobile's request deadline](https://github.com/lyswhut/lx-music-mobile/blob/0669d1b6d419967822ff52ec06e50b9613bfd136/src/core/init/userApi/index.ts#L52-L57). Source initialization counts toward that limit. The existing 35-second parse-chain budget and any shorter caller deadline still apply. After an accepted URL fails during actual media I/O, the remaining candidates receive a fresh bounded parse call. Quality indices and failed-URL deduplication never reset.
 - Each production musicUrl attempt owns an isolated JS runtime. Completion, timeout, cancellation and source changes retire its network tasks and timers without cancelling another playback/download attempt. This does not preempt synchronous JavaScript loops.

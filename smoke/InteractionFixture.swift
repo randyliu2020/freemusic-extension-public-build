@@ -87,53 +87,70 @@ private struct InteractionSearchFixture: View {
     }
 }
 
-// Read the short fixture Text's own size before any full-width tap target.
-// This measurement is independent of the extension's text layout observer.
-private struct InteractionShortLyricBounds: PreferenceKey {
-    static let defaultValue = CGRect.null
-    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
-        let next = nextValue()
-        if !next.isNull { value = next }
+// XCUI sometimes reports the full tappable row for a word. Measure the
+// visible sample words independently, only to place and observe real touches.
+private struct InteractionWordBounds: PreferenceKey {
+    static let defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue()) { _, newest in newest }
+    }
+}
+private struct InteractionWord: View {
+    let text: String
+    let key: String
+    var body: some View {
+        Text(verbatim: text).fixedSize()
+            .background {
+                GeometryReader { proxy in
+                    Color.clear.preference(key: InteractionWordBounds.self,
+                        value: [key: proxy.frame(in: .named("InteractionLyricsViewport"))])
+                }
+            }
     }
 }
 
-// Matches the native top bar and the simultaneous LyricsScroller drag-ended
-// action, sharing the parent presentation/binding dismissal.
+// The original independent header handles its own gestures; the complete
+// presentation is wrapped in the same area policy as the shipped player.
 private struct InteractionPlayerSwipeSurface: View {
     let regularLyrics: Bool
     @Environment(\.presentationMode) private var presentationMode
     @State private var progress = 0.5
     @State private var volume = 0.5
     @State private var selectedLine: Int?
-    @State private var gestureOwner = NSObject()
-    @State private var shortLyricBounds = CGRect.null
-    @State private var gestureTrace = "No completed gesture"
-
-    private func fromLyricGutter(_ value: DragGesture.Value, ended: Bool) -> Bool {
-        typealias Policy = @convention(c) (UnsafeRawPointer?, UnsafeRawPointer?, UInt32, UInt32) -> UInt32
-        guard let address = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "FMXLyricGutterDismiss") else { return false }
-        let policy = unsafeBitCast(address, to: Policy.self)
-        let dismiss = withUnsafePointer(to: value) {
-            policy(Unmanaged.passUnretained(gestureOwner).toOpaque(), UnsafeRawPointer($0), ended ? 1 : 0, regularLyrics ? 1 : 0) == 1
-        }
-        if ended, let traceAddress = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "FMXCopyLyricGestureTestTrace") {
-            typealias CopyTrace = @convention(c) () -> UnsafeMutableRawPointer?
-            if let retained = unsafeBitCast(traceAddress, to: CopyTrace.self)() {
-                gestureTrace = Unmanaged<NSString>.fromOpaque(retained).takeRetainedValue() as String
-            }
-        }
-        return dismiss
-    }
+    @State private var wordBounds: [String: CGRect] = [:]
 
     private func closeIfRequested(_ value: DragGesture.Value) {
         let dx = value.translation.width, dy = value.translation.height
         let left = dx < -80 && -dx > 1.5 * abs(dy)
         let originalDown = dy > 80 && abs(dx) < dy
-        if left || originalDown { presentationMode.wrappedValue.dismiss() }
+        guard left || originalDown else { return }
+        typealias Notify = @convention(c) (UnsafeRawPointer?) -> Void
+        if let address = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "FMXPlayerHeaderWillDismiss") {
+            let notify = unsafeBitCast(address, to: Notify.self)
+            withUnsafePointer(to: value) { notify(UnsafeRawPointer($0)) }
+        }
+        presentationMode.wrappedValue.dismiss()
     }
 
-    // Drive the same exported observer as the app's native player body. The
-    // accessibility frames below are only for the UI test to place its finger.
+    // Exercise the exact CGFloat cutoffs independently of touch pixel rounding.
+    private static let thirdCutoffs: String = {
+        typealias Zone = @convention(c) (Double, Double) -> UInt32
+        guard let address = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "FMXPlayerZoneForTest") else { return "missing zone policy" }
+        let zone = unsafeBitCast(address, to: Zone.self)
+        let widths: [Double] = [300, 375, 393, 600]
+        for width in widths {
+            let third = width / 3
+            let samples: [(Double, UInt32)] = [(third - 0.25, 1), (third, 0), (third + 0.25, 0),
+                (2 * third - 0.25, 0), (2 * third, 0), (2 * third + 0.25, 1)]
+            for (x, expected) in samples {
+                if zone(x, width) != expected { return "wrong zone at \\(x) of \\(width)" }
+            }
+        }
+        return "exact third cutoffs passed"
+    }()
+
+    // The production modifier receives the whole presentation, as it does in
+    // the original player. The inner lyrics scroll deliberately has an inset.
     var body: some View {
         typealias Attach = @convention(c) (UnsafeMutableRawPointer?) -> Void
         var page = AnyView(surface)
@@ -146,7 +163,15 @@ private struct InteractionPlayerSwipeSurface: View {
 
     @ViewBuilder
     private func lyric(_ index: Int) -> some View {
-        if index == 1 {
+        if index == 0 {
+            HStack {
+                InteractionWord(text: "Left", key: "L")
+                Spacer()
+                Text("lyric")
+                Spacer()
+                InteractionWord(text: "Right", key: "R")
+            }
+        } else if index == 1 {
             VStack(spacing: 2) {
                 HStack(spacing: 3) {
                     ForEach(["逐", "字", "歌", "词"], id: \.self) { Text($0) }
@@ -156,15 +181,7 @@ private struct InteractionPlayerSwipeSurface: View {
                     .accessibilityIdentifier("smoke.interaction.lyric-translation.1")
             }
         } else if index == 2 {
-            Text("Lyric 2")
-                .fixedSize(horizontal: true, vertical: true)
-                .background {
-                    GeometryReader { proxy in
-                        Color.clear.preference(key: InteractionShortLyricBounds.self,
-                            value: proxy.frame(in: .named("InteractionLyricsViewport")))
-                    }
-                }
-                .accessibilityIdentifier("smoke.interaction.lyric-text.2")
+            InteractionWord(text: "Oh", key: "S")
         } else {
             Text(index.isMultiple(of: 3)
                  ? "A long self-authored scrolling lyric that wraps across two lines \(index)"
@@ -189,13 +206,14 @@ private struct InteractionPlayerSwipeSurface: View {
             .onTapGesture { presentationMode.wrappedValue.dismiss() }
             .gesture(DragGesture(minimumDistance: 20).onEnded(closeIfRequested), including: .all)
             .accessibilityElement(children: .combine)
-            .accessibilityValue(Text(verbatim: gestureTrace))
             .accessibilityIdentifier("smoke.interaction.player-topbar")
 
             Text(selectedLine.map { "Selected lyric \($0)" } ?? "Playback surface")
-                .accessibilityValue(Text(verbatim: shortLyricBounds.isNull ? "" :
-                    [shortLyricBounds.minX, shortLyricBounds.minY, shortLyricBounds.width, shortLyricBounds.height]
-                        .map { String(Double($0)) }.joined(separator: "|")))
+                .accessibilityValue(Text(verbatim: ["L", "R", "S"].map { key in
+                    guard let rect = wordBounds[key] else { return "" }
+                    return [rect.minX, rect.minY, rect.width, rect.height]
+                        .map { String(Double($0)) }.joined(separator: ",")
+                }.joined(separator: "|") + "|" + Self.thirdCutoffs))
                 .accessibilityIdentifier("smoke.interaction.player-visible")
             ScrollView {
                 VStack(spacing: 16) {
@@ -212,13 +230,11 @@ private struct InteractionPlayerSwipeSurface: View {
             }
             .frame(height: 220)
             .coordinateSpace(name: "InteractionLyricsViewport")
-            .onPreferenceChange(InteractionShortLyricBounds.self) { shortLyricBounds = $0 }
-            .simultaneousGesture(DragGesture(minimumDistance: 8)
-                .onChanged { value in _ = fromLyricGutter(value, ended: false) }
-                .onEnded { value in
-                    if fromLyricGutter(value, ended: true) { closeIfRequested(value) }
-                })
+            .onPreferenceChange(InteractionWordBounds.self) { wordBounds = $0 }
             .accessibilityIdentifier("smoke.interaction.player-lyrics")
+            // Offset only the lyric viewport. Window thirds and viewport thirds must differ.
+            .padding(.leading, 48)
+            .padding(.trailing, 4)
             Slider(value: $progress)
                 .accessibilityIdentifier("smoke.interaction.player-progress")
             Slider(value: $volume)

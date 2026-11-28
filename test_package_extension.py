@@ -255,7 +255,13 @@ class ActualIPATests(unittest.TestCase):
             self.assertEqual(len(actual), len(original))
             self.assertEqual(package.parse_macho(actual).segments, package.parse_macho(original).segments)
             close = player_swipe_patch.NATIVE_DISMISS
-            self.assertEqual(actual[close:close + len(bytes.fromhex(player_swipe_patch.NATIVE_DISMISS_HEX))], bytes.fromhex(player_swipe_patch.NATIVE_DISMISS_HEX))
+            native = bytes.fromhex(player_swipe_patch.NATIVE_DISMISS_HEX)
+            bridge = player_swipe_patch.HEADER_NOTIFY_CAVE
+            self.assertEqual(player_swipe_patch.branch_target(close, actual[close:close + 4]), bridge)
+            resume = bridge + len(player_swipe_patch.HEADER_NOTIFY_CODE) - 4
+            self.assertEqual(actual[resume - 4:resume], native[:4])
+            self.assertEqual(player_swipe_patch.branch_target(resume, actual[resume:resume + 4]), close + 4)
+            self.assertEqual(actual[close + 4:close + len(native)], native[4:])
             self.assertTrue(report["player_left_swipe_enabled"])
             self.assertEqual(len(report["v3_report"]["player_swipe_changes"]), len(player_swipe_patch.patch_plan(original)))
 

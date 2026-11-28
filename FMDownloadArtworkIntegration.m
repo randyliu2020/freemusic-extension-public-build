@@ -1,5 +1,6 @@
 #import "FMDownloadArtworkIntegration.h"
 #import "FMDownloadArtwork.h"
+#import "FMDownloadFiles.h"
 #import "FMTrackMetadata.h"
 #import <fcntl.h>
 #import <sys/stat.h>
@@ -9,54 +10,13 @@
 
 NSNotificationName const FMDownloadArtworkDidRecoverNotification = @"FMDownloadArtworkDidRecoverNotification";
 NSNotificationName const FMDownloadArtworkStatusDidChangeNotification = @"FMDownloadArtworkStatusDidChangeNotification";
+NSNotificationName const FMDownloadCatalogueDidChangeNotification = @"FMDownloadCatalogueDidChangeNotification";
 static FMDownloadArtworkIntegration *FMDAService;
 static NSDictionary *FMDAEmptyStatus(void) {
     return @{@"scanned":@NO,@"wyRegistered":@0,@"wyUsable":@0,@"wyMissingAudio":@0,@"wyFailed":@0,@"wyPending":@0};
 }
 NSDictionary *FMDownloadArtworkStatus(void) {
     @synchronized (FMDownloadArtworkIntegration.class) { return [FMDAService status] ?: FMDAEmptyStatus(); }
-}
-
-static BOOL FMDARegular(NSURL *url, struct stat *result) {
-    struct stat s;
-    if (!url.isFileURL || lstat(url.fileSystemRepresentation, &s) || !S_ISREG(s.st_mode) || s.st_size <= 0) return NO;
-    if (result) *result = s;
-    return YES;
-}
-static BOOL FMDASameFile(struct stat a, struct stat b) {
-    return a.st_dev == b.st_dev && a.st_ino == b.st_ino && a.st_size == b.st_size &&
-        a.st_mtimespec.tv_sec == b.st_mtimespec.tv_sec && a.st_mtimespec.tv_nsec == b.st_mtimespec.tv_nsec;
-}
-static BOOL FMDADirectory(NSURL *url) {
-    struct stat s;
-    return url.isFileURL && !lstat(url.fileSystemRepresentation,&s) && S_ISDIR(s.st_mode);
-}
-static NSString *FMDAIdentifier(id value) {
-    if ([value isKindOfClass:NSNumber.class] && CFGetTypeID((__bridge CFTypeRef)value) != CFBooleanGetTypeID()) value=[value stringValue];
-    if (![value isKindOfClass:NSString.class] || ![value length] || [value length] > 220) return nil;
-    static NSCharacterSet *invalid;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        invalid=[[NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-."]
-                 invertedSet];
-    });
-    return [value rangeOfCharacterFromSet:invalid].location == NSNotFound ? value : nil;
-}
-static NSString *FMDASource(id server) {
-    if (![server isKindOfClass:NSString.class]) return nil;
-    return @{@"wy":@"wy", @"netease":@"wy", @"qq":@"tx", @"tx":@"tx", @"kg":@"kg", @"kugou":@"kg",
-             @"kw":@"kw", @"kuwo":@"kw", @"mg":@"mg", @"migu":@"mg", @"qs":@"qishui", @"qishui":@"qishui"}[server];
-}
-static NSArray *FMDAExtensions(void) {
-    return @[@"mp3",@"flac",@"m4a",@"wav",@"ogg",@"opus",@"aac",@"aif",@"aiff",@"aifc",@"caf",@"mp4",@"ape",@"wv",@"mpc",@"tta",@"spx",@"dsf",@"dff"];
-}
-static NSArray *FMDAReadIndex(NSURL *url) {
-    struct stat s;
-    if (!FMDARegular(url, &s) || s.st_size > 64 * 1024 * 1024) return nil;
-    NSData *data = [NSData dataWithContentsOfURL:url options:NSDataReadingUncached error:nil];
-    if (!data.length) return nil;
-    id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-    return [json isKindOfClass:NSArray.class] ? json : nil;
 }
 
 @interface FMDownloadArtworkIntegration ()
@@ -74,7 +34,7 @@ static NSArray *FMDAReadIndex(NSURL *url) {
 @property(nonatomic,copy) NSDictionary<NSString *,NSDictionary *> *rows;
 @property(nonatomic,strong) NSMutableArray<NSString *> *pending;
 @property(nonatomic,strong) NSMutableDictionary<NSString *,NSString *> *states,*announced;
-@property(nonatomic,copy) NSDictionary *publishedStatus;
+@property(nonatomic,copy) NSDictionary *publishedStatus, *publishedAudioCatalogue;
 @property(nonatomic) BOOL scheduled,started,statusNotificationScheduled;
 @end
 @implementation FMDownloadArtworkIntegration
@@ -158,6 +118,37 @@ static NSArray *FMDAReadIndex(NSURL *url) {
     _scheduled=YES;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,250*NSEC_PER_MSEC),_queue,^{self.scheduled=NO;[self scan];});
 }
+// Directory changes also include JPEG repairs and metadata reordering. Compare
+// only real, registered audio identities on the background index queue.
+- (void)refreshAudioCatalogue {
+    NSMutableDictionary *snapshot = NSMutableDictionary.dictionary;
+    NSFileManager *files = NSFileManager.defaultManager;
+    for (NSURL *root in @[_downloads, _assets]) {
+        if (!FMDADirectory(root)) continue;
+        for (NSString *name in [files contentsOfDirectoryAtPath:root.path error:nil]) {
+            NSString *ext = name.pathExtension;
+            if (![FMDAExtensions() containsObject:ext]) continue;
+            NSString *key = name.stringByDeletingPathExtension;
+            NSDictionary *row = _rows[key];
+            if (!row && [root isEqual:_assets] && [ext isEqual:@"caf"] && [key hasSuffix:@"_playback"]) {
+                key = [key substringToIndex:key.length - @"_playback".length];
+                row = _rows[key];
+            }
+            if (!row) continue;
+            NSURL *file = [root URLByAppendingPathComponent:name];
+            struct stat stamp;
+            if (FMDARegular(file, &stamp)) {
+                snapshot[file] = @[key, @(stamp.st_dev), @(stamp.st_ino), @(stamp.st_size),
+                                   @(stamp.st_mtimespec.tv_sec), @(stamp.st_mtimespec.tv_nsec)];
+            }
+        }
+    }
+    BOOL changed = _publishedAudioCatalogue && ![_publishedAudioCatalogue isEqual:snapshot];
+    _publishedAudioCatalogue = snapshot.copy;
+    if (changed) dispatch_async(dispatch_get_main_queue(), ^{
+        [NSNotificationCenter.defaultCenter postNotificationName:FMDownloadCatalogueDidChangeNotification object:nil];
+    });
+}
 - (void)scan {
     NSArray *watchRoots=@[_support.URLByDeletingLastPathComponent,_support,_downloads.URLByDeletingLastPathComponent,_downloads,_assets,
                           _legacyIndex.URLByDeletingLastPathComponent,_legacyCache];
@@ -188,11 +179,12 @@ static NSArray *FMDAReadIndex(NSURL *url) {
         for(NSString *key in _rows)
             if([_states[key] isEqual:@"wyMissingAudio"] && ![_active containsObject:key] &&
                ![_pending containsObject:key] && [self audioForKey:key])[_pending addObject:key];
+        [self refreshAudioCatalogue];
         [self pump];return;
     }
     _selectedIndex=index;
     NSArray *records=FMDAReadIndex(index);
-    if(!inode || !records) { self.rows=@{};self.pending=nil;self.hasSnapshot=NO;[self updateStatus];return; }
+    if(!inode || !records) { self.rows=@{};[self refreshAudioCatalogue];self.pending=nil;self.hasSnapshot=NO;[self updateStatus];return; }
     struct stat after;
     if(!FMDARegular(index,&after) || !FMDASameFile(s,after)) { [self schedule];return; }
     _hasSnapshot=YES;
@@ -208,6 +200,7 @@ static NSArray *FMDAReadIndex(NSURL *url) {
         rows[key]=record;
     }
     _rows=rows;
+    [self refreshAudioCatalogue];
     _pending=pending;
     [_states removeAllObjects];
     for(NSString *key in _announced.allKeys)if(!rows[key])[_announced removeObjectForKey:key];
