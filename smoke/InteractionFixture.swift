@@ -5,6 +5,7 @@ import SwiftUI
 import UIKit
 import AVFAudio
 import MediaPlayer
+import CoreFoundation
 import Darwin
 
 private func interactionCount(_ name: String) {
@@ -458,7 +459,7 @@ private struct InteractionSongMenuFixture: View {
     @State private var queued = ""
 
     @State private var translation = false
-    @State private var switchToken: Int32 = 0
+    @State private var switchObserver = NSObject()
 
     private func playerLabel() -> Label<Text, Image> {
         var item = Label("显示翻译", systemImage: "character.book.closed")
@@ -476,18 +477,18 @@ private struct InteractionSongMenuFixture: View {
         // XCUI cannot tap a second control through a presented native menu.
         // Switch the system's actual track metadata only after the runner has
         // seen the menu action, then acknowledge the value read from the center.
-        var token: Int32 = 0
-        let result = notify_register_dispatch("org.codex.fmx.smoke.switch-player-menu-track", &token, .main) { _ in
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                        Unmanaged.passUnretained(switchObserver).toOpaque(), { _, _, _, _, _ in
             DispatchQueue.main.async {
                 let current = MPNowPlayingInfoCenter.default()
                 current.nowPlayingInfo = [MPMediaItemPropertyTitle: "Fixture B",
                                           MPNowPlayingInfoPropertyExternalContentIdentifier: "wy_b"]
                 if current.nowPlayingInfo?[MPNowPlayingInfoPropertyExternalContentIdentifier] as? String == "wy_b" {
-                    notify_post("org.codex.fmx.smoke.player-menu-track-switched")
+                    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                        CFNotificationName("org.codex.fmx.smoke.player-menu-track-switched" as CFString), nil, nil, true)
                 }
             }
-        }
-        if result == NOTIFY_STATUS_OK { switchToken = token }
+        }, "org.codex.fmx.smoke.switch-player-menu-track" as CFString, nil, .deliverImmediately)
     }
 
     private func label(for id: String) -> Label<Text, Image> {
@@ -536,7 +537,9 @@ private struct InteractionSongMenuFixture: View {
         }
         .onAppear { beginCurrentTrackFixture() }
         .onDisappear {
-            if switchToken != 0 { notify_cancel(switchToken); switchToken = 0 }
+            CFNotificationCenterRemoveObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                Unmanaged.passUnretained(switchObserver).toOpaque(),
+                CFNotificationName("org.codex.fmx.smoke.switch-player-menu-track" as CFString), nil)
             MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         }
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("FMX.songCache.testCompleted"))) { event in

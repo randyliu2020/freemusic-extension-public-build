@@ -1,6 +1,6 @@
 import XCTest
 import XCUIAutomation
-import Darwin
+import CoreFoundation
 
 /// A standalone XCTest runner controls ONLY the preinstalled self-authored
 /// org.codex.fmx.smoke app. It never installs or launches the user's IPA.
@@ -249,12 +249,19 @@ final class InteractionUITests: XCTestCase {
         // Synchronize on the application's own read-back of the new public
         // system metadata. Neither process can call the extension action here.
         let changed = expectation(description: "Application has switched to B with A's menu on screen")
-        var token: Int32 = 0
-        XCTAssertEqual(notify_register_dispatch("org.codex.fmx.smoke.player-menu-track-switched", &token, .main) { _ in
-            changed.fulfill()
-        }, UInt32(NOTIFY_STATUS_OK))
-        defer { notify_cancel(token) }
-        XCTAssertEqual(notify_post("org.codex.fmx.smoke.switch-player-menu-track"), UInt32(NOTIFY_STATUS_OK))
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        let reply = CFNotificationName("org.codex.fmx.smoke.player-menu-track-switched" as CFString)
+        let observed = Unmanaged.passRetained(changed)
+        CFNotificationCenterAddObserver(center, observed.toOpaque(), { _, context, _, _, _ in
+            guard let context else { return }
+            Unmanaged<XCTestExpectation>.fromOpaque(context).takeUnretainedValue().fulfill()
+        }, reply.rawValue, nil, .deliverImmediately)
+        defer {
+            CFNotificationCenterRemoveObserver(center, observed.toOpaque(), reply, nil)
+            observed.release()
+        }
+        CFNotificationCenterPostNotification(center,
+            CFNotificationName("org.codex.fmx.smoke.switch-player-menu-track" as CFString), nil, nil, true)
         wait(for: [changed], timeout: 8)
         XCTAssertTrue(clear.isHittable)
         clear.tap()
