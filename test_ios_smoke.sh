@@ -199,7 +199,7 @@ for name in ['FMTrackMetadata.m','FMTrackMetadata.h','FMJSDownloadCoordinator.m'
     manifest['source_sha256'][name]=hashlib.sha256((source/name).read_bytes()).hexdigest()
 for name in ['FMSettingsMigration.m','FMSettingsMigration.h','FMPlaybackSequence.m','FMPlaybackSequence.h','smoke/V8PlaybackSequenceTests.inc','smoke/V8SourceSelectionTests.inc','FMArtworkSelection.h','FMArtworkSelection.m','FMLXMCLocalStore.h','FMLXMCLocalStore.m','FMLXMCLocalProtocol.h','FMLXMCLocalProtocol.m','smoke/V8LXMCImportTests.inc']:
     manifest['source_sha256'][name]=hashlib.sha256((source/name).read_bytes()).hexdigest()
-for name in ["FMReplayCache.h", "FMReplayCache.m", "FMReplayMedia.h", "FMReplayMedia.m", "FMPlaylistEditor.h", "FMPlaylistEditor.m"]:
+for name in ["FMReplayCache.h", "FMReplayCache.m", "FMReplayMedia.h", "FMReplayMedia.m", "FMPlaylistEditor.h", "FMPlaylistEditor.m", "FMDownloadArtwork.h", "FMDownloadArtwork.m", "FMDownloadArtworkIntegration.h", "FMDownloadArtworkIntegration.m", "FMTrackCover.h"]:
     manifest["source_sha256"][name] = hashlib.sha256((source / name).read_bytes()).hexdigest()
 (out/'build.json').write_text(json.dumps(manifest,indent=2)+'\n')
 PY

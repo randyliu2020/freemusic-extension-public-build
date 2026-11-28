@@ -1,4 +1,5 @@
 #import "FMTrackMetadata.h"
+#import "FMTrackCover.h"
 #import <math.h>
 
 static NSMutableDictionary<NSString *,NSDictionary *> *FMTracks;
@@ -33,8 +34,9 @@ static NSDictionary *FMNormalize(NSDictionary *track,NSString *source,NSString *
     NSDictionary *meta=[track[@"meta"] isKindOfClass:NSDictionary.class]?track[@"meta"]:@{};
     NSArray *containers=@[track,meta];
     NSMutableDictionary *result=[@{@"source":source,@"songmid":identifier,@"id":identifier,@"name":@"",@"singer":@"",@"albumName":@"",@"albumId":@"",@"img":@"",@"interval":@"",@"typeUrl":@{},@"types":@[],@"_types":@{}} mutableCopy];
-    NSDictionary *fields=@{@"name":@[@"title",@"name"],@"singer":@[@"singer",@"artist"],@"albumName":@[@"albumName",@"album_name",@"album"],@"albumId":@[@"albumId",@"album_id"],@"albumMid":@[@"albumMid",@"album_mid"],@"strMediaMid":@[@"strMediaMid",@"media_mid"],@"songId":@[@"songId"],@"img":@[@"img",@"picUrl",@"pic",@"cover"],@"interval":@[@"interval"]};
-    for(NSString *key in fields){NSString *value=FMFirst(containers,fields[key],[key isEqual:@"img"]?4096:1024);if(value.length)result[key]=value;}
+    NSDictionary *fields=@{@"name":@[@"title",@"name"],@"singer":@[@"singer",@"artist"],@"albumName":@[@"albumName",@"album_name",@"album"],@"albumId":@[@"albumId",@"album_id"],@"albumMid":@[@"albumMid",@"album_mid"],@"strMediaMid":@[@"strMediaMid",@"media_mid"],@"songId":@[@"songId"],@"interval":@[@"interval"]};
+    for(NSString *key in fields){NSString *value=FMFirst(containers,fields[key],1024);if(value.length)result[key]=value;}
+    result[@"img"]=FMTrackCover(track,source,YES) ?: @"";
     if(![result[@"interval"] length]){id duration=track[@"duration"]?:meta[@"duration"];if([duration isKindOfClass:NSNumber.class]){double seconds=[duration doubleValue];if(isfinite(seconds)&&seconds>=0&&seconds<=604800){NSUInteger total=(NSUInteger)seconds;result[@"interval"]=[NSString stringWithFormat:@"%02lu:%02lu",(unsigned long)(total/60),(unsigned long)(total%60)];}}}
     if([source isEqual:@"tx"]){NSString *songID=FMFirst(@[meta],@[@"id"],128);if(songID.length)result[@"songId"]=songID;}
     if([source isEqual:@"kg"])result[@"hash"]=FMFirst(containers,@[@"hash"],128)?:identifier;
@@ -73,6 +75,17 @@ static NSDictionary *FMMergeObserved(NSDictionary *previous,NSDictionary *observ
     }
     return [merged copy];
 }
+static void FMRememberTrack(NSString *key, NSDictionary *fields) {
+    @synchronized(FMTrackLock) {
+        FMTracks[key]=FMMergeObserved(FMTracks[key],fields);
+        [FMTrackOrder removeObject:key];
+        [FMTrackOrder addObject:key];
+        while(FMTrackOrder.count>512){
+            [FMTracks removeObjectForKey:FMTrackOrder.firstObject];
+            [FMTrackOrder removeObjectAtIndex:0];
+        }
+    }
+}
 static void FMObserve(id node,NSUInteger depth,NSUInteger *budget) {
     if(!*budget||depth>6)return;--*budget;
     if([node isKindOfClass:NSArray.class]){for(id child in node){if(!*budget)break;FMObserve(child,depth+1,budget);}return;}
@@ -84,7 +97,7 @@ static void FMObserve(id node,NSUInteger depth,NSUInteger *budget) {
     NSString *name=FMFirst(@[node],@[@"title",@"name"],1024);
     if(source.length&&identifier.length&&name.length){
         NSString *key=[NSString stringWithFormat:@"%@:%@",source,identifier];NSDictionary *safe=FMNormalize(node,source,identifier);
-        @synchronized(FMTrackLock){FMTracks[key]=FMMergeObserved(FMTracks[key],safe);[FMTrackOrder removeObject:key];[FMTrackOrder addObject:key];while(FMTrackOrder.count>512){[FMTracks removeObjectForKey:FMTrackOrder.firstObject];[FMTrackOrder removeObjectAtIndex:0];}}
+        FMRememberTrack(key,safe);
     }
     for(NSString *key in @[@"data",@"list",@"tracks",@"songs",@"playlists",@"items",@"musicInfo"]){id child=node[key];if(child)FMObserve(child,depth+1,budget);}
 }
@@ -97,7 +110,12 @@ NSDictionary *FMTrackMetadataForParameters(NSDictionary *parameters,NSString *so
     @synchronized(FMTrackLock){cached=FMTracks[key];}
     NSMutableDictionary *merged=[cached mutableCopy]?:NSMutableDictionary.dictionary;
     // Only documented track fields are merged; src_cookie/src_api/auth never cross the bridge.
-    for(NSString *field in @[@"title",@"name",@"singer",@"artist",@"albumName",@"albumId",@"albumMid",@"strMediaMid",@"songId",@"img",@"interval"]){NSString *value=FMText(parameters[field],[field isEqual:@"img"]?4096:1024);if(value.length)merged[field]=value;}
+    for(NSString *field in @[@"title",@"name",@"singer",@"artist",@"albumName",@"albumId",@"albumMid",@"strMediaMid",@"songId",@"interval"]){NSString *value=FMText(parameters[field],1024);if(value.length)merged[field]=value;}
+    NSString *currentCover=FMTrackCover(parameters,platform,YES);
+    if(currentCover){
+        merged[@"img"]=currentCover;
+        FMRememberTrack(key,@{@"img":currentCover});
+    }
     NSString *currentSinger=FMFirst(@[parameters],@[@"singer",@"artist"],1024);
     if(currentSinger.length)merged[@"singer"]=currentSinger;
     return FMNormalize(merged,platform,identifier);

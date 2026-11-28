@@ -89,6 +89,10 @@ jobs:
           ./replay-media-tests v9-validation/replay-media-tests.json
           xcrun clang -fobjc-arc -fblocks -framework Foundation FMLXMC.m FMLXMCLocalStore.m FMPlaylistEditTests.m -lz -o playlist-edit-tests
           ./playlist-edit-tests v9-validation/playlist-edit-tests.json
+          xcrun clang -fobjc-arc -fblocks -framework Foundation -framework AVFoundation -framework CoreGraphics -framework ImageIO FMDownloadArtwork.m FMTrackMetadata.m FMDownloadArtworkTests.m -o download-artwork-tests
+          ./download-artwork-tests v9-validation/download-artwork-tests.json
+          xcrun clang -fobjc-arc -fblocks -framework Foundation -framework AVFoundation -framework CoreGraphics -framework ImageIO FMDownloadArtworkIntegration.m FMDownloadArtwork.m FMTrackMetadata.m FMDownloadArtworkIntegrationTests.m -o download-artwork-integration-tests
+          ./download-artwork-integration-tests v9-validation/download-artwork-integration-tests.json
 
       - name: Test request interception on macOS
         shell: bash
@@ -213,7 +217,7 @@ jobs:
       - name: Collect replay and playlist test results
         if: success()
         shell: bash
-        run: cp v9-validation/{replay-cache,replay-media,playlist-edit}-tests.json smoke-artifact/
+        run: cp v9-validation/{replay-cache,replay-media,playlist-edit,download-artwork,download-artwork-integration}-tests.json smoke-artifact/
 
       - name: Upload simulator validation evidence
         if: always()

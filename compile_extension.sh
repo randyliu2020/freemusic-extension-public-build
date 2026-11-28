@@ -19,7 +19,7 @@ elif [[ "$mode" != device ]]; then
   echo 'Unknown extension build mode' >&2
   exit 2
 fi
-sources=(FMExtension LXSourceRuntime FMExtensionProtocol FMLockScreen FMArtworkSelection FMSettingsEntry FMSearchPreferences FMSettingsMigration FMQishuiSearch FMListeningHistory FMInsights FMInteraction FMLXMC FMLXMCUI FMLXMCLocalStore FMLXMCLocalProtocol FMNavigation FMListeningCapture FMPlaybackCache FMReplayCache FMReplayMedia FMPlaylistEditor FMQualityResolver FMAdaptivePlayback FMPlaybackSequence FMPlaybackQualityDisplay FMTrackMetadata FMJSDownloadCoordinator FMDownloadIntegration)
+sources=(FMExtension LXSourceRuntime FMExtensionProtocol FMLockScreen FMArtworkSelection FMSettingsEntry FMSearchPreferences FMSettingsMigration FMQishuiSearch FMListeningHistory FMInsights FMInteraction FMLXMC FMLXMCUI FMLXMCLocalStore FMLXMCLocalProtocol FMNavigation FMListeningCapture FMPlaybackCache FMReplayCache FMReplayMedia FMPlaylistEditor FMDownloadArtwork FMDownloadArtworkIntegration FMQualityResolver FMAdaptivePlayback FMPlaybackSequence FMPlaybackQualityDisplay FMTrackMetadata FMJSDownloadCoordinator FMDownloadIntegration)
 objects=()
 for source in "${sources[@]}"; do
   object="$object_dir/$source.o"
@@ -41,4 +41,4 @@ xcrun --sdk "$sdk" swiftc -target "$target" -sdk "$sdk_path" \
   -framework Foundation -framework UIKit -framework JavaScriptCore \
   -framework UniformTypeIdentifiers -framework Security -framework MediaPlayer \
   -framework AVFoundation -framework CoreVideo -framework CoreMedia \
-  -framework CoreGraphics -framework Vision -framework AudioToolbox -lz -o "$output"
+  -framework CoreGraphics -framework ImageIO -framework Vision -framework AudioToolbox -lz -o "$output"

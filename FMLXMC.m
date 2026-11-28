@@ -1,4 +1,5 @@
 #import "FMLXMC.h"
+#import "FMTrackCover.h"
 #import <zlib.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import <CommonCrypto/CommonDigest.h>
@@ -104,13 +105,6 @@ static NSNumber *FMDuration(id interval) {
     for (NSString *part in parts) seconds = seconds * 60 + part.integerValue;
     return seconds <= 604800 ? @(seconds) : nil;
 }
-static NSString *FMCover(id value) {
-    NSString *text = FMString(value, 4096);
-    if (!text.length) return @"";
-    NSURLComponents *url = [NSURLComponents componentsWithString:text];
-    if (!url.host.length || url.user || url.password || ![@[@"http", @"https"] containsObject:url.scheme.lowercaseString]) return @"";
-    return url.URL ? text : @"";
-}
 static NSDictionary *FMTrack(id raw, BOOL modern, NSString **unsupported) {
     if (![raw isKindOfClass:NSDictionary.class]) return nil;
     NSDictionary *track = raw;
@@ -139,7 +133,7 @@ static NSDictionary *FMTrack(id raw, BOOL modern, NSString **unsupported) {
     NSString *album = FMString(modern ? meta[@"albumName"] : track[@"albumName"], 2048) ?: @"";
     NSString *server = [source isEqualToString:@"tx"] ? @"qq" : source;
     NSMutableDictionary *result = [@{@"id":identifier, @"title":title, @"server":server,
-        @"singer":singer, @"album":album, @"cover":FMCover(modern ? meta[@"picUrl"] : track[@"img"])} mutableCopy];
+        @"singer":singer, @"album":album, @"cover":FMTrackCover(track,source,NO) ?: @""} mutableCopy];
     NSNumber *duration = FMDuration(track[@"interval"]);
     if (duration) result[@"duration"] = duration;
     return [result copy];

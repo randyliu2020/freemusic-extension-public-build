@@ -36,11 +36,15 @@ static void RunSearchRankingTests(void) {
     SetCheckScope(@"ranking.semantic");
     NSDictionary *wrongArtist = SearchTrack(@"kg", @"other", @"知足", @"另一位歌手");
     NSDictionary *duet = SearchTrack(@"qq", @"duet", @"知足", @"于文文 / 胡彦斌");
-    NSDictionary *live = SearchTrack(@"wy", @"live", @"知足（Live版）", @"于文文 / 胡彦斌");
+    NSMutableDictionary *live = [SearchTrack(@"wy", @"live", @"知足（Live版）", @"于文文 / 胡彦斌") mutableCopy];
+    NSString *wyArtwork=@"https://p4.music.126.net/authored-live.jpg?param=500y500";
+    live[@"cover"]=wyArtwork;
     NSDictionary *unrelated = SearchTrack(@"wy", @"unrelated", @"远方", @"其他歌手");
     NSArray *sources = @[SearchResponse(@[wrongArtist, unrelated], 20), SearchResponse(@[live, duet], 30)];
     NSDictionary *result = FMXMergeSearchResponsesForKeyword(sources, 0, @"知足 于文文 胡彦斌");
-    Check([result[@"data"][0] isEqual:duet] && [result[@"data"][1] isEqual:live],
+    FMTrackMetadataObserveResponse(result);
+    NSDictionary *liveMetadata=FMTrackMetadataForParameters(@{@"id":@"live"},@"wy");
+    Check([result[@"data"][0] isEqual:duet] && [result[@"data"][1] isEqual:live] && [liveMetadata[@"img"] isEqual:wyArtwork],
           @"rank exact title with both named singers before the same-title other singer, retaining the live version");
     Check([FMXMergeSearchResponsesForKeyword(sources, 0, @"于文文 胡彦斌 知足")[@"data"][0] isEqual:duet],
           @"rank artist-before-title query as the same exact combination");
@@ -408,7 +412,7 @@ static void RunLXMCImportTests(void) {
         FMTrackMetadataObserveResponse(response);
     }];
     NSDictionary *fixture = @{@"type":@"playListPart_v2", @"data":@{@"id":@"fixture-only", @"name":@"Protocol Import Fixture", @"list":@[
-        @{@"source":@"wy", @"name":@"Authored One", @"singer":@"Fixture Artist", @"interval":@"01:23", @"meta":@{@"songId":@12345}},
+        @{@"source":@"wy", @"name":@"Authored One", @"singer":@"Fixture Artist", @"interval":@"01:23", @"meta":@{@"songId":@12345,@"picUrl":@"//p3.music.126.net/authored-import.jpg"}},
         @{@"source":@"tx", @"name":@"Authored Two", @"singer":@"Fixture Artist", @"interval":@"02:34", @"cookie":@"fixture-private-only", @"meta":@{@"songId":@"Ab0123456789Cd",@"id":@8765,@"albumMid":@"fixture-album-mid",@"strMediaMid":@"fixture-media-mid",@"_qualitys":@{@"flac":@{@"size":@123456,@"ext":@"flac",@"auth":@"fixture-private-quality"}}}}
     ]}};
     NSError *error = nil;
@@ -429,7 +433,10 @@ static void RunLXMCImportTests(void) {
         NSDictionary *first = Fetch(request);
         NSDictionary *firstJSON = [first[@"json"] isKindOfClass:NSDictionary.class] ? first[@"json"] : @{};
         NSDictionary *expected = @{@"code":@200, @"data":@{@"title":@"Protocol Import Fixture", @"tracks":document.playlists.firstObject.tracks}};
-        Check(first[@"error"] == NSNull.null && [first[@"status"] integerValue] == 200 && [firstJSON isEqual:expected],
+        NSString *importedArtwork=@"https://p3.music.126.net/authored-import.jpg";
+        NSDictionary *wyMetadata=FMTrackMetadataForParameters(@{@"id":@"12345"},@"wy");
+        Check(first[@"error"] == NSNull.null && [first[@"status"] integerValue] == 200 && [firstJSON isEqual:expected] &&
+              [firstJSON[@"data"][@"tracks"][0][@"cover"] isEqual:importedArtwork] && [wyMetadata[@"img"] isEqual:importedArtwork],
               @"NSURLSession streamed LX token returns the exact native import title and tracks envelope");
         Check(atomic_load(&originRequests) == beforeOrigin, @"Single-use LX token never reaches the local origin transport or network");
         NSDictionary *metadata=FMTrackMetadataForParameters(@{@"id":@"Ab0123456789Cd"},@"tx");

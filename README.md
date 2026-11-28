@@ -13,6 +13,11 @@ names, track ordering and removals are stored on the device. A deliberate
 downward drag in the lyrics can close the full player. Tapping a timed line
 continues to seek.
 
+Previously downloaded tracks with missing artwork can recover it from an
+embedded picture, known artwork, or public album metadata for the exact
+NetEase song ID. A recovered cover is kept in the native download assets
+directory for offline display after reopening the list or track.
+
 The extension places 音源与扩展 inside the verified original Settings page and
 removes the global floating source button. Home search aggregation combines
 NetEase, Kugou, QQ and Qishui, retaining each result's real platform and ID.

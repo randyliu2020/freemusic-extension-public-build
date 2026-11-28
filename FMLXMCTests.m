@@ -110,6 +110,12 @@ int main(int argc, const char *argv[]) {
         NSMutableDictionary *unsafeMeta = [unsafeCover[@"meta"] mutableCopy]; unsafeMeta[@"picUrl"] = @"file:///private/fixture.jpg"; unsafeCover[@"meta"] = unsafeMeta;
         FMLXMCPlaylist *safe = FMLXMCParseData(Part(@[unsafeCover]), &error).playlists.firstObject;
         Check([safe.tracks.firstObject[@"cover"] isEqual:@""], @"cover_local_path_is_not_exposed");
+        unsafeCover[@"al"]=@{@"picUrl":@"//p3.music.126.net/authored-v2.jpg"};
+        safe=FMLXMCParseData(Part(@[unsafeCover]),&error).playlists.firstObject;
+        Check([safe.tracks.firstObject[@"cover"] isEqual:@"https://p3.music.126.net/authored-v2.jpg"],@"missing_or_invalid_modern_cover_falls_back_to_album_url");
+        NSDictionary *oldCover=@{@"source":@"wy",@"songmid":@521,@"name":@"Legacy album cover",@"img":@21,@"picUrl":@"//p4.music.126.net/authored-v1.jpg"};
+        FMLXMCPlaylist *oldCoverList=FMLXMCParseData(JSON(@{@"type":@"playListPart",@"data":List(@"Old album cover",@[oldCover])}),&error).playlists.firstObject;
+        Check([oldCoverList.tracks.firstObject[@"cover"] isEqual:@"https://p4.music.126.net/authored-v1.jpg"],@"legacy_cover_alias_survives_native_playlist_conversion");
         Check(Invalid([NSData data], 1) && Invalid([@"garbage" dataUsingEncoding:NSUTF8StringEncoding], 5), @"empty_and_invalid_json_are_errors");
         Check(Invalid(JSON(@{@"type":@"allData_v2", @"playList":lists, @"settings":@{}}), 6), @"account_and_settings_backup_is_not_imported");
         Check(Invalid(JSON(@{@"type":@"playList_v2", @"data":@{}}), 7) && Invalid(JSON(@{@"type":@"playListPart_v2", @"data":List(@"", @[])}), 9), @"bad_structure_and_name_are_errors");

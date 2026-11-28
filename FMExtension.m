@@ -17,6 +17,7 @@
 #import "FMAdaptivePlayback.h"
 #import "FMTrackMetadata.h"
 #import "FMDownloadIntegration.h"
+#import "FMDownloadArtworkIntegration.h"
 #import "FMPlaybackSequence.h"
 #import "FMSettingsMigration.h"
 
@@ -351,6 +352,7 @@ __attribute__((constructor)) static void FMXInitialize(void) {
         FMAdaptivePlaybackInstall();
         FMPlaybackSequenceInstall();
         FMDownloadIntegrationInstall();
+        FMDownloadArtworkInstall();
         [FMExtensionProtocol setTrackMetadataObserver:^(id payload){FMTrackMetadataObserveResponse(payload);}];
         // Capture must install before the host registers its original AVPlayer
         // time observer. UI setup remains deferred to the main run loop below.
