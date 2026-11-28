@@ -113,7 +113,39 @@ private struct InteractionPlayerSwipeSurface: View {
         if left || originalDown { presentationMode.wrappedValue.dismiss() }
     }
 
+    // Drive the same exported observer as the app's native player body. The
+    // accessibility frames below are only for the UI test to place its finger.
     var body: some View {
+        typealias Attach = @convention(c) (UnsafeMutableRawPointer?) -> Void
+        var page = AnyView(surface)
+        if let address = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "FMXAttachLyricTextLayout") {
+            let attach = unsafeBitCast(address, to: Attach.self)
+            withUnsafeMutablePointer(to: &page) { attach(UnsafeMutableRawPointer($0)) }
+        }
+        return page
+    }
+
+    @ViewBuilder
+    private func lyric(_ index: Int) -> some View {
+        if index == 1 {
+            VStack(spacing: 2) {
+                HStack(spacing: 3) {
+                    ForEach(["逐", "字", "歌", "词"], id: \.self) { Text($0) }
+                }
+                Text("Here is the translation across this line")
+                    .font(.subheadline)
+                    .accessibilityIdentifier("smoke.interaction.lyric-translation.1")
+            }
+        } else {
+            Text(index.isMultiple(of: 3)
+                 ? "A long self-authored scrolling lyric that wraps across two lines \(index)"
+                 : "Lyric \(index)")
+                .multilineTextAlignment(.center)
+                .accessibilityIdentifier("smoke.interaction.lyric-text.\(index)")
+        }
+    }
+
+    private var surface: some View {
         VStack(spacing: 12) {
             HStack {
                 Image(systemName: "music.note")
@@ -135,11 +167,12 @@ private struct InteractionPlayerSwipeSurface: View {
             ScrollView {
                 VStack(spacing: 16) {
                     ForEach(0..<30, id: \.self) { index in
-                        Text(index.isMultiple(of: 3) ? "A long self-authored scrolling lyric that wraps across two lines \(index)" : "Lyric \(index)")
+                        lyric(index)
                             .frame(maxWidth: .infinity, minHeight: 36)
                             .padding(.horizontal, regularLyrics ? 32 : 24)
                             .contentShape(Rectangle())
                             .onTapGesture { selectedLine = index }
+                            .accessibilityElement(children: .contain)
                             .accessibilityIdentifier("smoke.interaction.scroll-lyric.\(index)")
                     }
                 }
@@ -365,3 +398,4 @@ public func interactionFixtureSnapshot(_ pointer: UnsafeMutableRawPointer) -> Un
         "expandCount": defaults.integer(forKey: "smoke.interaction.expand-count")]
     return Unmanaged.passRetained(snapshot).toOpaque()
 }
+

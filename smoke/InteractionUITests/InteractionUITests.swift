@@ -99,7 +99,7 @@ final class InteractionUITests: XCTestCase {
         XCTAssertTrue(visible.exists)
         let lyrics = app.scrollViews["smoke.interaction.player-lyrics"]
         XCTAssertTrue(lyrics.exists)
-        let firstLine = app.staticTexts["smoke.interaction.scroll-lyric.0"]
+        let firstLine = app.descendants(matching: .any).matching(identifier: "smoke.interaction.scroll-lyric.0").firstMatch
         XCTAssertTrue(firstLine.isHittable)
         lyrics.swipeUp()
         XCTAssertTrue(visible.exists)
@@ -135,15 +135,54 @@ final class InteractionUITests: XCTestCase {
         XCTAssertTrue(visible.waitForExistence(timeout: 5))
         firstLine.tap()
         XCTAssertEqual(visible.label, "Selected lyric 0")
+        // Both horizontal test positions are farther from the viewport edge
+        // than the old 24/32-point gutters. Long and short lyrics share these x values.
+        // X uses the visible scroll viewport; y uses the displayed text element.
+        func lyricText(_ index: Int) -> XCUIElement {
+            app.descendants(matching: .any).matching(identifier: "smoke.interaction.lyric-text.\(index)").firstMatch
+        }
+        func insetX(right: Bool) -> CGFloat {
+            let bounds = lyrics.frame
+            let inset = max(64, bounds.width * 0.26)
+            XCTAssertGreaterThan(inset, 32)
+            return right ? bounds.maxX - inset : bounds.minX + inset
+        }
+        func point(_ x: CGFloat, _ y: CGFloat) -> XCUICoordinate {
+            let viewport = lyrics.frame
+            return lyrics.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: x - viewport.minX,
+                                                                                    dy: y - viewport.minY))
+        }
+        func firstTextLineY(_ element: XCUIElement) -> CGFloat {
+            let rect = element.frame
+            // Long lyric fixtures start with a filled visual line, followed by
+            // a wrap. The AX bounding box alone cannot describe the second line.
+            return rect.minY + min(12, rect.height / 2)
+        }
+        func assertLongTextContains(_ x: CGFloat, _ element: XCUIElement) {
+            XCTAssertTrue(element.waitForExistence(timeout: 5))
+            XCTAssertGreaterThan(x, element.frame.minX + 5)
+            XCTAssertLessThan(x, element.frame.maxX - 5)
+        }
         // Start on a short line, then on a wrapped lyric. Large downward text
         // drags must deliver real scrolling too, including at the top boundary.
-        let short = app.staticTexts["smoke.interaction.scroll-lyric.2"]
+        let short = app.descendants(matching: .any).matching(identifier: "smoke.interaction.scroll-lyric.2").firstMatch
         let shortStart = short.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
         shortStart.press(forDuration: 0.05, thenDragTo: shortStart.withOffset(CGVector(dx: 0, dy: 160)))
         XCTAssertTrue(visible.exists)
-        let wrappedStart = firstLine.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-        wrappedStart.press(forDuration: 0.05, thenDragTo: wrappedStart.withOffset(CGVector(dx: 8, dy: 180)))
-        XCTAssertTrue(visible.exists)
+        let firstText = lyricText(0)
+        let rightX = insetX(right: true)
+        assertLongTextContains(rightX, firstText)
+        let wrappedStart = point(rightX, firstTextLineY(firstText))
+        let rightEdge = lyrics.frame.maxX - 12
+        let fall = max(185, 2 * (rightEdge - rightX) + 12)
+        wrappedStart.press(forDuration: 0.05, thenDragTo: point(rightEdge, firstTextLineY(firstText) + fall))
+        XCTAssertTrue(visible.exists, "A gesture beginning on the long lyric stays in the player even when it ends in a gutter")
+        let translation = app.descendants(matching: .any).matching(identifier: "smoke.interaction.lyric-translation.1").firstMatch
+        let translationX = insetX(right: false)
+        assertLongTextContains(translationX, translation)
+        let translatedStart = point(translationX, firstTextLineY(translation))
+        translatedStart.press(forDuration: 0.05, thenDragTo: translatedStart.withOffset(CGVector(dx: 0, dy: 175)))
+        XCTAssertTrue(visible.exists, "Text in the translation below a shorter lyric is also a scrolling surface")
         let middle = lyrics.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.82))
         middle.press(forDuration: 0.05, thenDragTo: middle.withOffset(CGVector(dx: 0, dy: -155)))
         XCTAssertFalse(firstLine.isHittable)
@@ -173,5 +212,47 @@ final class InteractionUITests: XCTestCase {
             if !right { open.tap(); XCTAssertTrue(visible.waitForExistence(timeout: 5)) }
         }
         record("both lyric gutters return to the library with the same audio still playing", app: app)
+
+        // A control from the exact same x inside a long lyric must actually
+        // move the scroll content. A player that just ignores all drags fails.
+        open.tap()
+        XCTAssertTrue(visible.waitForExistence(timeout: 5))
+        let moveUp = lyrics.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.86))
+        moveUp.press(forDuration: 0.05, thenDragTo: moveUp.withOffset(CGVector(dx: 0, dy: -117)),
+                     withVelocity: .slow, thenHoldForDuration: 0.25)
+        let thirdText = lyricText(3)
+        let leftX = insetX(right: false)
+        assertLongTextContains(leftX, thirdText)
+        let beforeY = firstTextLineY(thirdText)
+        XCTAssertTrue(lyrics.frame.insetBy(dx: 0, dy: 2).contains(CGPoint(x: leftX, y: beforeY)))
+        let fromLong = point(leftX, beforeY)
+        fromLong.press(forDuration: 0.05, thenDragTo: fromLong.withOffset(CGVector(dx: 0, dy: 180)),
+                       withVelocity: .slow, thenHoldForDuration: 0.25)
+        XCTAssertTrue(visible.exists, "A start on long text scrolls at the short lyric's left-side x")
+        XCTAssertGreaterThan(firstTextLineY(thirdText) - beforeY, 24, "The actual lyric moved down")
+
+        // The short intrinsic Text is a separate accessibility element from
+        // its full-width tappable row. Check the two starts against the actual
+        // short text bounds without consulting the implementation's classifier.
+        for (index, right) in [false, true].enumerated() {
+            if right { open.tap(); XCTAssertTrue(visible.waitForExistence(timeout: 5)) }
+            let text = lyricText(2)
+            XCTAssertTrue(text.waitForExistence(timeout: 5))
+            let x = insetX(right: right)
+            let rect = text.frame
+            XCTAssertGreaterThan(right ? x - rect.maxX : rect.minX - x, 8, "Start is genuinely beside this short line")
+            XCTAssertGreaterThan(min(x - lyrics.frame.minX, lyrics.frame.maxX - x), 32, "Start is outside both fixed gutters")
+            XCTAssertTrue(lyrics.frame.contains(CGPoint(x: x, y: rect.midY)))
+            let down = max(185, 2 * abs(rect.midX - x) + 15)
+            let start = point(x, rect.midY)
+            start.press(forDuration: 0.05, thenDragTo: point(rect.midX, rect.midY + down))
+            XCTAssertTrue(open.waitForExistence(timeout: 5), "Start beside the short lyric, move toward the text, and return")
+            let closed = app.staticTexts["smoke.interaction.player-close-count"]
+            expectation(for: NSPredicate(format: "label == %@", "Closed: \(5 + index)"), evaluatedWith: closed)
+            waitForExpectations(timeout: 5)
+            XCTAssertEqual(app.staticTexts["smoke.interaction.player-binding"].label, "Player binding: false")
+            XCTAssertEqual(app.staticTexts["smoke.interaction.audio-state"].label, "Playing; starts=1")
+        }
+        record("inside both short-line margins returns; identical x on long text scrolls; audio keeps playing", app: app)
     }
 }

@@ -61,6 +61,80 @@ def execute(dx, dy, patched):
 
 
 class PlayerSwipe(unittest.TestCase):
+    def test_original_player_presentation_keeps_plain_and_zoom_content_ownership(self):
+        ks = Ks(KS_ARCH_ARM64, KS_MODE_LITTLE_ENDIAN)
+        self.assertEqual(bytes(ks.asm(p.LAYOUT_ASSEMBLY, p.ZOOM_LAYOUT_CAVE)[0]), p.LAYOUT_CODE)
+        for zoom in (False, True):
+            for available in (False, True):
+                with self.subTest(zoom=zoom, layout_helper=available):
+                    base = p.BASE + 0x2000000
+                    vm = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
+                    vm.mem_map(base, 0x600000)
+                    vm.mem_map(0x200000, 0x10000)
+                    copy, attach = base + 0x54E000, base + 0x54E004
+                    result, content, content_type, witness = 0x202000, 0x203000, 0x204000, 0xABCDEF
+                    input_value, erased, annotated = 0xCCFF0010, 0xCCDDAA10, 0xDDEE0020
+                    store = lambda addr, value: vm.mem_write(addr, struct.pack('<Q', value))
+                    read = lambda addr: struct.unpack('<Q', vm.mem_read(addr, 8))[0]
+                    store(content, input_value)
+                    store(base + 0x535c80, witness)
+                    vm.mem_write(base + p.ZOOM_LAYOUT_CAVE, p.LAYOUT_CODE + p.LAYOUT_SYMBOL)
+                    site = p.ZOOM_LAYOUT_SITE if zoom else p.PLAIN_LAYOUT_SITE
+                    cave = p.ZOOM_LAYOUT_CAVE if zoom else p.PLAIN_LAYOUT_CAVE
+                    vm.mem_write(base + site, p.branch(site, cave))
+                    state = {r.UC_ARM64_REG_X0: result, r.UC_ARM64_REG_X1: content, r.UC_ARM64_REG_X2: content_type,
+                             r.UC_ARM64_REG_X8:copy, r.UC_ARM64_REG_X19: result, r.UC_ARM64_REG_X20: erased if zoom else content,
+                             r.UC_ARM64_REG_SP:0x20e000, r.UC_ARM64_REG_FP:0x20e0a0}
+                    for reg, value in state.items(): vm.reg_write(reg, value)
+                    events = []
+                    def hook(machine, address, size, data):
+                        reg = machine.reg_read
+                        x0 = reg(r.UC_ARM64_REG_X0)
+                        if address == copy:
+                            self.assertFalse(zoom)
+                            self.assertEqual((x0,reg(r.UC_ARM64_REG_X1),reg(r.UC_ARM64_REG_X2)), (result,content,content_type))
+                            store(x0, read(content))
+                            events.append('copy')
+                        elif address == base + 0x40821c:
+                            self.assertEqual(bytes(machine.mem_read(reg(r.UC_ARM64_REG_X1),len(p.LAYOUT_SYMBOL))),p.LAYOUT_SYMBOL)
+                            machine.reg_write(r.UC_ARM64_REG_X0, attach if available else 0)
+                            events.append('lookup')
+                        elif address == base + 0xed80:
+                            self.assertEqual((x0,reg(r.UC_ARM64_REG_X1),reg(r.UC_ARM64_REG_X2),reg(r.UC_ARM64_REG_X3)),
+                                             (base+0x54f6f8,base+0x54f6e0,base+0x419cd8,witness))
+                            machine.reg_write(r.UC_ARM64_REG_X0,witness)
+                        elif address == base + 0x406500:
+                            self.assertEqual((x0,reg(r.UC_ARM64_REG_X1),reg(r.UC_ARM64_REG_X2)),(result,content_type,witness))
+                            self.assertEqual(read(x0),input_value)
+                            store(x0, 0)  # Generic AnyView.init consumes just the copied argument.
+                            machine.reg_write(r.UC_ARM64_REG_X0,erased)
+                            events.append('erase')
+                        elif address == attach:
+                            self.assertEqual((x0,read(x0)),(result,erased))
+                            store(x0,annotated)
+                            events.append('observe')
+                        elif address in (base+0x9e240,base+0x9e030):
+                            events.append('any-case' if address==base+0x9e240 else 'plain-case')
+                            machine.emu_stop()
+                            return
+                        else:
+                            return
+                        machine.reg_write(r.UC_ARM64_REG_PC, reg(r.UC_ARM64_REG_LR))
+                    vm.hook_add(UC_HOOK_CODE,hook)
+                    vm.emu_start(base+site, base+0x600000, count=120)
+                    expected = [] if zoom else ['copy']
+                    expected.append('lookup')
+                    if available:
+                        if not zoom: expected.append('erase')
+                        expected.append('observe')
+                    expected.append('any-case' if zoom or available else 'plain-case')
+                    self.assertEqual(events,expected)
+                    self.assertEqual(read(content),input_value)
+                    self.assertEqual(read(result),annotated if available else erased if zoom else input_value)
+                    self.assertEqual(vm.reg_read(r.UC_ARM64_REG_SP),state[r.UC_ARM64_REG_SP])
+                    if not zoom and available:
+                        self.assertEqual(read(state[r.UC_ARM64_REG_FP]-0x78),state[r.UC_ARM64_REG_SP])
+
     def test_lyric_drag_calls_original_once_and_closes_only_matching_full_player(self):
         ks=Ks(KS_ARCH_ARM64,KS_MODE_LITTLE_ENDIAN)
         self.assertEqual(bytes(ks.asm(p.LYRIC_END_ASSEMBLY,p.LYRIC_END_CAVE)[0]),bytes.fromhex(p.LYRIC_END_HEX))
@@ -165,13 +239,13 @@ class PlayerSwipe(unittest.TestCase):
         self.assertEqual(value,b'0000BBBBDDDD')
         with self.assertRaises(p.InteractionPatchError): p.apply_verified_plan(value,[a])
 
-    def test_local_original_exact_fingerprint_and_only_four_ranges(self):
+    def test_local_original_exact_fingerprint_and_only_six_ranges(self):
         original=ROOT.parent/'private'/'429.bin'
         if not original.exists(): self.skipTest('Original remains local; never upload to CI')
         data=original.read_bytes(); output,report=p.patch_binary(data)
         self.assertEqual(len(output),len(data))
         changes=p.patch_plan(data)
-        self.assertEqual(len(changes),4)
+        self.assertEqual(len(changes),6)
         allowed={i for c in changes for i in range(c.offset,c.offset+len(c.after))}
         self.assertTrue(all(a==b or i in allowed for i,(a,b) in enumerate(zip(data,output))))
         self.assertEqual(output[p.NATIVE_DISMISS:p.NATIVE_DISMISS+len(bytes.fromhex(p.NATIVE_DISMISS_HEX))],bytes.fromhex(p.NATIVE_DISMISS_HEX))

@@ -1,4 +1,4 @@
-# FreeMusic 4.2.9 extension — v8 search, playback and local playlist reliability
+# FreeMusic 4.2.9 extension — playback, downloads and library
 
 Source-only build for a user-authorized modification of FreeMusic-Folia 4.2.9, build 4381.
 This repository does not contain the original application, signing identities,
@@ -9,14 +9,16 @@ or a previously resolved address for the same source, platform, track and
 quality. After an address fails, the player retries the resolver. Changing the
 selected script starts a new cache generation. Local Downloads is the first
 Library row, followed by Recent Plays. Library playlist ordering,
-names, track ordering and removals are stored on the device. Swiping over the
-lyrics scrolls the lines. A downward drag from a blank side margin collapses
-the player. Tapping a timed line continues to seek.
+names, track ordering and removals are stored on the device. Dragging up or down on a lyric scrolls the lines. A downward drag starting
+beside the visible words collapses the player while audio continues. When
+line positions are unavailable, either outer margin supports the same gesture.
+Tapping a timed line seeks to its start.
 
 Previously downloaded tracks with missing artwork can recover it from an
 embedded picture, known artwork, or public album metadata for the exact
-NetEase song ID. A recovered cover is kept in the native download assets
-directory for offline display after reopening the list or track.
+NetEase song ID. Repairs respect the app’s three native artwork locations and
+refresh the matching row in Local Downloads. The source settings show how many
+NetEase downloads have a usable cover, are still pending, or need attention.
 
 The extension places 音源与扩展 inside the verified original Settings page and
 removes the global floating source button. Home search aggregation combines
